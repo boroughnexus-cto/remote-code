@@ -131,6 +131,10 @@ func loadUserCredentials(ctx context.Context, rpID string) (*WebAuthnUser, error
 			PublicKey:       c.PublicKey,
 			AttestationType: c.AttestationType,
 			Transport:       transports,
+			Flags: webauthn.CredentialFlags{
+				BackupEligible: c.BackupEligible != 0,
+				BackupState:    c.BackupState != 0,
+			},
 			Authenticator: webauthn.Authenticator{
 				AAGUID:    c.Aaguid,
 				SignCount: uint32(c.SignCount),
@@ -139,6 +143,14 @@ func loadUserCredentials(ctx context.Context, rpID string) (*WebAuthnUser, error
 	}
 
 	return user, nil
+}
+
+// boolToInt64 converts a boolean to int64 for database storage
+func boolToInt64(b bool) int64 {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 // generateSessionToken creates a cryptographically secure session token
@@ -341,8 +353,10 @@ func handleRegisterFinish(w http.ResponseWriter, r *http.Request, ctx context.Co
 			String: strings.Join(transports, ","),
 			Valid:  len(transports) > 0,
 		},
-		Aaguid:    credential.Authenticator.AAGUID,
-		SignCount: int64(credential.Authenticator.SignCount),
+		Aaguid:         credential.Authenticator.AAGUID,
+		SignCount:      int64(credential.Authenticator.SignCount),
+		BackupEligible: boolToInt64(credential.Flags.BackupEligible),
+		BackupState:    boolToInt64(credential.Flags.BackupState),
 	})
 
 	if err != nil {

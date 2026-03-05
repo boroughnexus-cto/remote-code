@@ -2606,6 +2606,49 @@ func handleAcceptTaskExecution(w http.ResponseWriter, r *http.Request, ctx conte
 }
 
 func handleBaseDirectoriesAPI(w http.ResponseWriter, r *http.Request, ctx context.Context, pathParts []string) {
+	// Handle sub-resources first (before method switch) to allow POST/DELETE to reach handlers
+	if len(pathParts) > 1 {
+		id, err := strconv.ParseInt(pathParts[0], 10, 64)
+		if err != nil {
+			http.Error(w, "Invalid directory ID", http.StatusBadRequest)
+			return
+		}
+
+		dir, err := queries.GetBaseDirectory(ctx, id)
+		if err != nil {
+			http.Error(w, "Base directory not found", http.StatusNotFound)
+			return
+		}
+
+		// Handle dev-server sub-resource (supports GET, POST, DELETE)
+		if pathParts[1] == "dev-server" {
+			handleDirectoryDevServerSubResource(w, r, ctx, dir)
+			return
+		}
+
+		// Handle tasks sub-resource (GET only)
+		if pathParts[1] == "tasks" {
+			if r.Method != "GET" {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			tasks, err := queries.GetTasksByBaseDirectoryID(ctx, dir.BaseDirectoryID)
+			if err != nil {
+				http.Error(w, "Failed to get tasks", http.StatusInternalServerError)
+				return
+			}
+			if tasks == nil {
+				tasks = []db.Task{}
+			}
+			json.NewEncoder(w).Encode(tasks)
+			return
+		}
+
+		http.Error(w, "Unknown sub-resource", http.StatusNotFound)
+		return
+	}
+
+	// Handle direct base-directory operations
 	switch r.Method {
 	case "GET":
 		if len(pathParts) == 0 {
@@ -2652,27 +2695,6 @@ func handleBaseDirectoriesAPI(w http.ResponseWriter, r *http.Request, ctx contex
 		dir, err := queries.GetBaseDirectory(ctx, id)
 		if err != nil {
 			http.Error(w, "Base directory not found", http.StatusNotFound)
-			return
-		}
-
-		// Check for sub-resource requests
-		if len(pathParts) > 1 && pathParts[1] == "tasks" {
-			// GET /api/base-directories/{id}/tasks
-			tasks, err := queries.GetTasksByBaseDirectoryID(ctx, dir.BaseDirectoryID)
-			if err != nil {
-				http.Error(w, "Failed to get tasks", http.StatusInternalServerError)
-				return
-			}
-			if tasks == nil {
-				tasks = []db.Task{}
-			}
-			json.NewEncoder(w).Encode(tasks)
-			return
-		}
-
-		// Handle dev-server sub-resource
-		if len(pathParts) > 1 && pathParts[1] == "dev-server" {
-			handleDirectoryDevServerSubResource(w, r, ctx, dir)
 			return
 		}
 

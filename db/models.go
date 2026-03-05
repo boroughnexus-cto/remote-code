@@ -164,4 +164,6 @@ type WebauthnCredential struct {
 	Aaguid          []byte         `db:"aaguid" json:"aaguid"`
 	SignCount       int64          `db:"sign_count" json:"sign_count"`
 	CreatedAt       sql.NullTime   `db:"created_at" json:"created_at"`
+	BackupEligible  int64          `db:"backup_eligible" json:"backup_eligible"`
+	BackupState     int64          `db:"backup_state" json:"backup_state"`
 }

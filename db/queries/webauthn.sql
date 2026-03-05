@@ -1,6 +1,6 @@
 -- name: CreateWebAuthnCredential :one
-INSERT INTO webauthn_credentials (id, rp_id, public_key, attestation_type, transport, aaguid, sign_count)
-VALUES (?, ?, ?, ?, ?, ?, ?)
+INSERT INTO webauthn_credentials (id, rp_id, public_key, attestation_type, transport, aaguid, sign_count, backup_eligible, backup_state)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 RETURNING *;
 
 -- name: GetWebAuthnCredential :one

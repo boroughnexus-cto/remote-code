@@ -53,9 +53,9 @@ func (q *Queries) CreateSession(ctx context.Context, arg CreateSessionParams) (S
 }
 
 const createWebAuthnCredential = `-- name: CreateWebAuthnCredential :one
-INSERT INTO webauthn_credentials (id, rp_id, public_key, attestation_type, transport, aaguid, sign_count)
-VALUES (?, ?, ?, ?, ?, ?, ?)
-RETURNING id, rp_id, public_key, attestation_type, transport, aaguid, sign_count, created_at
+INSERT INTO webauthn_credentials (id, rp_id, public_key, attestation_type, transport, aaguid, sign_count, backup_eligible, backup_state)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+RETURNING id, rp_id, public_key, attestation_type, transport, aaguid, sign_count, created_at, backup_eligible, backup_state
 `
 
 type CreateWebAuthnCredentialParams struct {
@@ -66,6 +66,8 @@ type CreateWebAuthnCredentialParams struct {
 	Transport       sql.NullString `db:"transport" json:"transport"`
 	Aaguid          []byte         `db:"aaguid" json:"aaguid"`
 	SignCount       int64          `db:"sign_count" json:"sign_count"`
+	BackupEligible  int64          `db:"backup_eligible" json:"backup_eligible"`
+	BackupState     int64          `db:"backup_state" json:"backup_state"`
 }
 
 func (q *Queries) CreateWebAuthnCredential(ctx context.Context, arg CreateWebAuthnCredentialParams) (WebauthnCredential, error) {
@@ -77,6 +79,8 @@ func (q *Queries) CreateWebAuthnCredential(ctx context.Context, arg CreateWebAut
 		arg.Transport,
 		arg.Aaguid,
 		arg.SignCount,
+		arg.BackupEligible,
+		arg.BackupState,
 	)
 	var i WebauthnCredential
 	err := row.Scan(
@@ -88,6 +92,8 @@ func (q *Queries) CreateWebAuthnCredential(ctx context.Context, arg CreateWebAut
 		&i.Aaguid,
 		&i.SignCount,
 		&i.CreatedAt,
+		&i.BackupEligible,
+		&i.BackupState,
 	)
 	return i, err
 }
@@ -132,7 +138,7 @@ func (q *Queries) GetSession(ctx context.Context, token string) (Session, error)
 }
 
 const getWebAuthnCredential = `-- name: GetWebAuthnCredential :one
-SELECT id, rp_id, public_key, attestation_type, transport, aaguid, sign_count, created_at FROM webauthn_credentials
+SELECT id, rp_id, public_key, attestation_type, transport, aaguid, sign_count, created_at, backup_eligible, backup_state FROM webauthn_credentials
 WHERE id = ?
 `
 
@@ -148,12 +154,14 @@ func (q *Queries) GetWebAuthnCredential(ctx context.Context, id string) (Webauth
 		&i.Aaguid,
 		&i.SignCount,
 		&i.CreatedAt,
+		&i.BackupEligible,
+		&i.BackupState,
 	)
 	return i, err
 }
 
 const listWebAuthnCredentials = `-- name: ListWebAuthnCredentials :many
-SELECT id, rp_id, public_key, attestation_type, transport, aaguid, sign_count, created_at FROM webauthn_credentials
+SELECT id, rp_id, public_key, attestation_type, transport, aaguid, sign_count, created_at, backup_eligible, backup_state FROM webauthn_credentials
 ORDER BY created_at
 `
 
@@ -175,6 +183,8 @@ func (q *Queries) ListWebAuthnCredentials(ctx context.Context) ([]WebauthnCreden
 			&i.Aaguid,
 			&i.SignCount,
 			&i.CreatedAt,
+			&i.BackupEligible,
+			&i.BackupState,
 		); err != nil {
 			return nil, err
 		}
@@ -190,7 +200,7 @@ func (q *Queries) ListWebAuthnCredentials(ctx context.Context) ([]WebauthnCreden
 }
 
 const listWebAuthnCredentialsByRpID = `-- name: ListWebAuthnCredentialsByRpID :many
-SELECT id, rp_id, public_key, attestation_type, transport, aaguid, sign_count, created_at FROM webauthn_credentials
+SELECT id, rp_id, public_key, attestation_type, transport, aaguid, sign_count, created_at, backup_eligible, backup_state FROM webauthn_credentials
 WHERE rp_id = ?
 ORDER BY created_at
 `
@@ -213,6 +223,8 @@ func (q *Queries) ListWebAuthnCredentialsByRpID(ctx context.Context, rpID string
 			&i.Aaguid,
 			&i.SignCount,
 			&i.CreatedAt,
+			&i.BackupEligible,
+			&i.BackupState,
 		); err != nil {
 			return nil, err
 		}
