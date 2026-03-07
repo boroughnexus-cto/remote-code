@@ -29,6 +29,7 @@
 	// Use $derived so navItems updates when stats changes
 	let navItems = $derived([
 		{ label: 'Dashboard', href: '/', icon: 'dashboard' },
+		{ label: 'Kanban', href: '/kanban', icon: 'kanban' },
 		{ label: 'Terminal', href: '/terminal', icon: 'terminal', badge: stats?.active_sessions || undefined },
 		{ label: 'Projects', href: '/projects', icon: 'projects', badge: stats?.projects || undefined },
 		{ label: 'Task Executions', href: '/task-executions', icon: 'tasks', badge: stats?.task_executions || undefined },

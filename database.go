@@ -119,6 +119,7 @@ func applyMigrations(database *sql.DB) error {
 		"db/migrations/006_webauthn_add_rp_id.sql",
 		"db/migrations/007_directory_dev_servers.sql",
 		"db/migrations/008_webauthn_backup_flags.sql",
+		"db/migrations/009_execution_milestones.sql",
 	}
 
 	for _, migrationPath := range migrations {

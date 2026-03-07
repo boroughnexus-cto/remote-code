@@ -2015,6 +2015,77 @@ func handleTaskExecutionsAPI(w http.ResponseWriter, r *http.Request, ctx context
 		return
 	}
 
+	// Handle sub-endpoints like /api/task-executions/{id}/milestones
+	if len(pathParts) >= 2 && pathParts[1] == "milestones" {
+		executionID, err := strconv.ParseInt(pathParts[0], 10, 64)
+		if err != nil {
+			http.Error(w, "Invalid execution ID", http.StatusBadRequest)
+			return
+		}
+
+		queries := db.New(database)
+
+		switch r.Method {
+		case "POST":
+			// Accept milestones from external systems (MCP server)
+			var req struct {
+				Milestones []string `json:"milestones"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, "Invalid JSON", http.StatusBadRequest)
+				return
+			}
+
+			// Deduplicate against existing milestones
+			existing, err := queries.GetRecentMilestoneTexts(ctx, executionID)
+			if err != nil {
+				log.Printf("Failed to get existing milestones: %v", err)
+				existing = []string{}
+			}
+			existingSet := make(map[string]bool)
+			for _, t := range existing {
+				existingSet[t] = true
+			}
+
+			created := 0
+			for _, text := range req.Milestones {
+				if text == "" || existingSet[text] {
+					continue
+				}
+				_, err := queries.CreateExecutionMilestone(ctx, db.CreateExecutionMilestoneParams{
+					ExecutionID: executionID,
+					Text:        text,
+				})
+				if err != nil {
+					log.Printf("Failed to create milestone: %v", err)
+					continue
+				}
+				created++
+			}
+
+			w.WriteHeader(http.StatusNoContent)
+			return
+
+		case "GET":
+			// Get milestones for an execution
+			milestones, err := queries.ListMilestonesByExecutionID(ctx, executionID)
+			if err != nil {
+				log.Printf("Failed to list milestones: %v", err)
+				http.Error(w, "Failed to list milestones", http.StatusInternalServerError)
+				return
+			}
+			if milestones == nil {
+				milestones = []db.ExecutionMilestone{}
+			}
+			json.NewEncoder(w).Encode(milestones)
+			return
+
+		default:
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+	}
+
 	// Handle sub-endpoints like /api/task-executions/{id}/dev-server
 	if len(pathParts) >= 2 && pathParts[1] == "dev-server" {
 		executionID, err := strconv.ParseInt(pathParts[0], 10, 64)
@@ -2175,7 +2246,28 @@ func handleTaskExecutionsAPI(w http.ResponseWriter, r *http.Request, ctx context
 			}
 		}
 
-		json.NewEncoder(w).Encode(executions)
+		// If ?include_milestones=true, enrich each execution with its milestones
+		if r.URL.Query().Get("include_milestones") == "true" {
+			type ExecutionWithMilestones struct {
+				db.ListTaskExecutionsRow
+				Milestones []db.ExecutionMilestone `json:"milestones"`
+			}
+			enriched := make([]ExecutionWithMilestones, len(executions))
+			for i, ex := range executions {
+				enriched[i].ListTaskExecutionsRow = ex
+				milestones, err := queries.ListMilestonesByExecutionID(ctx, ex.ID)
+				if err != nil {
+					milestones = []db.ExecutionMilestone{}
+				}
+				if milestones == nil {
+					milestones = []db.ExecutionMilestone{}
+				}
+				enriched[i].Milestones = milestones
+			}
+			json.NewEncoder(w).Encode(enriched)
+		} else {
+			json.NewEncoder(w).Encode(executions)
+		}
 
 	case "POST":
 		// Create and start a new task execution

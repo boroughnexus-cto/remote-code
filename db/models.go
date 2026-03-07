@@ -155,6 +155,13 @@ type TaskExecution struct {
 	UpdatedAt       sql.NullTime   `db:"updated_at" json:"updated_at"`
 }
 
+type ExecutionMilestone struct {
+	ID          int64        `db:"id" json:"id"`
+	ExecutionID int64        `db:"execution_id" json:"execution_id"`
+	Text        string       `db:"text" json:"text"`
+	CreatedAt   sql.NullTime `db:"created_at" json:"created_at"`
+}
+
 type WebauthnCredential struct {
 	ID              string         `db:"id" json:"id"`
 	RpID            string         `db:"rp_id" json:"rp_id"`
