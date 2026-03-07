@@ -50,10 +50,16 @@
 		if (status) {
 			isAuthenticated = status.authenticated;
 
-			// If not authenticated, redirect to login page (for both setup and login)
-			if (!status.authenticated && !isLoginPage) {
+			// If credentials are registered but user is not authenticated, redirect to login
+			// If no credentials registered, skip auth entirely (open access)
+			if (status.hasCredentials && !status.authenticated && !isLoginPage) {
 				goto('/login');
 				return;
+			}
+
+			// Treat "no credentials" as authenticated (auth not configured)
+			if (!status.hasCredentials) {
+				isAuthenticated = true;
 			}
 		}
 
@@ -68,10 +74,10 @@
 	// React to auth store changes
 	$effect(() => {
 		const unsubscribe = auth.subscribe((state) => {
-			isAuthenticated = state.authenticated;
+			isAuthenticated = state.authenticated || !state.hasCredentials;
 
-			// Redirect to login if authentication is lost (except on login page)
-			if (authChecked && !state.loading && !state.authenticated && !isLoginPage) {
+			// Redirect to login if authentication is lost (except on login page or when no credentials)
+			if (authChecked && !state.loading && !state.authenticated && state.hasCredentials && !isLoginPage) {
 				goto('/login');
 			}
 		});
