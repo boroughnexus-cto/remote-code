@@ -94,6 +94,9 @@ func AcceptTask(ctx context.Context, taskID, messageID string) error {
 	if err := checkPhaseOrderConstraint(ctx, taskID); err != nil {
 		return err
 	}
+	if err := checkGoalBudget(ctx, taskID); err != nil {
+		return err
+	}
 	if err := transitionTask(ctx, taskID, "accepted"); err != nil {
 		return err
 	}
@@ -108,12 +111,14 @@ func StartTask(ctx context.Context, taskID string) error {
 	if err := transitionTask(ctx, taskID, "running"); err != nil {
 		return err
 	}
+	now := time.Now().Unix()
 	_, err := database.ExecContext(ctx,
-		"UPDATE swarm_tasks SET started_at=? WHERE id=? AND started_at IS NULL",
-		time.Now().Unix(), taskID,
+		"UPDATE swarm_tasks SET started_at=?, last_heartbeat_at=? WHERE id=? AND started_at IS NULL",
+		now, now, taskID,
 	)
-	// Side-effects: peer review injection and Ralph criteria/retry briefs
+	// Side-effects: per-phase injections
 	go maybeInjectPeerReview(context.Background(), taskID)
+	go maybeInjectJudge(context.Background(), taskID)
 	go maybeInjectRalph(context.Background(), taskID)
 	return err
 }
@@ -139,6 +144,8 @@ func CompleteTask(ctx context.Context, sessionID, agentID, taskID string, h IPCH
 		`UPDATE swarm_tasks SET completed_at=?, confidence=?, tokens_used=?, updated_at=? WHERE id=?`,
 		now, h.Confidence, h.TokensUsed, now, taskID,
 	)
+	// Roll up token spend to the goal budget tracker (synchronous, O(1) atomic)
+	rollupGoalBudget(ctx, taskID)
 	if newStage == "needs_review" {
 		database.ExecContext(ctx, //nolint:errcheck
 			"UPDATE swarm_tasks SET needs_review_count=needs_review_count+1 WHERE id=?", taskID)

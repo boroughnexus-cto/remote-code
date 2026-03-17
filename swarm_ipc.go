@@ -284,11 +284,19 @@ func handleHeartbeat(ctx context.Context, sessionID, agentID string, ev IPCEvent
 	pct := ev.ContextPct
 	log.Printf("ipc: heartbeat agent=%s context_pct=%.2f", agentID[:8], pct)
 
-	// Persist context_pct
+	// Persist context_pct on agent
 	database.ExecContext(ctx, //nolint:errcheck
 		"UPDATE swarm_agents SET context_pct=? WHERE id=?",
 		pct, agentID,
 	)
+
+	// Update last_heartbeat_at on the active task (for watchdog liveness tracking)
+	if ev.TaskID != "" {
+		database.ExecContext(ctx, //nolint:errcheck
+			"UPDATE swarm_tasks SET last_heartbeat_at=? WHERE id=? AND stage IN ('running','accepted')",
+			time.Now().Unix(), ev.TaskID,
+		)
+	}
 
 	switch {
 	case pct >= ctxPctEmergency:

@@ -94,10 +94,14 @@ type tuiEvent struct {
 }
 
 type tuiGoal struct {
-	ID          string `json:"id"`
-	Description string `json:"description"`
-	Status      string `json:"status"`
-	CreatedAt   int64  `json:"created_at"`
+	ID           string `json:"id"`
+	Description  string `json:"description"`
+	Status       string `json:"status"`
+	Complexity   string `json:"complexity"`
+	TokenBudget  int64  `json:"token_budget"`
+	TokensUsed   int64  `json:"tokens_used"`
+	JudgeNotes   string `json:"judge_notes"`
+	CreatedAt    int64  `json:"created_at"`
 }
 
 type tuiEscalation struct {
@@ -1976,11 +1980,45 @@ func (m tuiModel) viewGoalsScreen() string {
 		}
 		total, done := m.goalTaskStats(sid, g.ID)
 		progress := fmt.Sprintf("%d/%d tasks", done, total)
-		prefix := fmt.Sprintf("  %s  %-*s  %s",
+
+		// Complexity badge
+		complexityBadge := ""
+		switch g.Complexity {
+		case "trivial":
+			complexityBadge = dimStyle.Render(" (trv)")
+		case "complex":
+			complexityBadge = lipgloss.NewStyle().Foreground(colorOrange).Render(" (cpx)")
+		}
+
+		// Budget bar (only shown when budget is set)
+		budgetBar := ""
+		if g.TokenBudget > 0 {
+			pct := float64(g.TokensUsed) / float64(g.TokenBudget)
+			filled := int(pct * 8)
+			if filled > 8 {
+				filled = 8
+			}
+			barColor := colorGreen
+			if pct >= 1.0 {
+				barColor = colorRed
+			} else if pct >= 0.8 {
+				barColor = colorOrange
+			}
+			bar := strings.Repeat("█", filled) + strings.Repeat("░", 8-filled)
+			budgetBar = " " + lipgloss.NewStyle().Foreground(barColor).Render(fmt.Sprintf("[%s %3.0f%%]", bar, pct*100))
+		}
+
+		descWidth := m.w - 28
+		if descWidth < 10 {
+			descWidth = 10
+		}
+		prefix := fmt.Sprintf("  %s  %-*s%s  %s%s",
 			lipgloss.NewStyle().Foreground(statusC).Render(statusIcon),
-			m.w-22,
-			truncStr(g.Description, m.w-22),
+			descWidth,
+			truncStr(g.Description, descWidth),
+			complexityBadge,
 			dimStyle.Render(progress),
+			budgetBar,
 		)
 		row := lipgloss.NewStyle()
 		if sel {

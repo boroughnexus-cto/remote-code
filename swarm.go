@@ -499,7 +499,12 @@ func handleSwarmSessionsAPI(w http.ResponseWriter, r *http.Request, ctx context.
 	case "tasks":
 		handleSwarmTasksAPI(w, r, ctx, sessionID, subPath[1:])
 	case "goals":
-		handleSwarmGoalsAPI(w, r, ctx, sessionID)
+		// Route: /goals, /goals/:gid/budget
+		if len(subPath) >= 3 && subPath[2] == "budget" {
+			handleSwarmGoalBudgetAPI(w, r, ctx, sessionID, subPath[1])
+		} else {
+			handleSwarmGoalsAPI(w, r, ctx, sessionID)
+		}
 	case "escalations":
 		handleSwarmEscalationsAPI(w, r, ctx, sessionID, subPath[1:])
 	case "orchestrator":
