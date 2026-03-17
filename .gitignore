@@ -112,6 +112,9 @@ Thumbs.db
 remote-code
 remote-code.db
 remote-code-test*.db
+remote-code-test*.db-shm
+remote-code-test*.db-wal
+.worktrees/
 app.db
 test.txt
 remote-code-backup.db

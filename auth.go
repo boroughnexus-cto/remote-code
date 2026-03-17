@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -605,6 +606,14 @@ func authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 		if count == 0 {
 			next(w, r)
 			return
+		}
+
+		// TUI and agents always run on the same machine — localhost bypasses auth
+		if ip, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+			if ip == "127.0.0.1" || ip == "::1" {
+				next(w, r)
+				return
+			}
 		}
 
 		// Check for valid session

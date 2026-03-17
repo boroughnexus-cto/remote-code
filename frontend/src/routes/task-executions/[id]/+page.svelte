@@ -6,6 +6,7 @@
 	import Card from '$lib/components/ui/Card.svelte';
 	import Button from '$lib/components/ui/Button.svelte';
 	import StatusBadge from '$lib/components/ui/StatusBadge.svelte';
+	import VoiceInput from '$lib/components/VoiceInput.svelte';
 
 	$: breadcrumbSegments = [
 		{ label: "", href: "/", icon: "banner" },
@@ -508,6 +509,11 @@
 		}
 	}
 
+	function handleVoiceTranscript(text) {
+		inputText = text;
+		sendInputToSession();
+	}
+
 	async function deleteTaskExecution() {
 		if (isDeleting) return;
 
@@ -767,11 +773,12 @@
 						Send Input to Session
 					</h4>
 					<div class="flex flex-col sm:flex-row gap-2">
+						<VoiceInput onTranscript={handleVoiceTranscript} disabled={isSendingInput} />
 						<input
 							type="text"
 							bind:value={inputText}
 							on:keydown={handleInputKeydown}
-							placeholder="Type a message and press Enter to send..."
+							placeholder="Type or speak a message…"
 							disabled={isSendingInput}
 							class="flex-1 w-full rounded-lg border border-slate-300 bg-white text-vanna-navy px-3 py-2 text-sm transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2 focus:border-vanna-teal focus:ring-vanna-teal disabled:opacity-50 disabled:cursor-not-allowed"
 						/>
@@ -788,7 +795,7 @@
 						</Button>
 					</div>
 					<p class="text-xs text-slate-500 mt-2">
-						Send text input directly to the agent session. Press Enter or click Send.
+						Tap the mic to speak, or type and press Enter to send.
 					</p>
 				</Card>
 			{/if}

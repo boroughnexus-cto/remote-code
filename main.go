@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"database/sql"
 	"encoding/json"
 	"io"
@@ -16,6 +17,27 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+func init() {
+	// Load .env file if present (ignored in production where env vars are set externally)
+	f, err := os.Open(".env")
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if k, v, ok := strings.Cut(line, "="); ok {
+			if os.Getenv(k) == "" { // don't override real env vars
+				os.Setenv(k, v)
+			}
+		}
+	}
+}
+
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
 		return true
@@ -26,13 +48,25 @@ var database *sql.DB
 var queries *db.Queries
 
 func main() {
+	// TUI subcommand: ./remote-code tui
+	if len(os.Args) > 1 && os.Args[1] == "tui" {
+		RunSwarmTUI()
+		return
+	}
+
 	// Initialize database
 	database, queries = initDatabase()
 	defer database.Close()
 
+	// Start swarm agent status monitor
+	startSwarmMonitor()
+	startSiBotHeartbeat()
+	startIPCPoller()
+
 	// Setup HTTP routes
 	http.HandleFunc("/", serveHome)
 	http.HandleFunc("/ws", authMiddleware(handleWebSocket))
+	http.HandleFunc("/ws/swarm", authMiddleware(handleSwarmWebSocket))
 	http.HandleFunc("/api/", handleAPIWithAuth)
 
 	port := os.Getenv("PORT")

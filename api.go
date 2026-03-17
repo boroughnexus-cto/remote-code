@@ -894,6 +894,8 @@ func handleAPI(w http.ResponseWriter, r *http.Request) {
 		handleRemotePortsAPI(w, r, ctx, pathParts[1:])
 	case "directory-dev-servers":
 		handleDirectoryDevServersAPI(w, r, ctx, pathParts[1:])
+	case "swarm":
+		handleSwarmAPI(w, r, ctx, pathParts[1:])
 	default:
 		http.Error(w, "Unknown API endpoint", http.StatusNotFound)
 	}

@@ -20,9 +20,14 @@ func initDatabase() (*sql.DB, *db.Queries) {
 }
 
 func initTestDatabase() (*sql.DB, *db.Queries, string) {
-	// Use a unique filename for each test run to avoid conflicts
+	// Use a unique filename for each test run to avoid conflicts.
 	testDbPath := fmt.Sprintf("remote-code-test-%d.db", time.Now().UnixNano())
-	return initDatabaseWithPathAndReturn(testDbPath)
+	db, queries, path := initDatabaseWithPathAndReturn(testDbPath)
+	// WAL mode + busy_timeout prevents SQLITE_BUSY from background goroutines
+	// (broadcaster timers, goal injection goroutines) running concurrently with tests.
+	db.Exec("PRAGMA journal_mode=WAL")
+	db.Exec("PRAGMA busy_timeout=5000")
+	return db, queries, path
 }
 
 func initDatabaseWithPathAndReturn(dbPath string) (*sql.DB, *db.Queries, string) {
@@ -120,6 +125,18 @@ func applyMigrations(database *sql.DB) error {
 		"db/migrations/007_directory_dev_servers.sql",
 		"db/migrations/008_webauthn_backup_flags.sql",
 		"db/migrations/009_execution_milestones.sql",
+		"db/migrations/010_swarm.sql",
+		"db/migrations/011_swarm_v2.sql",
+		"db/migrations/012_swarm_v3.sql",
+		"db/migrations/013_agent_memory.sql",
+		"db/migrations/014_task_pr.sql",
+		"db/migrations/015_drop_swarm_api_token.sql",
+		"db/migrations/016_agent_mission.sql",
+		"db/migrations/017_ipc_fields.sql",
+		"db/migrations/018_blackboard.sql",
+		"db/migrations/019_task_lifecycle.sql",
+		"db/migrations/020_context_mgmt.sql",
+		"db/migrations/021_goals.sql",
 	}
 
 	for _, migrationPath := range migrations {
