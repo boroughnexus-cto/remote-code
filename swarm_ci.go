@@ -13,6 +13,7 @@ import (
 	"time"
 )
 
+
 // ─── CI poller ────────────────────────────────────────────────────────────────
 //
 // Polls GitHub Actions for open PRs that have been linked to swarm tasks via the
@@ -49,10 +50,20 @@ func startCIPoller(ctx context.Context) {
 	}()
 }
 
+// ghAPI is the shared helper for making authenticated GitHub API calls via gh CLI.
+func ghAPI(ctx context.Context, apiPath string) ([]byte, error) {
+	out, err := exec.CommandContext(ctx, "gh", "api", apiPath).Output()
+	if err != nil {
+		return nil, fmt.Errorf("gh api %s: %w", apiPath, err)
+	}
+	return out, nil
+}
+
 // pollAllOpenPRs finds all tasks with a ci_run_url set and checks each.
 func pollAllOpenPRs(ctx context.Context) {
 	rows, err := database.QueryContext(ctx,
-		`SELECT id, session_id, ci_run_url, COALESCE(ci_last_notified_status,''), COALESCE(agent_id,'')
+		`SELECT id, session_id, ci_run_url, COALESCE(ci_last_notified_status,''), COALESCE(agent_id,''),
+		        COALESCE(pr_url,'')
 		 FROM swarm_tasks
 		 WHERE ci_run_url IS NOT NULL
 		   AND stage NOT IN ('complete','failed','cancelled','timed_out')`,
@@ -64,11 +75,11 @@ func pollAllOpenPRs(ctx context.Context) {
 	defer rows.Close()
 
 	for rows.Next() {
-		var taskID, sessionID, runURL, lastNotified, agentID string
-		if err := rows.Scan(&taskID, &sessionID, &runURL, &lastNotified, &agentID); err != nil {
+		var taskID, sessionID, runURL, lastNotified, agentID, prURL string
+		if err := rows.Scan(&taskID, &sessionID, &runURL, &lastNotified, &agentID, &prURL); err != nil {
 			continue
 		}
-		checkPRCI(ctx, taskID, sessionID, runURL, lastNotified, agentID)
+		checkPRCI(ctx, taskID, sessionID, runURL, lastNotified, agentID, prURL)
 	}
 }
 
@@ -79,7 +90,7 @@ type ciRunStatus struct {
 }
 
 // checkPRCI checks CI status for a single task and notifies if changed.
-func checkPRCI(ctx context.Context, taskID, sessionID, runURL, lastNotified, agentID string) {
+func checkPRCI(ctx context.Context, taskID, sessionID, runURL, lastNotified, agentID, prURL string) {
 	status, err := fetchCIStatus(ctx, runURL)
 	if err != nil {
 		log.Printf("swarm/ci: fetchCIStatus task=%s: %v", taskID[:8], err)
@@ -113,6 +124,14 @@ func checkPRCI(ctx context.Context, taskID, sessionID, runURL, lastNotified, age
 	switch {
 	case status.Status == "completed" && status.Conclusion == "success":
 		brief = fmt.Sprintf("## CI Passed ✅\n\nCI for your PR is green. Run URL: %s\n\nProceed to the document phase.", runURL)
+		// Check for merged PR → trigger auto-deploy (in background, idempotent)
+		if prURL != "" {
+			go func() {
+				if ghIsPRMerged(ctx, prURL) {
+					triggerAutoDeploy(context.Background(), taskID, sessionID, agentID, prURL)
+				}
+			}()
+		}
 	case status.Status == "completed":
 		summary := fetchCIFailureSummary(ctx, runURL)
 		brief = fmt.Sprintf("## CI Failed ❌ (%s)\n\nRun URL: %s\n\n%s\n\nPlease investigate and fix the failures, then re-push.", status.Conclusion, runURL, summary)

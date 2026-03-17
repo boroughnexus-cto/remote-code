@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -20,10 +21,22 @@ import (
 // -----------------
 
 type SwarmSession struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	CreatedAt int64  `json:"created_at"`
-	UpdatedAt int64  `json:"updated_at"`
+	ID                    string  `json:"id"`
+	Name                  string  `json:"name"`
+	AutopilotEnabled      bool    `json:"autopilot_enabled"`
+	AutopilotPlaneProject *string `json:"autopilot_plane_project_id,omitempty"`
+	CreatedAt             int64   `json:"created_at"`
+	UpdatedAt             int64   `json:"updated_at"`
+}
+
+// WorkQueueItem is the BFF struct returned by GET /api/swarm/plane/issues.
+// It wraps Plane issue data without leaking raw Plane API structure to the TUI.
+type WorkQueueItem struct {
+	PlaneIssueID string `json:"plane_issue_id"`
+	Title        string `json:"title"`
+	Priority     string `json:"priority"`
+	SequenceID   int    `json:"sequence_id"`
+	StateGroup   string `json:"state_group"`
 }
 
 type SwarmAgent struct {
@@ -202,10 +215,17 @@ func scanNullString(ns sql.NullString) *string {
 
 func getSwarmState(ctx context.Context, sessionID string) (*SwarmState, error) {
 	var session SwarmSession
+	var autopilotPlaneProject sql.NullString
+	var autopilotEnabled int
 	err := database.QueryRowContext(ctx,
-		"SELECT id, name, created_at, updated_at FROM swarm_sessions WHERE id = ?",
+		`SELECT id, name, COALESCE(autopilot_enabled,0), COALESCE(autopilot_plane_project_id,''), created_at, updated_at
+		 FROM swarm_sessions WHERE id = ?`,
 		sessionID,
-	).Scan(&session.ID, &session.Name, &session.CreatedAt, &session.UpdatedAt)
+	).Scan(&session.ID, &session.Name, &autopilotEnabled, &autopilotPlaneProject, &session.CreatedAt, &session.UpdatedAt)
+	session.AutopilotEnabled = autopilotEnabled == 1
+	if autopilotPlaneProject.Valid && autopilotPlaneProject.String != "" {
+		session.AutopilotPlaneProject = &autopilotPlaneProject.String
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -486,6 +506,14 @@ func handleSwarmSessionsAPI(w http.ResponseWriter, r *http.Request, ctx context.
 		handleSwarmOrchestratorAPI(w, r, ctx, sessionID, subPath[1:])
 	case "resume":
 		handleSwarmResumeAPI(w, r, ctx, sessionID)
+	case "autopilot":
+		handleSwarmAutopilotAPI(w, r, ctx, sessionID)
+	case "plane":
+		if len(subPath) > 1 && subPath[1] == "issues" {
+			handleSwarmPlaneIssuesAPI(w, r, ctx, sessionID)
+		} else {
+			w.WriteHeader(http.StatusNotFound)
+		}
 	default:
 		w.WriteHeader(http.StatusNotFound)
 	}
@@ -665,6 +693,51 @@ func truncate(s string, n int) string {
 	}
 	return s[:n] + "…"
 }
+
+// handleSwarmPlaneIssuesAPI returns work queue items for the session's Plane project.
+// GET /api/swarm/sessions/:id/plane/issues?state_group=backlog,unstarted
+func handleSwarmPlaneIssuesAPI(w http.ResponseWriter, r *http.Request, ctx context.Context, sessionID string) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Resolve plane project ID for this session
+	var projectID string
+	database.QueryRowContext(ctx,
+		"SELECT COALESCE(autopilot_plane_project_id,'') FROM swarm_sessions WHERE id=?", sessionID,
+	).Scan(&projectID)
+
+	if projectID == "" {
+		w.WriteHeader(http.StatusConflict)
+		json.NewEncoder(w).Encode(map[string]string{"error": "no plane_project_id configured for this session"})
+		return
+	}
+
+	// Parse requested state groups (default: backlog,unstarted)
+	groupParam := r.URL.Query().Get("state_group")
+	if groupParam == "" {
+		groupParam = "backlog,unstarted"
+	}
+	var groups []string
+	for _, g := range strings.Split(groupParam, ",") {
+		if t := strings.TrimSpace(g); t != "" {
+			groups = append(groups, t)
+		}
+	}
+
+	items, err := planeFetchWorkQueueItems(ctx, projectID, groups)
+	if err != nil {
+		w.WriteHeader(http.StatusBadGateway)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	if items == nil {
+		items = []WorkQueueItem{}
+	}
+	json.NewEncoder(w).Encode(items)
+}
+
 
 func handleSwarmAgentsAPI(w http.ResponseWriter, r *http.Request, ctx context.Context, sessionID string, pathParts []string) {
 	if len(pathParts) == 0 {

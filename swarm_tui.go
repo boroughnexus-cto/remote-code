@@ -79,8 +79,10 @@ type tuiTask struct {
 }
 
 type tuiSession struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
+	ID                    string  `json:"id"`
+	Name                  string  `json:"name"`
+	AutopilotEnabled      bool    `json:"autopilot_enabled"`
+	AutopilotPlaneProject *string `json:"autopilot_plane_project_id,omitempty"`
 }
 
 type tuiEvent struct {
@@ -130,9 +132,10 @@ type tuiDataMsg struct {
 	sessions []tuiSession
 	states   map[string]tuiState
 }
-type tuiErrMsg  struct{ op, text string }
-type tuiDoneMsg struct{ op string }
-type tuiAttachMsg struct{ err error }
+type tuiErrMsg       struct{ op, text string }
+type tuiDoneMsg      struct{ op string }
+type tuiAttachMsg    struct{ err error }
+type tuiWorkQueueMsg struct{ items []WorkQueueItem }
 
 func tuiAnimTick() tea.Cmd {
 	return tea.Tick(150*time.Millisecond, func(time.Time) tea.Msg { return tuiAnimTickMsg{} })
@@ -217,6 +220,54 @@ func (c *swarmClient) post(op, path string, body interface{}) tea.Cmd {
 				text = fmt.Sprintf("HTTP %d", status)
 			}
 			return tuiErrMsg{op: op, text: text}
+		}
+		return tuiDoneMsg{op: op}
+	}
+}
+
+func (c *swarmClient) patch(op, path string, body interface{}) tea.Cmd {
+	return func() tea.Msg {
+		b, status, err := c.do("PATCH", path, body)
+		if err != nil {
+			return tuiErrMsg{op: op, text: err.Error()}
+		}
+		if status >= 400 {
+			var errResp struct {
+				Error string `json:"error"`
+			}
+			json.Unmarshal(b, &errResp)
+			text := errResp.Error
+			if text == "" {
+				text = fmt.Sprintf("HTTP %d", status)
+			}
+			return tuiErrMsg{op: op, text: text}
+		}
+		return tuiDoneMsg{op: op}
+	}
+}
+
+func (c *swarmClient) get(op, path string) tea.Cmd {
+	return func() tea.Msg {
+		b, status, err := c.do("GET", path, nil)
+		if err != nil {
+			return tuiErrMsg{op: op, text: err.Error()}
+		}
+		if status >= 400 {
+			var errResp struct {
+				Error string `json:"error"`
+			}
+			json.Unmarshal(b, &errResp)
+			text := errResp.Error
+			if text == "" {
+				text = fmt.Sprintf("HTTP %d", status)
+			}
+			return tuiErrMsg{op: op, text: text}
+		}
+		if op == "workqueue" {
+			var items []WorkQueueItem
+			if json.Unmarshal(b, &items) == nil {
+				return tuiWorkQueueMsg{items: items}
+			}
 		}
 		return tuiDoneMsg{op: op}
 	}
@@ -435,6 +486,11 @@ type tuiModel struct {
 	// Goals view
 	goalView   bool
 	goalCursor int
+
+	// Work queue view
+	workQueueView  bool
+	workQueueItems []WorkQueueItem
+	workQueueSID   string
 
 	// Clients
 	client *swarmClient
@@ -708,12 +764,21 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.setFlash(label, false)
 		cmds = append(cmds, m.client.fetchAll())
 
+	case tuiWorkQueueMsg:
+		m.workQueueItems = msg.items
+		m.updateVP()
+
 	case tuiAttachMsg:
 		m.setFlash("Returned from tmux session", false)
 		cmds = append(cmds, m.client.fetchAll())
 
 	case tea.KeyMsg:
-		if m.goalView {
+		if m.workQueueView {
+			if msg.String() == "q" || msg.String() == "esc" {
+				m.workQueueView = false
+				m.workQueueItems = nil
+			}
+		} else if m.goalView {
 			m, cmds = m.updateGoalView(msg)
 		} else if m.escView {
 			m, cmds = m.updateEscalation(msg)
@@ -884,6 +949,34 @@ func (m tuiModel) updateSidebar(msg tea.KeyMsg) (tuiModel, []tea.Cmd) {
 			m.goalCursor = 0
 		}
 
+	case "A":
+		sid := m.selSessionID()
+		if sid != "" {
+			st := m.states[sid]
+			newVal := !st.Session.AutopilotEnabled
+			body := map[string]interface{}{"enabled": newVal}
+			if st.Session.AutopilotPlaneProject != nil {
+				body["plane_project_id"] = *st.Session.AutopilotPlaneProject
+			}
+			path := "/api/swarm/sessions/" + sid + "/autopilot"
+			cmds = append(cmds, m.client.patch("autopilot", path, body))
+			if newVal {
+				m.setFlash("Autopilot ON — syncing Plane issues", false)
+			} else {
+				m.setFlash("Autopilot OFF", false)
+			}
+		}
+
+	case "W":
+		sid := m.selSessionID()
+		if sid != "" {
+			m.workQueueView = true
+			m.workQueueSID = sid
+			m.workQueueItems = nil
+			path := "/api/swarm/sessions/" + sid + "/plane/issues?state_group=backlog,unstarted"
+			cmds = append(cmds, m.client.get("workqueue", path))
+		}
+
 	case "R":
 		cmds = append(cmds, m.client.fetchAll())
 	}
@@ -1035,6 +1128,9 @@ func (m tuiModel) View() string {
 	if m.modal != nil {
 		return m.viewModal()
 	}
+	if m.workQueueView {
+		return m.viewWorkQueueScreen()
+	}
 	if m.goalView {
 		return m.viewGoalsScreen()
 	}
@@ -1108,6 +1204,16 @@ func (m tuiModel) viewHUD() string {
 	if escCount > 0 {
 		parts = append(parts, lipgloss.NewStyle().Foreground(colorOrange).Bold(true).
 			Render(fmt.Sprintf("🔔%d esc", escCount)))
+	}
+	autopilotCount := 0
+	for _, st := range m.states {
+		if st.Session.AutopilotEnabled {
+			autopilotCount++
+		}
+	}
+	if autopilotCount > 0 {
+		parts = append(parts, lipgloss.NewStyle().Foreground(colorTeal).Bold(true).
+			Render(fmt.Sprintf("⚙%d auto", autopilotCount)))
 	}
 	return hudStyle.Width(m.w).Render(strings.Join(parts, "  "))
 }
@@ -1464,8 +1570,37 @@ func (m tuiModel) viewStatusBar() string {
 }
 
 func (m tuiModel) viewHelp() string {
-	keys := "  ↑↓/jk nav  ·  Enter attach  ·  Tab// input  ·  s spawn  ·  d stop  ·  n agent  ·  t task  ·  c session  ·  e escalations  ·  g goals  ·  R refresh  ·  q quit  ·  /goal <desc>"
+	keys := "  ↑↓/jk nav  ·  Enter attach  ·  Tab// input  ·  s spawn  ·  d stop  ·  n agent  ·  t task  ·  c session  ·  e escalations  ·  g goals  ·  A autopilot  ·  W work queue  ·  R refresh  ·  q quit  ·  /goal <desc>"
 	return dimStyle.Width(m.w).Render(keys)
+}
+
+func (m tuiModel) viewWorkQueueScreen() string {
+	var sb strings.Builder
+	sb.WriteString(m.viewHUD() + "\n")
+	title := lipgloss.NewStyle().Foreground(colorTeal).Bold(true).Render("Work Queue — Plane Backlog")
+	sb.WriteString(title + "\n\n")
+
+	if m.workQueueItems == nil {
+		sb.WriteString(dimStyle.Render("  Loading…") + "\n")
+	} else if len(m.workQueueItems) == 0 {
+		sb.WriteString(dimStyle.Render("  No items in backlog or unstarted state.") + "\n")
+	} else {
+		priIcon := map[string]string{
+			"urgent": "🔴", "high": "🟠", "medium": "🟡",
+		}
+		for _, item := range m.workQueueItems {
+			icon := priIcon[item.Priority]
+			if icon == "" {
+				icon = "⚪"
+			}
+			stateLabel := item.StateGroup
+			line := fmt.Sprintf("  %s  [%-9s]  %s", icon, stateLabel, item.Title)
+			sb.WriteString(line + "\n")
+		}
+	}
+
+	sb.WriteString("\n" + dimStyle.Render("  Press q or Esc to close"))
+	return sb.String()
 }
 
 func (m tuiModel) viewModal() string {

@@ -140,6 +140,7 @@ func applyMigrations(database *sql.DB) error {
 		"db/migrations/022_task_phase.sql",
 		"db/migrations/023_ci_status.sql",
 		"db/migrations/024_goal_plane_id.sql",
+		"db/migrations/025_autopilot.sql",
 	}
 
 	for _, migrationPath := range migrations {

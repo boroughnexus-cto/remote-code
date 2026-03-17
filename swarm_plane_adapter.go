@@ -228,20 +228,43 @@ func planeAutoCloseGoal(ctx context.Context, goalID string) {
 	log.Printf("swarm/plane: closed Plane issue %s for goal %s", planeIssueID[:8], goalID[:8])
 }
 
-// startPlaneAdapter is the background poller goroutine.
-func startPlaneAdapter(ctx context.Context) {
-	cfg, ok := loadPlaneConfig()
+// planeSyncSession syncs a single autopilot session: creates goals for any
+// Plane "started" issues in the given project that don't yet have a goal.
+// Uses the shared planeConfig (API URL/key/workspace) with a session-specific project.
+func planeSyncSession(ctx context.Context, projectID, sessionID string) {
+	baseCfg, ok := loadPlaneConfig()
 	if !ok {
-		log.Printf("swarm/plane: adapter disabled (set PLANE_API_URL, PLANE_API_KEY, PLANE_WORKSPACE, PLANE_PROJECT_ID, PLANE_TARGET_SESSION_ID)")
+		// No base Plane config; can't sync
 		return
 	}
-
-	// Resolve done state at startup
+	cfg := &planeConfig{
+		apiURL:      baseCfg.apiURL,
+		apiKey:      baseCfg.apiKey,
+		workspace:   baseCfg.workspace,
+		projectID:   projectID,
+		sessionID:   sessionID,
+		doneStateID: baseCfg.doneStateID,
+	}
 	if cfg.doneStateID == "" {
 		cfg.doneStateID = planeFetchDoneStateID(ctx, cfg)
 	}
-	log.Printf("swarm/plane: adapter started (project=%s, session=%s, doneState=%s)",
-		cfg.projectID[:8], cfg.sessionID[:8], cfg.doneStateID)
+	planeSyncStartedIssues(ctx, cfg)
+}
+
+// startPlaneAdapter is the background poller goroutine.
+// It syncs the env-var-configured session AND any DB autopilot sessions.
+func startPlaneAdapter(ctx context.Context) {
+	baseCfg, envOK := loadPlaneConfig()
+	if envOK {
+		// Resolve done state once
+		if baseCfg.doneStateID == "" {
+			baseCfg.doneStateID = planeFetchDoneStateID(ctx, baseCfg)
+		}
+		log.Printf("swarm/plane: adapter started (env project=%s, session=%s)",
+			baseCfg.projectID[:8], baseCfg.sessionID[:8])
+	} else {
+		log.Printf("swarm/plane: env-var session not configured; will poll DB autopilot sessions only")
+	}
 
 	ticker := time.NewTicker(planePollInterval)
 	defer ticker.Stop()
@@ -250,7 +273,97 @@ func startPlaneAdapter(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			planeSyncStartedIssues(ctx, cfg)
+			// Sync env-var session (backward compat)
+			if envOK {
+				planeSyncStartedIssues(ctx, baseCfg)
+			}
+			// Sync all DB autopilot sessions
+			syncAllAutopilotSessions(ctx, baseCfg)
 		}
 	}
+}
+
+// syncAllAutopilotSessions queries for sessions with autopilot_enabled=1
+// and syncs each with its configured Plane project.
+func syncAllAutopilotSessions(ctx context.Context, baseCfg *planeConfig) {
+	rows, err := database.QueryContext(ctx,
+		`SELECT id, COALESCE(autopilot_plane_project_id,'')
+		 FROM swarm_sessions
+		 WHERE autopilot_enabled=1 AND autopilot_plane_project_id IS NOT NULL AND autopilot_plane_project_id != ''`,
+	)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var sessionID, projectID string
+		if err := rows.Scan(&sessionID, &projectID); err != nil {
+			continue
+		}
+		// Skip if this is the same as the env-var session (already synced above)
+		if baseCfg != nil && sessionID == baseCfg.sessionID && projectID == baseCfg.projectID {
+			continue
+		}
+		if baseCfg == nil {
+			// No base config; autopilot sessions without base Plane config won't work
+			log.Printf("swarm/plane: autopilot session %s skipped — no PLANE_API_URL/KEY/WORKSPACE configured", sessionID[:8])
+			continue
+		}
+		cfg := &planeConfig{
+			apiURL:      baseCfg.apiURL,
+			apiKey:      baseCfg.apiKey,
+			workspace:   baseCfg.workspace,
+			projectID:   projectID,
+			sessionID:   sessionID,
+			doneStateID: baseCfg.doneStateID,
+		}
+		planeSyncStartedIssues(ctx, cfg)
+	}
+}
+
+// planeFetchWorkQueueItems returns Plane issues for a given project and state groups.
+// Used by the TUI work queue panel API endpoint.
+func planeFetchWorkQueueItems(ctx context.Context, projectID string, stateGroups []string) ([]WorkQueueItem, error) {
+	baseCfg, ok := loadPlaneConfig()
+	if !ok {
+		return nil, fmt.Errorf("Plane not configured")
+	}
+	cfg := &planeConfig{
+		apiURL:    baseCfg.apiURL,
+		apiKey:    baseCfg.apiKey,
+		workspace: baseCfg.workspace,
+		projectID: projectID,
+	}
+
+	var items []WorkQueueItem
+	for _, group := range stateGroups {
+		path := fmt.Sprintf("/api/v1/workspaces/%s/projects/%s/issues/?state_group=%s&per_page=50",
+			cfg.workspace, cfg.projectID, group)
+		data, status, err := planeReq(ctx, cfg, "GET", path, nil)
+		if err != nil || status != 200 {
+			continue
+		}
+		var resp struct {
+			Results []struct {
+				ID       string `json:"id"`
+				Name     string `json:"name"`
+				Priority string `json:"priority"`
+				SequenceID int  `json:"sequence_id"`
+			} `json:"results"`
+		}
+		if json.Unmarshal(data, &resp) != nil {
+			continue
+		}
+		for _, r := range resp.Results {
+			items = append(items, WorkQueueItem{
+				PlaneIssueID: r.ID,
+				Title:        r.Name,
+				Priority:     r.Priority,
+				SequenceID:   r.SequenceID,
+				StateGroup:   group,
+			})
+		}
+	}
+	return items, nil
 }

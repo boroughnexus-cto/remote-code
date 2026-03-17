@@ -63,6 +63,7 @@ func main() {
 	startSwarmMonitor()
 	startSiBotHeartbeat()
 	startIPCPoller()
+	validateIntegrationConfig()
 	go startCIPoller(context.Background())
 	go startPlaneAdapter(context.Background())
 
