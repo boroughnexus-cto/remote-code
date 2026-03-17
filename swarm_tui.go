@@ -68,6 +68,11 @@ type tuiTask struct {
 	ID            string   `json:"id"`
 	Title         string   `json:"title"`
 	Stage         string   `json:"stage"`
+	Phase         *string  `json:"phase,omitempty"`
+	PhaseOrder    *int64   `json:"phase_order,omitempty"`
+	GoalID        *string  `json:"goal_id,omitempty"`
+	PRUrl         *string  `json:"pr_url,omitempty"`
+	CIStatus      *string  `json:"ci_status,omitempty"`
 	Confidence    *float64 `json:"confidence,omitempty"`
 	TokensUsed    *int64   `json:"tokens_used,omitempty"`
 	BlockedReason *string  `json:"blocked_reason,omitempty"`
@@ -427,6 +432,10 @@ type tuiModel struct {
 	escActive    *tuiEscalation
 	escInput     textinput.Model
 
+	// Goals view
+	goalView   bool
+	goalCursor int
+
 	// Clients
 	client *swarmClient
 	ws     *tuiWSManager
@@ -704,7 +713,9 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, m.client.fetchAll())
 
 	case tea.KeyMsg:
-		if m.escView {
+		if m.goalView {
+			m, cmds = m.updateGoalView(msg)
+		} else if m.escView {
 			m, cmds = m.updateEscalation(msg)
 		} else {
 			switch m.focus {
@@ -866,6 +877,13 @@ func (m tuiModel) updateSidebar(msg tea.KeyMsg) (tuiModel, []tea.Cmd) {
 			m.escInputting = false
 		}
 
+	case "g":
+		sid := m.selSessionID()
+		if sid != "" {
+			m.goalView = true
+			m.goalCursor = 0
+		}
+
 	case "R":
 		cmds = append(cmds, m.client.fetchAll())
 	}
@@ -1016,6 +1034,9 @@ func (m tuiModel) View() string {
 	}
 	if m.modal != nil {
 		return m.viewModal()
+	}
+	if m.goalView {
+		return m.viewGoalsScreen()
 	}
 	if m.escView {
 		return m.viewEscalationScreen()
@@ -1184,13 +1205,13 @@ func (m tuiModel) viewSidebar(h int) string {
 				continue
 			}
 			stageC := tuiStageColor(task.Stage)
-			stageStr := lipgloss.NewStyle().Foreground(stageC).Render(fmt.Sprintf("[%-7s]", truncStr(task.Stage, 7)))
+			stageStr := lipgloss.NewStyle().Foreground(stageC).Render(fmt.Sprintf("[%-6s]", shortStage(task.Stage)))
 			dot := "◇"
-			if task.Stage == "done" {
+			if task.Stage == "complete" {
 				dot = "◆"
 			}
-			title := truncStr(task.Title, tuiSidebarW-14)
-			row := fmt.Sprintf("  %s %-*s %s", dot, tuiSidebarW-14, title, stageStr)
+			title := truncStr(task.Title, tuiSidebarW-13)
+			row := fmt.Sprintf("  %s %-*s %s", dot, tuiSidebarW-13, title, stageStr)
 			base := lipgloss.NewStyle().Foreground(colorDim)
 			if sel {
 				base = base.Background(colorSubtle).Foreground(colorText)
@@ -1364,6 +1385,34 @@ func (m tuiModel) viewTaskDetail(w *strings.Builder, sid, tid string, rightW int
 		lipgloss.NewStyle().Foreground(stageC).Render(task.Stage) + "\n")
 	w.WriteString(dimStyle.Render("  ID: "+task.ID[:12]+"…") + "\n")
 
+	if task.Phase != nil {
+		phaseLabel := fmt.Sprintf("  Phase: %s", *task.Phase)
+		if task.PhaseOrder != nil {
+			phaseLabel += fmt.Sprintf(" (%d/7)", *task.PhaseOrder)
+		}
+		w.WriteString(lipgloss.NewStyle().Foreground(colorBlue).Render(phaseLabel) + "\n")
+	}
+
+	if task.CIStatus != nil && *task.CIStatus != "" {
+		var ciC lipgloss.Color
+		var ciIcon string
+		switch {
+		case strings.HasPrefix(*task.CIStatus, "completed:success"):
+			ciC, ciIcon = colorGreen, "✅"
+		case strings.HasPrefix(*task.CIStatus, "completed:"):
+			ciC, ciIcon = colorRed, "❌"
+		case *task.CIStatus == "in_progress":
+			ciC, ciIcon = colorYellow, "⏳"
+		default:
+			ciC, ciIcon = colorDim, "○"
+		}
+		w.WriteString(dimStyle.Render("  CI: ") +
+			lipgloss.NewStyle().Foreground(ciC).Render(ciIcon+" "+*task.CIStatus) + "\n")
+	}
+	if task.PRUrl != nil && *task.PRUrl != "" {
+		w.WriteString(dimStyle.Render("  PR: "+truncStr(*task.PRUrl, rightW-6)) + "\n")
+	}
+
 	if task.Confidence != nil {
 		conf := *task.Confidence
 		var confC lipgloss.Color
@@ -1417,7 +1466,7 @@ func (m tuiModel) viewStatusBar() string {
 }
 
 func (m tuiModel) viewHelp() string {
-	keys := "  ↑↓/jk nav  ·  Enter attach  ·  Tab// input  ·  s spawn  ·  d stop  ·  n agent  ·  t task  ·  c session  ·  e escalations  ·  R refresh  ·  q quit  ·  /goal <desc>"
+	keys := "  ↑↓/jk nav  ·  Enter attach  ·  Tab// input  ·  s spawn  ·  d stop  ·  n agent  ·  t task  ·  c session  ·  e escalations  ·  g goals  ·  R refresh  ·  q quit  ·  /goal <desc>"
 	return dimStyle.Width(m.w).Render(keys)
 }
 
@@ -1607,18 +1656,60 @@ func monitorBar(status string, frame int) string {
 
 func tuiStageColor(stage string) lipgloss.Color {
 	switch stage {
-	case "spec":
+	case "queued":
+		return colorDim
+	case "assigned":
 		return colorBlue
-	case "implement":
+	case "accepted":
 		return colorTeal
-	case "test":
+	case "running":
+		return colorTeal
+	case "blocked":
+		return colorRed
+	case "needs_review":
 		return colorYellow
-	case "deploy":
+	case "needs_human":
 		return colorOrange
-	case "done":
+	case "complete":
 		return colorGreen
+	case "failed":
+		return colorRed
+	case "timed_out":
+		return colorOrange
+	case "cancelled":
+		return colorDim
 	default:
 		return colorDim
+	}
+}
+
+// shortStage returns a compact display label for a task stage.
+func shortStage(stage string) string {
+	switch stage {
+	case "queued":
+		return "queued"
+	case "assigned":
+		return "assign"
+	case "accepted":
+		return "accept"
+	case "running":
+		return "runnin"
+	case "blocked":
+		return "BLOCK!"
+	case "needs_review":
+		return "review"
+	case "needs_human":
+		return "HUMAN?"
+	case "complete":
+		return "done  "
+	case "failed":
+		return "FAIL  "
+	case "timed_out":
+		return "t/out "
+	case "cancelled":
+		return "cancel"
+	default:
+		return truncStr(stage, 6)
 	}
 }
 
@@ -1667,6 +1758,108 @@ func pluralS(n int) string {
 		return ""
 	}
 	return "s"
+}
+
+// ─── Goals view ──────────────────────────────────────────────────────────────
+
+func (m tuiModel) updateGoalView(msg tea.KeyMsg) (tuiModel, []tea.Cmd) {
+	sid := m.selSessionID()
+	goals := m.states[sid].Goals
+	switch msg.String() {
+	case "g", "esc", "q":
+		m.goalView = false
+	case "up", "k":
+		if m.goalCursor > 0 {
+			m.goalCursor--
+		}
+	case "down", "j":
+		if m.goalCursor < len(goals)-1 {
+			m.goalCursor++
+		}
+	}
+	return m, nil
+}
+
+// goalTaskStats returns (total, done) task counts for a goal.
+func (m tuiModel) goalTaskStats(sid, goalID string) (total, done int) {
+	st := m.states[sid]
+	for _, t := range st.Tasks {
+		if t.GoalID != nil && *t.GoalID == goalID {
+			total++
+			if t.Stage == "complete" || t.Stage == "failed" || t.Stage == "cancelled" || t.Stage == "timed_out" {
+				done++
+			}
+		}
+	}
+	return
+}
+
+func (m tuiModel) viewGoalsScreen() string {
+	sid := m.selSessionID()
+	if sid == "" {
+		return dimStyle.Width(m.w).Render("No session selected")
+	}
+	goals := m.states[sid].Goals
+	var sb strings.Builder
+	title := lipgloss.NewStyle().Foreground(colorTeal).Bold(true).Width(m.w).Render("  Goals  (↑↓/jk navigate · g/esc close)")
+	sb.WriteString(title + "\n")
+	sb.WriteString(dimStyle.Render(strings.Repeat("─", m.w)) + "\n")
+
+	if len(goals) == 0 {
+		sb.WriteString(dimStyle.Width(m.w).Render("  No goals yet. Use /goal <description> in the chat input.") + "\n")
+	}
+	for i, g := range goals {
+		sel := i == m.goalCursor
+		var statusC lipgloss.Color
+		var statusIcon string
+		switch g.Status {
+		case "complete":
+			statusC, statusIcon = colorGreen, "✓"
+		case "failed":
+			statusC, statusIcon = colorRed, "✗"
+		case "cancelled":
+			statusC, statusIcon = colorDim, "○"
+		default:
+			statusC, statusIcon = colorTeal, "▶"
+		}
+		total, done := m.goalTaskStats(sid, g.ID)
+		progress := fmt.Sprintf("%d/%d tasks", done, total)
+		prefix := fmt.Sprintf("  %s  %-*s  %s",
+			lipgloss.NewStyle().Foreground(statusC).Render(statusIcon),
+			m.w-22,
+			truncStr(g.Description, m.w-22),
+			dimStyle.Render(progress),
+		)
+		row := lipgloss.NewStyle()
+		if sel {
+			row = row.Background(colorSubtle).Foreground(colorText)
+		}
+		sb.WriteString(row.Width(m.w).Render(prefix) + "\n")
+
+		// If selected, expand phase tasks below
+		if sel && total > 0 {
+			st := m.states[sid]
+			for _, t := range st.Tasks {
+				if t.GoalID == nil || *t.GoalID != g.ID {
+					continue
+				}
+				stageC := tuiStageColor(t.Stage)
+				phaseLabel := ""
+				if t.Phase != nil {
+					phaseLabel = fmt.Sprintf("%-12s", *t.Phase)
+				}
+				taskRow := fmt.Sprintf("      %s  %s  %s",
+					lipgloss.NewStyle().Foreground(stageC).Render(shortStage(t.Stage)),
+					dimStyle.Render(phaseLabel),
+					truncStr(t.Title, m.w-30),
+				)
+				sb.WriteString(dimStyle.Width(m.w).Render(taskRow) + "\n")
+			}
+		}
+	}
+
+	sb.WriteString(dimStyle.Render(strings.Repeat("─", m.w)) + "\n")
+	return sb.String()
 }
 
 // ─── Entry Point ─────────────────────────────────────────────────────────────

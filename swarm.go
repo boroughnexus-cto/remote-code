@@ -59,6 +59,10 @@ type SwarmTask struct {
 	Confidence    *float64 `json:"confidence,omitempty"`
 	TokensUsed    *int64   `json:"tokens_used,omitempty"`
 	BlockedReason *string  `json:"blocked_reason,omitempty"`
+	Phase         *string  `json:"phase,omitempty"`
+	PhaseOrder    *int64   `json:"phase_order,omitempty"`
+	CIStatus      *string  `json:"ci_status,omitempty"`
+	CIRunUrl      *string  `json:"ci_run_url,omitempty"`
 	CreatedAt     int64    `json:"created_at"`
 	UpdatedAt     int64    `json:"updated_at"`
 }
@@ -244,8 +248,10 @@ func getSwarmState(ctx context.Context, sessionID string) (*SwarmState, error) {
 	taskRows, err := database.QueryContext(ctx,
 		`SELECT id, session_id, title, description, stage, agent_id, project,
 		        branch, worktree_path, pr_url, goal_id, confidence, tokens_used, blocked_reason,
+		        phase, phase_order, ci_status, ci_run_url,
 		        created_at, updated_at
-		 FROM swarm_tasks WHERE session_id = ? ORDER BY created_at ASC`,
+		 FROM swarm_tasks WHERE session_id = ?
+		 ORDER BY COALESCE(phase_order, 9999), created_at ASC`,
 		sessionID,
 	)
 	if err != nil {
@@ -257,11 +263,13 @@ func getSwarmState(ctx context.Context, sessionID string) (*SwarmState, error) {
 	for taskRows.Next() {
 		var t SwarmTask
 		var description, agentID, project, branch, worktreePath, prUrl, goalID, blockedReason sql.NullString
+		var phase, ciStatus, ciRunUrl sql.NullString
 		var confidence sql.NullFloat64
-		var tokensUsed sql.NullInt64
+		var tokensUsed, phaseOrder sql.NullInt64
 		if err := taskRows.Scan(&t.ID, &t.SessionID, &t.Title, &description,
 			&t.Stage, &agentID, &project, &branch, &worktreePath, &prUrl,
 			&goalID, &confidence, &tokensUsed, &blockedReason,
+			&phase, &phaseOrder, &ciStatus, &ciRunUrl,
 			&t.CreatedAt, &t.UpdatedAt); err != nil {
 			return nil, err
 		}
@@ -273,11 +281,17 @@ func getSwarmState(ctx context.Context, sessionID string) (*SwarmState, error) {
 		t.PRUrl = scanNullString(prUrl)
 		t.GoalID = scanNullString(goalID)
 		t.BlockedReason = scanNullString(blockedReason)
+		t.Phase = scanNullString(phase)
+		t.CIStatus = scanNullString(ciStatus)
+		t.CIRunUrl = scanNullString(ciRunUrl)
 		if confidence.Valid {
 			t.Confidence = &confidence.Float64
 		}
 		if tokensUsed.Valid {
 			t.TokensUsed = &tokensUsed.Int64
+		}
+		if phaseOrder.Valid {
+			t.PhaseOrder = &phaseOrder.Int64
 		}
 		tasks = append(tasks, t)
 	}

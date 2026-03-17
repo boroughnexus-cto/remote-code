@@ -137,6 +137,8 @@ func applyMigrations(database *sql.DB) error {
 		"db/migrations/019_task_lifecycle.sql",
 		"db/migrations/020_context_mgmt.sql",
 		"db/migrations/021_goals.sql",
+		"db/migrations/022_task_phase.sql",
+		"db/migrations/023_ci_status.sql",
 	}
 
 	for _, migrationPath := range migrations {

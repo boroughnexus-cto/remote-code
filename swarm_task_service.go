@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -61,7 +62,38 @@ func transitionTask(ctx context.Context, taskID, newStage string) error {
 
 // ─── State-specific setters ───────────────────────────────────────────────────
 
+// checkPhaseOrderConstraint returns an error if predecessor phases (lower
+// phase_order in the same goal) have not yet reached a terminal stage.
+func checkPhaseOrderConstraint(ctx context.Context, taskID string) error {
+	var goalID sql.NullString
+	var phaseOrder sql.NullInt64
+	if err := database.QueryRowContext(ctx,
+		"SELECT goal_id, phase_order FROM swarm_tasks WHERE id=?", taskID,
+	).Scan(&goalID, &phaseOrder); err != nil {
+		return nil // task not found — allow (will fail at transition)
+	}
+	if !goalID.Valid || !phaseOrder.Valid {
+		return nil // no Talos phase ordering on this task
+	}
+	var pending int
+	if err := database.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM swarm_tasks
+		 WHERE goal_id=? AND phase_order < ?
+		   AND stage NOT IN ('complete','failed','cancelled','timed_out')`,
+		goalID.String, phaseOrder.Int64,
+	).Scan(&pending); err != nil {
+		return fmt.Errorf("phase order check: %w", err)
+	}
+	if pending > 0 {
+		return fmt.Errorf("phase ordering: %d predecessor phase(s) not yet complete", pending)
+	}
+	return nil
+}
+
 func AcceptTask(ctx context.Context, taskID, messageID string) error {
+	if err := checkPhaseOrderConstraint(ctx, taskID); err != nil {
+		return err
+	}
 	if err := transitionTask(ctx, taskID, "accepted"); err != nil {
 		return err
 	}

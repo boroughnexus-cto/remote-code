@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"io"
@@ -62,6 +63,7 @@ func main() {
 	startSwarmMonitor()
 	startSiBotHeartbeat()
 	startIPCPoller()
+	go startCIPoller(context.Background())
 
 	// Setup HTTP routes
 	http.HandleFunc("/", serveHome)
