@@ -112,6 +112,9 @@ func StartTask(ctx context.Context, taskID string) error {
 		"UPDATE swarm_tasks SET started_at=? WHERE id=? AND started_at IS NULL",
 		time.Now().Unix(), taskID,
 	)
+	// Side-effects: peer review injection and Ralph criteria/retry briefs
+	go maybeInjectPeerReview(context.Background(), taskID)
+	go maybeInjectRalph(context.Background(), taskID)
 	return err
 }
 
@@ -136,6 +139,10 @@ func CompleteTask(ctx context.Context, sessionID, agentID, taskID string, h IPCH
 		`UPDATE swarm_tasks SET completed_at=?, confidence=?, tokens_used=?, updated_at=? WHERE id=?`,
 		now, h.Confidence, h.TokensUsed, now, taskID,
 	)
+	if newStage == "needs_review" {
+		database.ExecContext(ctx, //nolint:errcheck
+			"UPDATE swarm_tasks SET needs_review_count=needs_review_count+1 WHERE id=?", taskID)
+	}
 
 	// Register artifacts
 	for _, art := range h.ArtifactsProduced {

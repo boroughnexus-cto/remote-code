@@ -64,6 +64,7 @@ func main() {
 	startSiBotHeartbeat()
 	startIPCPoller()
 	go startCIPoller(context.Background())
+	go startPlaneAdapter(context.Background())
 
 	// Setup HTTP routes
 	http.HandleFunc("/", serveHome)

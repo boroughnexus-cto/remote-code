@@ -1206,12 +1206,10 @@ func (m tuiModel) viewSidebar(h int) string {
 			}
 			stageC := tuiStageColor(task.Stage)
 			stageStr := lipgloss.NewStyle().Foreground(stageC).Render(fmt.Sprintf("[%-6s]", shortStage(task.Stage)))
-			dot := "◇"
-			if task.Stage == "complete" {
-				dot = "◆"
-			}
+			dot, dotStyle := ciDot(task)
+			dotStr := dotStyle.Render(dot)
 			title := truncStr(task.Title, tuiSidebarW-13)
-			row := fmt.Sprintf("  %s %-*s %s", dot, tuiSidebarW-13, title, stageStr)
+			row := fmt.Sprintf("  %s %-*s %s", dotStr, tuiSidebarW-13, title, stageStr)
 			base := lipgloss.NewStyle().Foreground(colorDim)
 			if sel {
 				base = base.Background(colorSubtle).Foreground(colorText)
@@ -1711,6 +1709,25 @@ func shortStage(stage string) string {
 	default:
 		return truncStr(stage, 6)
 	}
+}
+
+// ciDot returns a dot character and style reflecting the task's CI status.
+// Falls back to task-stage semantics when no CI status is present.
+func ciDot(task *tuiTask) (string, lipgloss.Style) {
+	if task.CIStatus != nil {
+		switch *task.CIStatus {
+		case "success":
+			return "●", lipgloss.NewStyle().Foreground(colorGreen)
+		case "failure":
+			return "●", lipgloss.NewStyle().Foreground(colorRed)
+		case "pending":
+			return "●", lipgloss.NewStyle().Foreground(colorYellow)
+		}
+	}
+	if task.Stage == "complete" {
+		return "◆", lipgloss.NewStyle().Foreground(colorGreen)
+	}
+	return "◇", lipgloss.NewStyle().Foreground(colorDim)
 }
 
 // contextBar renders a coloured fill bar for context usage (0.0–1.0).

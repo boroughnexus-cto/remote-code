@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 
@@ -642,6 +643,20 @@ func handleSwarmDashboardAPI(w http.ResponseWriter, r *http.Request, ctx context
 		sessions = []SessionStats{}
 	}
 	json.NewEncoder(w).Encode(map[string]interface{}{"sessions": sessions})
+}
+
+// swarmAPIBase returns the base URL agents use to reach this server.
+// Respects SWARM_API_BASE_URL env var so remote/containerised agents work.
+// Falls back to http://localhost:{PORT} (default 8080).
+func swarmAPIBase() string {
+	if base := os.Getenv("SWARM_API_BASE_URL"); base != "" {
+		return base
+	}
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+	return "http://localhost:" + port
 }
 
 func truncate(s string, n int) string {

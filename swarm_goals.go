@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 )
@@ -217,11 +216,7 @@ func injectGoalToSiBot(ctx context.Context, sessionID string, goal SwarmGoal) {
 	}
 	swarmBroadcaster.schedule(sessionID)
 
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8080"
-	}
-	apiBase := "http://localhost:" + port
+	apiBase := swarmAPIBase()
 	specTaskID := phaseIDs["spec"]
 
 	// User description is wrapped in a triple-tilde fenced block to prevent prompt
@@ -318,6 +313,7 @@ func reconcileGoal(ctx context.Context, sessionID, goalID string) {
 			swarmBroadcaster.schedule(sessionID)
 			log.Printf("swarm: goal %s complete — all %d tasks terminal", goalID[:8], total)
 			go briefSiBotImmediate(sessionID)
+			go planeAutoCloseGoal(context.Background(), goalID)
 		}
 	}
 }
