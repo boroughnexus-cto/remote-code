@@ -96,36 +96,62 @@ Spec phase task description (for context):
 Run: git diff main...HEAD
 (Or the feature branch diff — whatever contains the work from the implement phase.)
 
-**Step 3 — Run mcp-aipeer acceptance review:**
+**Step 3 — Deterministic checks (do these first):**
+- Does the code compile? (run the build command for this repo)
+- Do existing tests pass? (run the test suite)
+- Record results.
+
+**Step 4 — Run mcp-aipeer acceptance review:**
 Use the peer_review tool (via MCP) with:
-  content: <full diff from Step 2>
+  content: <full diff from Step 2, prefixed with the acceptance criteria>
   review_type: "test"
 
-This model will check whether the diff satisfies the acceptance criteria.
+Prefix the content with the criteria so the reviewer knows what to check:
 
-**Step 4 — Write judge notes to blackboard:**
+    ## Acceptance Criteria to verify:
+    <criteria from Step 1>
+
+    ## Implementation diff:
+    <git diff output>
+
+**Step 5 — Evaluate each criterion individually:**
+For each acceptance criterion from the spec, determine:
+  - PASS: the diff clearly implements it
+  - PARTIAL: partially implemented, missing edge cases
+  - FAIL: not implemented or contradicts the criterion
+
+Produce a structured result (write this to the blackboard in Step 6):
+
+    {
+      "verdict": "PASS" or "FAIL",
+      "build_ok": true/false,
+      "tests_ok": true/false,
+      "criteria": [
+        {"criterion": "...", "status": "pass|partial|fail", "reason": "..."}
+      ],
+      "blocking_issues": ["..."],
+      "reasoning": "..."
+    }
+
+**Step 6 — Write judge notes to blackboard:**
 Append to: %s/decisions.md
 
 Head the section: "## Acceptance Criteria Judge [task %s]"
-Include:
-  - Each acceptance criterion with PASS/FAIL verdict
-  - Severity of any failures
-  - Your gate decision
+Include the structured JSON result from Step 5 plus your overall reasoning.
 
-**Step 5 — Gate (REQUIRED):**
+**Step 7 — Gate (REQUIRED):**
 
-If ALL acceptance criteria PASS (no CRITICAL or HIGH failures):
+If ALL criteria PASS (or only PARTIAL with no blocking issues) AND build+tests ok:
   POST %s/api/swarm/sessions/%s/tasks/%s/complete
   {"confidence": 0.90, "tests_passed": true,
-   "summary": "All acceptance criteria verified. <brief summary of evidence>"}
+   "summary": "Judge PASSED. All acceptance criteria verified. <brief evidence summary>"}
 
-If ANY CRITICAL or HIGH failures exist (criteria NOT met):
-  Do NOT mark complete yet.
-  Write the specific failed criteria to the blackboard.
+If ANY criterion FAILS, OR build/tests fail, OR blocking issues exist:
+  Write the specific failures to the blackboard first.
   Complete with LOW confidence so it goes to needs_review:
   POST %s/api/swarm/sessions/%s/tasks/%s/complete
   {"confidence": 0.40, "tests_passed": false,
-   "summary": "Acceptance criteria FAILED. Criteria not met: <list them specifically>. Implementation must be reworked."}
+   "summary": "Judge FAILED. Criteria not met: <list specifically>. Build ok: <y/n>. Tests ok: <y/n>."}
 
 SiBot will see the needs_review state and direct the implement phase to be reworked.
 Do not attempt to fix the code yourself — that is the implement phase's job.
