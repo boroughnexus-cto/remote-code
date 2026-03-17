@@ -505,6 +505,8 @@ func handleSwarmSessionsAPI(w http.ResponseWriter, r *http.Request, ctx context.
 		} else {
 			handleSwarmGoalsAPI(w, r, ctx, sessionID)
 		}
+	case "triage":
+		handleSwarmTriageAPI(w, r, ctx, sessionID, subPath[1:])
 	case "escalations":
 		handleSwarmEscalationsAPI(w, r, ctx, sessionID, subPath[1:])
 	case "orchestrator":

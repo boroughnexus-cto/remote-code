@@ -142,6 +142,7 @@ func applyMigrations(database *sql.DB) error {
 		"db/migrations/024_goal_plane_id.sql",
 		"db/migrations/025_autopilot.sql",
 		"db/migrations/026_reliability.sql",
+		"db/migrations/027_triage.sql",
 	}
 
 	for _, migrationPath := range migrations {
