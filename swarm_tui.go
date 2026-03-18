@@ -496,6 +496,9 @@ type tuiModel struct {
 	workQueueItems []WorkQueueItem
 	workQueueSID   string
 
+	// Despawn confirmation (two-press: first d sets, second d executes, esc clears)
+	pendingDespawn *tuiSidebarItem
+
 	// Clients
 	client *swarmClient
 	ws     *tuiWSManager
@@ -854,6 +857,11 @@ func (m tuiModel) updateInput(msg tea.KeyMsg) (tuiModel, []tea.Cmd) {
 
 func (m tuiModel) updateSidebar(msg tea.KeyMsg) (tuiModel, []tea.Cmd) {
 	var cmds []tea.Cmd
+	// Cancel pending despawn on any key except d
+	if m.pendingDespawn != nil && msg.String() != "d" {
+		m.pendingDespawn = nil
+		m.flash = ""
+	}
 	switch msg.String() {
 	case "q", "ctrl+c":
 		m.ws.closeAll()
@@ -905,8 +913,16 @@ func (m tuiModel) updateSidebar(msg tea.KeyMsg) (tuiModel, []tea.Cmd) {
 		if it != nil && it.kind == tuiItemAgent {
 			agent := m.lookupAgent(it.sid, it.eid)
 			if agent != nil && agent.TmuxSession != nil {
-				path := "/api/swarm/sessions/" + it.sid + "/agents/" + it.eid + "/despawn"
-				cmds = append(cmds, m.client.post("despawn", path, nil))
+				if m.pendingDespawn != nil && m.pendingDespawn.eid == it.eid {
+					// Second press — confirmed, execute despawn
+					path := "/api/swarm/sessions/" + it.sid + "/agents/" + it.eid + "/despawn"
+					cmds = append(cmds, m.client.post("despawn", path, nil))
+					m.pendingDespawn = nil
+				} else {
+					// First press — require confirmation
+					m.pendingDespawn = it
+					m.setFlash("Despawn "+agent.Name+"? Press d again to confirm, Esc to cancel", true)
+				}
 			} else {
 				m.setFlash("Agent not running", false)
 			}
@@ -1496,7 +1512,7 @@ func (m tuiModel) viewTaskDetail(w *strings.Builder, sid, tid string, rightW int
 	if task.Phase != nil {
 		phaseLabel := fmt.Sprintf("  Phase: %s", *task.Phase)
 		if task.PhaseOrder != nil {
-			phaseLabel += fmt.Sprintf(" (%d/7)", *task.PhaseOrder)
+			phaseLabel += fmt.Sprintf(" (%d/8)", *task.PhaseOrder)
 		}
 		w.WriteString(lipgloss.NewStyle().Foreground(colorBlue).Render(phaseLabel) + "\n")
 	}

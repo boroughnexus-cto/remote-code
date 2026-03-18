@@ -7,7 +7,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -221,6 +223,29 @@ func injectToSwarmAgent(ctx context.Context, agentID, text string) error {
 // Status monitor
 // -----------------
 
+// stuckTimers tracks when each agent entered a non-progressing status
+// (thinking or waiting). If the agent stays in that status longer than
+// swarmStuckTimeout(), it is promoted to "stuck".
+//
+// Env: SWARM_STUCK_TIMEOUT — duration string (default "15m"). Set to "0" to
+// disable time-based stuck detection (pattern matching only).
+var (
+	stuckTimers   = map[string]time.Time{} // agentID → time status last changed
+	stuckTimersMu sync.Mutex
+)
+
+func swarmStuckTimeout() time.Duration {
+	if v := os.Getenv("SWARM_STUCK_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			return d
+		}
+		if secs, err := strconv.Atoi(v); err == nil {
+			return time.Duration(secs) * time.Second
+		}
+	}
+	return 15 * time.Minute
+}
+
 func startSwarmMonitor() {
 	// Immediate reconciliation on startup — clears stale tmux references from DB
 	go checkSwarmAgentStatuses()
@@ -280,6 +305,28 @@ func checkSwarmAgentStatuses() {
 
 		newStatus := detectSwarmAgentStatus(a.tmuxSession)
 
+		// Time-based stuck promotion: if pattern detection returns thinking/waiting
+		// and the agent has been in that state for longer than swarmStuckTimeout(),
+		// escalate to stuck. Active statuses (coding/testing/done) reset the timer.
+		stuckTimeout := swarmStuckTimeout()
+		if stuckTimeout > 0 {
+			stuckTimersMu.Lock()
+			switch newStatus {
+			case "coding", "testing", "done", "stuck", "idle":
+				// Progress or terminal state — reset the timer
+				delete(stuckTimers, a.id)
+			case "thinking", "waiting":
+				if t, ok := stuckTimers[a.id]; !ok {
+					// First time we see this non-progressing status — start timer
+					stuckTimers[a.id] = time.Now()
+				} else if time.Since(t) > stuckTimeout {
+					// Agent has been non-progressing long enough — promote to stuck
+					newStatus = "stuck"
+				}
+			}
+			stuckTimersMu.Unlock()
+		}
+
 		// Only update if status changed (avoids noisy broadcasts)
 		var curStatus string
 		database.QueryRowContext(ctx, "SELECT status FROM swarm_agents WHERE id = ?", a.id).Scan(&curStatus)
@@ -311,8 +358,26 @@ func isTmuxSessionAlive(session string) bool {
 	return exec.Command("tmux", "has-session", "-t", session).Run() == nil
 }
 
-// detectSwarmAgentStatus inspects the last few lines of the tmux pane to infer
-// what Claude Code is currently doing.
+// detectSwarmAgentStatus inspects the last 8 lines of the agent's tmux pane
+// (captured every 15 seconds) and classifies the agent's current activity via
+// string pattern matching. The caller may additionally promote "thinking" or
+// "waiting" to "stuck" if the agent remains in that state past swarmStuckTimeout.
+//
+// Status conditions (checked in priority order):
+//
+//	stuck   — tmux capture-pane fails (session unreachable), OR pane contains
+//	          "Error:", "FAILED", "fatal:", or "panic:"
+//	coding  — pane contains Claude Code tool-use names: Write(, Edit(, Bash(,
+//	          Read(, Search(, Grep(, str_replace, etc.
+//	thinking — pane contains Claude's active-output indicators: ⏺ ◆ ● ↳ ✓
+//	waiting  — pane contains "Do you want to proceed", "Press Enter", "(y/n)",
+//	           or "waiting for input"
+//	thinking — fallback (no pattern matched)
+//
+// Time-based escalation: configure SWARM_STUCK_TIMEOUT (default "15m").
+// If an agent stays in thinking/waiting longer than this threshold without
+// a transition to coding/testing/done, it is promoted to stuck. Set to "0"
+// to disable time-based escalation.
 func detectSwarmAgentStatus(tmuxSession string) string {
 	out, err := exec.Command("tmux", "capture-pane", "-t", tmuxSession, "-p", "-S", "-8").CombinedOutput()
 	if err != nil {
