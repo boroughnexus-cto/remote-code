@@ -116,10 +116,20 @@ func spawnSwarmAgent(ctx context.Context, sessionID, agentID string) error {
 	if tmuxSession != "" {
 		return fmt.Errorf("agent is already spawned in session %s", tmuxSession)
 	}
-	// Check cost circuit breaker before spawning.
+
+	// Acquire spawn mutex before limit checks to prevent TOCTOU races between
+	// concurrent spawn calls (both pass count check before either updates DB).
+	spawnMu.Lock()
+	defer spawnMu.Unlock()
+
+	// Check cost circuit breaker and resource limits before spawning.
 	if err := checkSessionCostLimit(ctx, sessionID); err != nil {
 		return err
 	}
+	if err := checkAllSpawnLimits(ctx, sessionID); err != nil {
+		return err
+	}
+
 	// Orchestrators get SiBot spawn; any other agent without a repo gets a scratch workdir.
 	if repoPath == "" && agentRole == "orchestrator" {
 		return spawnSiBotAgent(ctx, sessionID, agentID)
@@ -309,11 +319,13 @@ func injectToSwarmAgent(ctx context.Context, agentID, text string) error {
 		return fmt.Errorf("agent is not spawned — spawn it first")
 	}
 
-	// Send text, then Enter (same pattern as existing task executions)
-	if out, err := exec.Command("tmux", "send-keys", "-t", tmuxSession, text).CombinedOutput(); err != nil {
+	// -l sends text as literal input so tmux does not interpret tokens as key names
+	// (e.g. "Up", "Enter", "C-c"). -- ends option parsing so text starting with
+	// "-" is not treated as a tmux flag.
+	if out, err := exec.Command("tmux", "send-keys", "-t", tmuxSession, "-l", "--", text).CombinedOutput(); err != nil {
 		return fmt.Errorf("tmux send-keys: %v: %s", err, out)
 	}
-	time.Sleep(80 * time.Millisecond)
+	// Enter must be sent as a named key (not literal) to press the actual Return key.
 	if out, err := exec.Command("tmux", "send-keys", "-t", tmuxSession, "Enter").CombinedOutput(); err != nil {
 		return fmt.Errorf("tmux enter: %v: %s", err, out)
 	}

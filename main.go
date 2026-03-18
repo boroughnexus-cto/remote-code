@@ -67,6 +67,8 @@ func main() {
 	startSiBotHeartbeat()
 	startIPCPoller()
 	startTaskWatchdog()
+	startOrphanSweeper()
+	startDiskUsagePoller()
 	validateIntegrationConfig()
 	go startCIPoller(context.Background())
 	go startPlaneAdapter(context.Background())

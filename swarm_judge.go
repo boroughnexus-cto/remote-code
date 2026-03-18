@@ -71,6 +71,10 @@ func maybeInjectJudge(ctx context.Context, taskID string) {
 		goalID.String,
 	).Scan(&specDesc)
 
+	// Sanitize DB-sourced content before embedding in fenced blocks.
+	specDesc = sanitizeExternalContent(specDesc)
+	goalDesc = sanitizeExternalContent(goalDesc)
+
 	bbDir := swarmBlackboardDir(sessionID)
 	apiBase := swarmAPIBase()
 

@@ -415,6 +415,10 @@ func handleSwarmAPI(w http.ResponseWriter, r *http.Request, ctx context.Context,
 		handleSwarmRolePromptsAPI(w, r, ctx, pathParts[1:])
 		return
 	}
+	if len(pathParts) > 0 && pathParts[0] == "cleanup" {
+		handleSwarmCleanupAPI(w, r, ctx)
+		return
+	}
 	if len(pathParts) == 0 || pathParts[0] != "sessions" {
 		w.WriteHeader(http.StatusNotFound)
 		json.NewEncoder(w).Encode(map[string]string{"error": "unknown swarm endpoint"})

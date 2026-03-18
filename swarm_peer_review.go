@@ -65,6 +65,10 @@ func maybeInjectPeerReview(ctx context.Context, taskID string) {
 		).Scan(&prevDesc)
 	}
 
+	// Sanitize DB-sourced content before embedding in fenced blocks.
+	prevDesc = sanitizeExternalContent(prevDesc)
+	goalDesc = sanitizeExternalContent(goalDesc)
+
 	bbDir := swarmBlackboardDir(sessionID)
 	reviewType := "architecture"
 	artifactInstructions := fmt.Sprintf("Read the plan written in the plan phase. Primary location: `%s/decisions.md` — look for the plan section. Also check `%s/context.md`.", bbDir, bbDir)
@@ -87,6 +91,7 @@ Previous phase task description (for context):
 ~~~
 %s
 ~~~
+
 
 **Step 2 — Run mcp-aipeer:**
 Use the peer_review tool (via MCP) with:
