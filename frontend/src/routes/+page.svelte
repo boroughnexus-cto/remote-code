@@ -109,7 +109,7 @@
 </script>
 
 <svelte:head>
-	<title>Dashboard - Remote-Code</title>
+	<title>Dashboard - SwarmOps</title>
 </svelte:head>
 
 <div class="space-y-6">

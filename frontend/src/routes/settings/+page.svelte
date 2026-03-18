@@ -37,7 +37,7 @@
 </script>
 
 <svelte:head>
-	<title>Settings - Remote-Code</title>
+	<title>Settings - SwarmOps</title>
 </svelte:head>
 
 <div class="space-y-6">
@@ -220,13 +220,13 @@
 			<Card>
 				<h3 class="text-lg font-semibold text-vanna-navy mb-4">Support</h3>
 				<div class="space-y-3">
-					<a href="https://github.com/remote-code/remote-code" target="_blank" class="block text-sm text-vanna-teal hover:text-vanna-teal/80 transition-colors">
+					<a href="https://github.com/boroughnexus-cto/remote-code" target="_blank" class="block text-sm text-vanna-teal hover:text-vanna-teal/80 transition-colors">
 						Documentation
 					</a>
-					<a href="https://github.com/remote-code/remote-code/issues" target="_blank" class="block text-sm text-vanna-teal hover:text-vanna-teal/80 transition-colors">
+					<a href="https://github.com/boroughnexus-cto/remote-code/issues" target="_blank" class="block text-sm text-vanna-teal hover:text-vanna-teal/80 transition-colors">
 						Report Issues
 					</a>
-					<a href="https://github.com/remote-code/remote-code" target="_blank" class="block text-sm text-vanna-teal hover:text-vanna-teal/80 transition-colors">
+					<a href="https://github.com/boroughnexus-cto/remote-code" target="_blank" class="block text-sm text-vanna-teal hover:text-vanna-teal/80 transition-colors">
 						Star on GitHub
 					</a>
 				</div>

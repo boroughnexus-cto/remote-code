@@ -1,12 +1,12 @@
-# Remote-Code
+# SwarmOps
 
 > ⚠️ **EXPERIMENTAL SOFTWARE** - This project is in active development. Expect breaking changes on each commit. No backwards compatibility will be supported yet.
 
-Remote AI agent orchestration platform: Manage multiple coding agents, projects, and tasks from anywhere via web terminals, secure tunnels, and mobile app.
+SwarmOps — AI agent orchestration platform: Manage multiple coding agents, projects, and tasks from anywhere via web terminals, secure tunnels, and mobile app.
 
-## What Remote-Code Does
+## What SwarmOps Does
 
-Remote-Code is a web-based development environment that lets you **manage multiple AI coding agents from anywhere**. Unlike traditional development setups that tie you to a single machine, Remote-Code gives you a centralized command center that's accessible from any device with a browser.
+SwarmOps is a web-based development environment that lets you **manage multiple AI coding agents from anywhere**. Unlike traditional development setups that tie you to a single machine, SwarmOps gives you a centralized command center that's accessible from any device with a browser.
 
 ### 🎛️ **Manage** - Complete AI Agent Orchestration
 

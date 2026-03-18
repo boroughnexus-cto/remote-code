@@ -265,7 +265,7 @@
 </script>
 
 <svelte:head>
-	<title>Dev Server: {directory?.path || 'Loading...'} - Remote-Code</title>
+	<title>Dev Server: {directory?.path || 'Loading...'} - SwarmOps</title>
 	<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" />
 </svelte:head>
 

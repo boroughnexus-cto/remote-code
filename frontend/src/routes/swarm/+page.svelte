@@ -81,7 +81,7 @@
 </script>
 
 <svelte:head>
-	<title>Swarm — Remote-Code</title>
+	<title>Swarm — SwarmOps</title>
 </svelte:head>
 
 <div class="max-w-5xl mx-auto">

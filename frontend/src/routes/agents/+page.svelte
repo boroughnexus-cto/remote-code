@@ -160,7 +160,7 @@
 </script>
 
 <svelte:head>
-	<title>Agents - Remote-Code</title>
+	<title>Agents - SwarmOps</title>
 </svelte:head>
 
 <div class="space-y-6">

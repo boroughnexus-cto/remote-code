@@ -74,7 +74,7 @@
 					<span class="text-white font-bold text-sm">R</span>
 				</div>
 			{:else}
-				<img src="https://remote-code.com/static/images/banner.svg" class="h-8" alt="Remote-Code Logo" />
+				<img src="https://swarmops.io/static/images/banner.svg" class="h-8" alt="SwarmOps Logo" />
 			{/if}
 
 			<!-- Mobile close button -->
@@ -132,7 +132,7 @@
 		<div class="px-3 py-4 border-t border-slate-200/60">
 			{#if !collapsed}
 				<div class="px-3 py-2 bg-vanna-cream/30 rounded-xl">
-					<p class="text-xs text-slate-500">Remote-Code v1.0.0</p>
+					<p class="text-xs text-slate-500">SwarmOps v1.0.0</p>
 					<p class="text-xs text-vanna-teal">Connected</p>
 				</div>
 			{:else}

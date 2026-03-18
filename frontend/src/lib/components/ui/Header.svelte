@@ -66,7 +66,7 @@
 
 				<!-- Mobile logo -->
 				<div class="lg:hidden">
-					<img src="https://remote-code.com/static/images/banner.svg" class="h-6" alt="Remote-Code" />
+					<img src="https://swarmops.io/static/images/banner.svg" class="h-6" alt="SwarmOps" />
 				</div>
 			</div>
 
@@ -158,8 +158,8 @@
 					{#if showUserMenu}
 						<div class="absolute right-0 z-50 mt-2 w-56 bg-white rounded-2xl shadow-vanna-card border border-slate-200/60 overflow-hidden">
 							<div class="px-4 py-3 border-b border-slate-200 bg-vanna-cream/30">
-								<p class="text-sm font-semibold text-vanna-navy">Remote-Code User</p>
-								<p class="text-xs text-slate-500 truncate">user@remote-code.com</p>
+								<p class="text-sm font-semibold text-vanna-navy">SwarmOps User</p>
+								<p class="text-xs text-slate-500 truncate">user@swarmops.io</p>
 							</div>
 							<div class="py-1">
 								<a href="/profile" class="flex items-center gap-3 px-4 py-2.5 text-sm text-slate-600 hover:bg-vanna-cream/50 hover:text-vanna-navy transition-colors">

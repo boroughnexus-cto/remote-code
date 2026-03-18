@@ -3,7 +3,7 @@
 
 	// segments should be an array of objects like:
 	// [
-	//   { label: "Home", href: "/", icon: "banner" }, // supports icon: "banner" for Remote-Code logo
+	//   { label: "Home", href: "/", icon: "banner" }, // supports icon: "banner" for SwarmOps Logo
 	//   { label: "Projects", href: "/projects" },
 	//   { label: "My Project", href: "/projects/1" }
 	// ]
@@ -20,8 +20,8 @@
 			>
 				{#if segment.icon === "banner"}
 					<img
-						src="https://remote-code.com/static/images/banner.svg"
-						alt="Remote-Code Logo"
+						src="https://swarmops.io/static/images/banner.svg"
+						alt="SwarmOps Logo"
 						class="h-10 w-auto"
 					/>
 				{:else if index === 0}
@@ -40,8 +40,8 @@
 			<span class="text-vanna-navy font-medium flex items-center gap-2" aria-current="page">
 				{#if segment.icon === "banner"}
 					<img
-						src="https://remote-code.com/static/images/banner.svg"
-						alt="Remote-Code Logo"
+						src="https://swarmops.io/static/images/banner.svg"
+						alt="SwarmOps Logo"
 						class="h-10 w-auto"
 					/>
 				{:else if segments.length === 1}

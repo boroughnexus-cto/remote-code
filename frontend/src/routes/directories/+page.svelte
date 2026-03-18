@@ -147,7 +147,7 @@
 </script>
 
 <svelte:head>
-	<title>Directories - Remote-Code</title>
+	<title>Directories - SwarmOps</title>
 </svelte:head>
 
 <div class="space-y-6">

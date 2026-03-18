@@ -265,7 +265,7 @@
 </script>
 
 <svelte:head>
-	<title>Terminal: {sessionId} - Remote-Code</title>
+	<title>Terminal: {sessionId} - SwarmOps</title>
 	<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" />
 </svelte:head>
 
@@ -299,8 +299,8 @@
 				<div class="flex items-center justify-between">
 					<div class="flex items-center gap-4">
 						<img 
-							src="https://remote-code.com/static/images/banner.svg" 
-							alt="Remote-Code Logo" 
+							src="https://swarmops.io/static/images/banner.svg" 
+							alt="SwarmOps Logo" 
 							class="h-10 w-auto"
 						/>
 						<div>

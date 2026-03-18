@@ -38,7 +38,7 @@
 </script>
 
 <svelte:head>
-	<title>Files - Remote-Code</title>
+	<title>Files - SwarmOps</title>
 </svelte:head>
 
 <div class="space-y-6">

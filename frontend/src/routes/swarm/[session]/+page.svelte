@@ -339,7 +339,7 @@
 </script>
 
 <svelte:head>
-	<title>{session?.name ?? 'Swarm'} — Remote-Code</title>
+	<title>{session?.name ?? 'Swarm'} — SwarmOps</title>
 </svelte:head>
 
 {#if loading}

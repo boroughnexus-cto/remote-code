@@ -90,7 +90,7 @@
 </script>
 
 <svelte:head>
-	<title>Swarm Live — Remote-Code</title>
+	<title>Swarm Live — SwarmOps</title>
 </svelte:head>
 
 <div class="floor-wrap">

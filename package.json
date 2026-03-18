@@ -1,5 +1,5 @@
 {
-  "name": "remote-code",
+  "name": "swarmops",
   "version": "1.0.0",
   "main": "main.go",
   "scripts": {
@@ -7,8 +7,8 @@
     "dev": "make dev",
     "clean": "make clean"
   },
-  "keywords": ["terminal", "tmux", "remote", "development"],
+  "keywords": ["swarm", "agents", "claude", "orchestration", "tmux"],
   "author": "",
   "license": "ISC",
-  "description": "Remote-Code - Interactive terminal with tmux session management"
+  "description": "SwarmOps - AI agent orchestration platform with multi-agent coordination and task management"
 }

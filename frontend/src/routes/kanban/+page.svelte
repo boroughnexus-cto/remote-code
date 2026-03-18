@@ -118,7 +118,7 @@
 </script>
 
 <svelte:head>
-	<title>Kanban - Remote-Code</title>
+	<title>Kanban - SwarmOps</title>
 </svelte:head>
 
 <div class="space-y-6">

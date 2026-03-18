@@ -135,7 +135,7 @@
 </script>
 
 <svelte:head>
-	<title>Task Executions - Remote-Code</title>
+	<title>Task Executions - SwarmOps</title>
 </svelte:head>
 
 <div class="space-y-6">

@@ -574,7 +574,7 @@
 </script>
 
 <svelte:head>
-	<title>Task Execution {executionId} - Remote-Code</title>
+	<title>Task Execution {executionId} - SwarmOps</title>
 	<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" />
 </svelte:head>
 

@@ -688,7 +688,7 @@
 </script>
 
 <svelte:head>
-	<title>{project?.name || 'Project'} - Remote-Code</title>
+	<title>{project?.name || 'Project'} - SwarmOps</title>
 </svelte:head>
 
 <div class="space-y-6">

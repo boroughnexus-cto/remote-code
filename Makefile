@@ -6,7 +6,7 @@ frontend:
 	cd frontend && npm run build
 
 backend:
-	go build -o remote-code .
+	go build -o swarmops .
 
 dev:
 	go run .
@@ -19,14 +19,14 @@ sqlc-generate:
 
 clean:
 	rm -rf static/*
-	rm -f remote-code
-	rm -f remote-code.db
-	rm -f remote-code-test*.db
+	rm -f swarmops
+	rm -f swarmops.db
+	rm -f swarmops-test*.db
 
 run: build
 	@echo "Killing any process running on port 8080..."
 	@lsof -ti:8080 | xargs -r kill -9 2>/dev/null || true
-	./remote-code
+	./swarmops
 
 ## test: run all tests
 test:
