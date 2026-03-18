@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -104,6 +105,28 @@ func spawnSwarmAgent(ctx context.Context, sessionID, agentID string) error {
 			cleanupWorktree(repoPath, worktreePath, branchName)
 		}
 		return fmt.Errorf("tmux new-session: %v: %s", err, out)
+	}
+
+	// Inject SWARM_AGENT_ID and SWARM_SESSION_ID into the tmux session environment
+	// so the Stop hook script can identify which agent's outbox to write to.
+	exec.Command("tmux", "setenv", "-t", tmuxName, "SWARM_AGENT_ID", agentID).Run()   //nolint:errcheck
+	exec.Command("tmux", "setenv", "-t", tmuxName, "SWARM_SESSION_ID", sessionID).Run() //nolint:errcheck
+
+	// Write .claude/settings.json to register the Stop hook
+	if err := writeAgentClaudeSettings(worktreePath); err != nil {
+		log.Printf("swarm: warning — could not write .claude/settings.json: %v", err)
+	}
+
+	// Add .claude/settings.json to .gitignore (alongside SWARM_CONTEXT.md)
+	gitignorePath := filepath.Join(worktreePath, ".gitignore")
+	gitignoreExisting, _ := os.ReadFile(gitignorePath)
+	if !strings.Contains(string(gitignoreExisting), ".claude/settings.json") {
+		f, err := os.OpenFile(gitignorePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err == nil {
+			fmt.Fprintln(f, "\n# Claude Code local settings (swarm hook config)")
+			fmt.Fprintln(f, ".claude/settings.json")
+			f.Close()
+		}
 	}
 
 	// For orchestrator role: write context file before launching claude
@@ -518,6 +541,15 @@ func spawnSiBotAgent(ctx context.Context, sessionID, agentID string) error {
 		return fmt.Errorf("tmux new-session: %v: %s", err, out)
 	}
 
+	// Inject SWARM_AGENT_ID and SWARM_SESSION_ID into the tmux session environment
+	exec.Command("tmux", "setenv", "-t", tmuxName, "SWARM_AGENT_ID", agentID).Run()   //nolint:errcheck
+	exec.Command("tmux", "setenv", "-t", tmuxName, "SWARM_SESSION_ID", sessionID).Run() //nolint:errcheck
+
+	// Write .claude/settings.json to register the Stop hook
+	if err := writeAgentClaudeSettings(workDir); err != nil {
+		log.Printf("swarm: warning — could not write .claude/settings.json for SiBot: %v", err)
+	}
+
 	// Launch claude
 	if out, err := exec.Command("tmux", "send-keys", "-t", tmuxName, swarmClaudeCommand, "Enter").CombinedOutput(); err != nil {
 		log.Printf("swarm: warning — could not send claude command: %v: %s", err, out)
@@ -794,4 +826,103 @@ If an agent needs human decision-making, inject a message telling them to wait a
 		}
 	}
 	return nil
+}
+
+// -----------------
+// Hook script
+// -----------------
+
+const agentStopHookScript = `#!/bin/bash
+# Claude Code Stop hook — writes heartbeat IPC to swarm agent outbox
+# Env vars injected by swarm spawner: SWARM_AGENT_ID, SWARM_SESSION_ID
+
+AGENT_ID="${SWARM_AGENT_ID:-}"
+SESSION_ID="${SWARM_SESSION_ID:-}"
+[ -z "$AGENT_ID" ] || [ -z "$SESSION_ID" ] && exit 0
+
+OUTBOX_DIR="${HOME}/.remote-code/swarm/${SESSION_ID}/agents/${AGENT_ID}/outbox"
+[ ! -d "$OUTBOX_DIR" ] && exit 0
+
+EVENTS_FILE="${OUTBOX_DIR}/events.jsonl"
+
+# Parse stop hook stdin for transcript_path
+_json=$(cat)
+transcript_path=$(printf '%s' "$_json" | jq -r '.transcript_path // ""' 2>/dev/null)
+
+model=""
+tokens_used=0
+
+if [ -n "$transcript_path" ] && [ -f "$transcript_path" ] && command -v jq >/dev/null 2>&1; then
+    # Extract model from last assistant message
+    model=$(grep -F '"type":"assistant"' "$transcript_path" 2>/dev/null | tail -1 | \
+        jq -r '.message.model // ""' 2>/dev/null)
+    # Sum cumulative tokens across all assistant messages
+    tokens_used=$(grep -F '"type":"assistant"' "$transcript_path" 2>/dev/null | \
+        jq -s '[.[].message.usage |
+            ((.input_tokens // 0) + (.output_tokens // 0) +
+             (.cache_creation_input_tokens // 0) + (.cache_read_input_tokens // 0))
+        ] | add // 0' 2>/dev/null)
+fi
+
+# context_pct — try from stop hook payload first, fall back to 0
+context_pct=$(printf '%s' "$_json" | jq -r '
+    if .context_window.used_percentage != null then
+        (.context_window.used_percentage / 100)
+    else 0 end' 2>/dev/null)
+context_pct="${context_pct:-0}"
+
+ts=$(date +%s)
+printf '{"event":"heartbeat","context_pct":%s,"model_name":"%s","tokens_used":%s,"ts":%s}\n' \
+    "$context_pct" \
+    "${model:-}" \
+    "${tokens_used:-0}" \
+    "$ts" \
+    >> "$EVENTS_FILE"
+`
+
+var ensureHookOnce sync.Once
+
+// ensureSwarmHookScript writes the Stop hook shell script to
+// ~/.remote-code/swarm/hooks/agent-stop.sh and makes it executable.
+// It is safe to call multiple times — uses sync.Once internally.
+func ensureSwarmHookScript() {
+	ensureHookOnce.Do(func() {
+		hooksDir := filepath.Join(swarmBaseDir(), "hooks")
+		if err := os.MkdirAll(hooksDir, 0755); err != nil {
+			log.Printf("swarm hooks: mkdir %s: %v", hooksDir, err)
+			return
+		}
+		scriptPath := filepath.Join(hooksDir, "agent-stop.sh")
+		if err := os.WriteFile(scriptPath, []byte(agentStopHookScript), 0755); err != nil {
+			log.Printf("swarm hooks: write %s: %v", scriptPath, err)
+			return
+		}
+		log.Printf("swarm hooks: wrote %s", scriptPath)
+	})
+}
+
+// writeAgentClaudeSettings writes a .claude/settings.json into the agent worktree
+// that registers the Stop hook script so Claude Code fires it on each response.
+func writeAgentClaudeSettings(worktreePath string) error {
+	hookScript := filepath.Join(swarmBaseDir(), "hooks", "agent-stop.sh")
+	settings := map[string]interface{}{
+		"hooks": map[string]interface{}{
+			"Stop": []map[string]interface{}{
+				{
+					"hooks": []map[string]interface{}{
+						{"type": "command", "command": hookScript},
+					},
+				},
+			},
+		},
+	}
+	claudeDir := filepath.Join(worktreePath, ".claude")
+	if err := os.MkdirAll(claudeDir, 0755); err != nil {
+		return err
+	}
+	b, err := json.Marshal(settings)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(claudeDir, "settings.json"), b, 0644)
 }

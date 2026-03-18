@@ -26,6 +26,8 @@ type IPCEvent struct {
 	ContextPct  float64 `json:"context_pct,omitempty"`
 	HandoffPath string  `json:"handoff_path,omitempty"`
 	Content     string  `json:"content,omitempty"`
+	ModelName   string  `json:"model_name,omitempty"`
+	TokensUsed  int64   `json:"tokens_used,omitempty"`
 	Ts          int64   `json:"ts,omitempty"`
 }
 
@@ -289,6 +291,18 @@ func handleHeartbeat(ctx context.Context, sessionID, agentID string, ev IPCEvent
 		"UPDATE swarm_agents SET context_pct=? WHERE id=?",
 		pct, agentID,
 	)
+
+	// Persist model_name and tokens_used when present
+	if ev.ModelName != "" {
+		database.ExecContext(ctx, //nolint:errcheck
+			"UPDATE swarm_agents SET model_name=? WHERE id=?",
+			ev.ModelName, agentID)
+	}
+	if ev.TokensUsed > 0 {
+		database.ExecContext(ctx, //nolint:errcheck
+			"UPDATE swarm_agents SET tokens_used=? WHERE id=?",
+			ev.TokensUsed, agentID)
+	}
 
 	// Update last_heartbeat_at on the active task (for watchdog liveness tracking)
 	if ev.TaskID != "" {

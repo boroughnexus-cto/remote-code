@@ -62,6 +62,8 @@ type tuiAgent struct {
 	LatestNote   *string `json:"latest_note"`
 	ContextPct   float64 `json:"context_pct"`
 	ContextState string  `json:"context_state"`
+	ModelName    string  `json:"model_name,omitempty"`
+	TokensUsed   int64   `json:"tokens_used,omitempty"`
 }
 
 type tuiTask struct {
@@ -1243,6 +1245,15 @@ func (m tuiModel) viewHUD() string {
 		parts = append(parts, lipgloss.NewStyle().Foreground(colorTeal).Bold(true).
 			Render(fmt.Sprintf("⚙%d auto", autopilotCount)))
 	}
+	var totalTokens int64
+	for _, st := range m.states {
+		for _, a := range st.Agents {
+			totalTokens += a.TokensUsed
+		}
+	}
+	if totalTokens > 0 {
+		parts = append(parts, dimStyle.Render(formatTokensK(totalTokens)+" tok"))
+	}
 	return hudStyle.Width(m.w).Render(strings.Join(parts, "  "))
 }
 
@@ -1491,8 +1502,31 @@ func (m tuiModel) viewAgentDetail(w *strings.Builder, sid, aid string, rightW in
 	if agent.ContextPct > 0 {
 		bar := contextBar(agent.ContextPct, infoW)
 		info.WriteString(bar + "\n")
+	} else if agent.ModelName != "" || agent.TokensUsed > 0 {
+		var metaParts []string
+		if agent.ModelName != "" {
+			modelShort := strings.TrimPrefix(agent.ModelName, "claude-")
+			metaParts = append(metaParts, dimStyle.Render(modelShort))
+		}
+		if agent.TokensUsed > 0 {
+			metaParts = append(metaParts, lipgloss.NewStyle().Foreground(colorTeal).Render(formatTokensK(agent.TokensUsed)+" tok"))
+		}
+		info.WriteString(strings.Join(metaParts, "  ") + "\n")
 	} else {
 		info.WriteString(dimStyle.Render(agent.Role + "  " + agent.ID[:8] + "…") + "\n")
+	}
+
+	// Model + tokens line (shown when context bar is present too)
+	if agent.ContextPct > 0 && (agent.ModelName != "" || agent.TokensUsed > 0) {
+		var metaParts []string
+		if agent.ModelName != "" {
+			modelShort := strings.TrimPrefix(agent.ModelName, "claude-")
+			metaParts = append(metaParts, dimStyle.Render(modelShort))
+		}
+		if agent.TokensUsed > 0 {
+			metaParts = append(metaParts, lipgloss.NewStyle().Foreground(colorTeal).Render(formatTokensK(agent.TokensUsed)+" tok"))
+		}
+		info.WriteString(strings.Join(metaParts, "  ") + "\n")
 	}
 
 	// ── Sprite card ───────────────────────────────────────────────────────────
@@ -1938,6 +1972,13 @@ func pluralS(n int) string {
 		return ""
 	}
 	return "s"
+}
+
+func formatTokensK(n int64) string {
+	if n >= 1_000_000 {
+		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
+	}
+	return fmt.Sprintf("%dk", n/1000)
 }
 
 // ─── Goals view ──────────────────────────────────────────────────────────────

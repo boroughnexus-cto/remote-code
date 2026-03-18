@@ -59,6 +59,9 @@ func main() {
 	database, queries = initDatabase()
 	defer database.Close()
 
+	// Ensure the Claude Code Stop hook script is written to disk
+	ensureSwarmHookScript()
+
 	// Start swarm agent status monitor
 	startSwarmMonitor()
 	startSiBotHeartbeat()

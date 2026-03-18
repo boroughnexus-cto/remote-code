@@ -324,15 +324,18 @@ func syncAllAutopilotSessions(ctx context.Context, baseCfg *planeConfig) {
 
 // planeFetchWorkQueueItems returns Plane issues for a given project and state groups.
 // Used by the TUI work queue panel API endpoint.
+// Only requires PLANE_API_URL, PLANE_API_KEY, PLANE_WORKSPACE — not the adapter-specific vars.
 func planeFetchWorkQueueItems(ctx context.Context, projectID string, stateGroups []string) ([]WorkQueueItem, error) {
-	baseCfg, ok := loadPlaneConfig()
-	if !ok {
-		return nil, fmt.Errorf("Plane not configured")
+	apiURL := os.Getenv("PLANE_API_URL")
+	apiKey := os.Getenv("PLANE_API_KEY")
+	workspace := os.Getenv("PLANE_WORKSPACE")
+	if apiURL == "" || apiKey == "" || workspace == "" {
+		return nil, fmt.Errorf("Plane not configured (need PLANE_API_URL, PLANE_API_KEY, PLANE_WORKSPACE)")
 	}
 	cfg := &planeConfig{
-		apiURL:    baseCfg.apiURL,
-		apiKey:    baseCfg.apiKey,
-		workspace: baseCfg.workspace,
+		apiURL:    apiURL,
+		apiKey:    apiKey,
+		workspace: workspace,
 		projectID: projectID,
 	}
 

@@ -55,6 +55,8 @@ type SwarmAgent struct {
 	Mission       *string `json:"mission"`
 	ContextPct    float64 `json:"context_pct"`
 	ContextState  string  `json:"context_state"`
+	ModelName     string  `json:"model_name,omitempty"`
+	TokensUsed    int64   `json:"tokens_used,omitempty"`
 	CreatedAt     int64   `json:"created_at"`
 }
 
@@ -234,7 +236,8 @@ func getSwarmState(ctx context.Context, sessionID string) (*SwarmState, error) {
 		`SELECT a.id, a.session_id, a.name, a.role, a.worktree_path, a.tmux_session, a.project,
 		        a.repo_path, a.status, a.current_file, a.current_task_id, a.mission,
 		        COALESCE(a.context_pct,0), COALESCE(a.context_state,'normal'), a.created_at,
-		        (SELECT content FROM swarm_agent_notes WHERE agent_id = a.id ORDER BY created_at DESC LIMIT 1)
+		        (SELECT content FROM swarm_agent_notes WHERE agent_id = a.id ORDER BY created_at DESC LIMIT 1),
+		        COALESCE(a.model_name,''), a.tokens_used
 		 FROM swarm_agents a WHERE a.session_id = ?
 		 ORDER BY CASE WHEN a.role = 'orchestrator' THEN 0 ELSE 1 END, a.created_at ASC`,
 		sessionID,
@@ -248,11 +251,13 @@ func getSwarmState(ctx context.Context, sessionID string) (*SwarmState, error) {
 	for agentRows.Next() {
 		var a SwarmAgent
 		var worktreePath, tmuxSession, project, repoPath, currentFile, currentTaskID, mission, latestNote sql.NullString
+		var tokensUsed sql.NullInt64
 		if err := agentRows.Scan(&a.ID, &a.SessionID, &a.Name, &a.Role,
 			&worktreePath, &tmuxSession, &project,
 			&repoPath, &a.Status,
 			&currentFile, &currentTaskID, &mission,
-			&a.ContextPct, &a.ContextState, &a.CreatedAt, &latestNote); err != nil {
+			&a.ContextPct, &a.ContextState, &a.CreatedAt, &latestNote,
+			&a.ModelName, &tokensUsed); err != nil {
 			return nil, err
 		}
 		a.WorktreePath = scanNullString(worktreePath)
@@ -263,6 +268,9 @@ func getSwarmState(ctx context.Context, sessionID string) (*SwarmState, error) {
 		a.CurrentTaskID = scanNullString(currentTaskID)
 		a.Mission = scanNullString(mission)
 		a.LatestNote = scanNullString(latestNote)
+		if tokensUsed.Valid {
+			a.TokensUsed = tokensUsed.Int64
+		}
 		agents = append(agents, a)
 	}
 
@@ -709,15 +717,17 @@ func handleSwarmPlaneIssuesAPI(w http.ResponseWriter, r *http.Request, ctx conte
 		return
 	}
 
-	// Resolve plane project ID for this session
+	// Resolve plane project ID: per-session config takes priority, then PLANE_PROJECT_ID env var
 	var projectID string
 	database.QueryRowContext(ctx,
 		"SELECT COALESCE(autopilot_plane_project_id,'') FROM swarm_sessions WHERE id=?", sessionID,
 	).Scan(&projectID)
-
+	if projectID == "" {
+		projectID = os.Getenv("PLANE_PROJECT_ID")
+	}
 	if projectID == "" {
 		w.WriteHeader(http.StatusConflict)
-		json.NewEncoder(w).Encode(map[string]string{"error": "no plane_project_id configured for this session"})
+		json.NewEncoder(w).Encode(map[string]string{"error": "no plane_project_id configured (set PLANE_PROJECT_ID env var or enable autopilot with a project)"})
 		return
 	}
 
