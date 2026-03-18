@@ -46,7 +46,10 @@ const (
 	tuiModalNewSession
 	tuiModalNewAgent
 	tuiModalNewTask
-	tuiModalQuickAgent // fast 1-field worker spawn
+	tuiModalQuickAgent  // fast 1-field worker spawn
+	tuiModalEditSession // rename session
+	tuiModalEditAgent   // edit agent name/mission/project/repo
+	tuiModalEditTask    // edit task title/description/project
 )
 
 // ─── Data types ───────────────────────────────────────────────────────────────
@@ -57,6 +60,8 @@ type tuiAgent struct {
 	Role         string  `json:"role"`
 	Status       string  `json:"status"`
 	Mission      *string `json:"mission"`
+	Project      *string `json:"project,omitempty"`
+	RepoPath     *string `json:"repo_path,omitempty"`
 	TmuxSession  *string `json:"tmux_session"`
 	CurrentTask  *string `json:"current_task_id"`
 	CurrentFile  *string `json:"current_file"`
@@ -70,6 +75,8 @@ type tuiAgent struct {
 type tuiTask struct {
 	ID            string   `json:"id"`
 	Title         string   `json:"title"`
+	Description   *string  `json:"description,omitempty"`
+	Project       *string  `json:"project,omitempty"`
 	Stage         string   `json:"stage"`
 	Phase         *string  `json:"phase,omitempty"`
 	PhaseOrder    *int64   `json:"phase_order,omitempty"`
@@ -410,6 +417,7 @@ type tuiModal struct {
 	fields []tuiModalField
 	cursor int
 	sid    string // context session ID
+	eid    string // entity ID (agent/task being edited)
 	err    string
 }
 
@@ -454,6 +462,50 @@ func newTUIModal(kind tuiModalKind, sid string) *tuiModal {
 		tuiModalQuickAgent: "+ Quick Spawn Worker",
 	}
 	return &tuiModal{kind: kind, title: titles[kind], fields: fields, sid: sid}
+}
+
+// newTUIEditModal opens a pre-populated edit modal for an existing session/agent/task.
+func newTUIEditModal(kind tuiModalKind, sid, eid string, values []string) *tuiModal {
+	type spec struct{ label, placeholder string }
+	var specs []spec
+	switch kind {
+	case tuiModalEditSession:
+		specs = []spec{{"Name", "session name"}}
+	case tuiModalEditAgent:
+		specs = []spec{
+			{"Name", "e.g. Alice"},
+			{"Mission", "north star objective (optional)"},
+			{"Project", "project name (optional)"},
+			{"Repo Path", "/absolute/path/to/repo (optional)"},
+		}
+	case tuiModalEditTask:
+		specs = []spec{
+			{"Title", "task title"},
+			{"Description", "details (optional)"},
+			{"Project", "project (optional)"},
+		}
+	}
+	fields := make([]tuiModalField, len(specs))
+	for i, s := range specs {
+		ti := textinput.New()
+		ti.Placeholder = s.placeholder
+		ti.CharLimit = 300
+		if i < len(values) {
+			ti.SetValue(values[i])
+		}
+		if i == 0 {
+			ti.Focus()
+			// Move cursor to end of pre-filled text
+			ti.CursorEnd()
+		}
+		fields[i] = tuiModalField{label: s.label, ti: ti}
+	}
+	titles := map[tuiModalKind]string{
+		tuiModalEditSession: "Edit Session",
+		tuiModalEditAgent:   "Edit Agent",
+		tuiModalEditTask:    "Edit Task",
+	}
+	return &tuiModal{kind: kind, title: titles[kind], fields: fields, sid: sid, eid: eid}
 }
 
 func (mo *tuiModal) value(i int) string {
@@ -1062,6 +1114,52 @@ func (m tuiModel) updateSidebar(msg tea.KeyMsg) (tuiModel, []tea.Cmd) {
 			m.escInputting = false
 		}
 
+	case "E":
+		// Edit selected item in-place
+		it := m.selItem()
+		if it != nil {
+			switch it.kind {
+			case tuiItemSession:
+				sess := m.lookupSession(it.sid)
+				if sess != nil {
+					m.modal = newTUIEditModal(tuiModalEditSession, it.sid, "", []string{sess.Name})
+					m.focus = tuiFocusModal
+				}
+			case tuiItemAgent:
+				agent := m.lookupAgent(it.sid, it.eid)
+				if agent != nil {
+					mission := ""
+					if agent.Mission != nil {
+						mission = *agent.Mission
+					}
+					project := ""
+					if agent.Project != nil {
+						project = *agent.Project
+					}
+					repoPath := ""
+					if agent.RepoPath != nil {
+						repoPath = *agent.RepoPath
+					}
+					m.modal = newTUIEditModal(tuiModalEditAgent, it.sid, it.eid, []string{agent.Name, mission, project, repoPath})
+					m.focus = tuiFocusModal
+				}
+			case tuiItemTask:
+				task := m.lookupTask(it.sid, it.eid)
+				if task != nil {
+					desc := ""
+					if task.Description != nil {
+						desc = *task.Description
+					}
+					proj := ""
+					if task.Project != nil {
+						proj = *task.Project
+					}
+					m.modal = newTUIEditModal(tuiModalEditTask, it.sid, it.eid, []string{task.Title, desc, proj})
+					m.focus = tuiFocusModal
+				}
+			}
+		}
+
 	case "g":
 		sid := m.selSessionID()
 		if sid != "" {
@@ -1329,6 +1427,45 @@ func (m tuiModel) submitModal() tea.Cmd {
 		return m.client.post("create-agent",
 			"/api/swarm/sessions/"+mo.sid+"/agents",
 			map[string]string{"name": name, "role": "worker"},
+		)
+
+	case tuiModalEditSession:
+		name := mo.value(0)
+		if name == "" {
+			return nil
+		}
+		return m.client.patch("edit-session",
+			"/api/swarm/sessions/"+mo.sid,
+			map[string]string{"name": name},
+		)
+
+	case tuiModalEditAgent:
+		name := mo.value(0)
+		if name == "" {
+			return nil
+		}
+		return m.client.patch("edit-agent",
+			"/api/swarm/sessions/"+mo.sid+"/agents/"+mo.eid,
+			map[string]interface{}{
+				"name":      name,
+				"mission":   mo.value(1),
+				"project":   mo.value(2),
+				"repo_path": mo.value(3),
+			},
+		)
+
+	case tuiModalEditTask:
+		title := mo.value(0)
+		if title == "" {
+			return nil
+		}
+		return m.client.patch("edit-task",
+			"/api/swarm/sessions/"+mo.sid+"/tasks/"+mo.eid,
+			map[string]interface{}{
+				"title":       title,
+				"description": mo.value(1),
+				"project":     mo.value(2),
+			},
 		)
 	}
 	return nil
@@ -1943,7 +2080,7 @@ func (m tuiModel) viewStatusBar() string {
 }
 
 func (m tuiModel) viewHelp() string {
-	keys := "  ↑↓/jk nav  ·  Enter attach  ·  Tab// input  ·  s spawn  ·  d stop  ·  + quick-agent  ·  n agent  ·  t task  ·  c session  ·  I icinga  ·  L event-log  ·  e escalations  ·  g goals  ·  A autopilot  ·  W queue  ·  R refresh  ·  q quit"
+	keys := "  ↑↓/jk nav  ·  Enter attach  ·  Tab// input  ·  s spawn  ·  d stop  ·  + quick-agent  ·  n agent  ·  t task  ·  c session  ·  E edit  ·  I icinga  ·  L event-log  ·  e escalations  ·  g goals  ·  A autopilot  ·  W queue  ·  R refresh  ·  q quit"
 	return dimStyle.Width(m.w).Render(keys)
 }
 
@@ -2426,6 +2563,7 @@ func (m tuiModel) viewHelpScreen() string {
 	sb.WriteString(key("n", "New agent (full form)") + "\n")
 	sb.WriteString(key("t", "New task") + "\n")
 	sb.WriteString(key("c", "New session") + "\n")
+	sb.WriteString(key("E", "Edit selected session / agent / task") + "\n")
 	sb.WriteString(key("A", "Toggle autopilot (Plane sync)") + "\n\n")
 
 	sb.WriteString(h("VIEWS") + "\n")

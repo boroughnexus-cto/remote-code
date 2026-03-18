@@ -417,8 +417,11 @@ func detectSwarmAgentStatus(tmuxSession string) string {
 	pane := string(out)
 
 	// Waiting for human input — check first, highest priority for operator action.
-	if containsAny(pane, "Do you want to proceed", "Press Enter", "(y/n)", "waiting for input",
-		"Proceed?", "Allow this action?", "bypass permissions") {
+	// Use specific Claude Code permission/confirmation phrases only; generic shell
+	// phrases like "Press Enter" appear in normal command output and cause false positives.
+	if containsAny(pane, "Do you want to proceed", "waiting for input",
+		"Proceed?", "Allow this action?", "bypass permissions",
+		"Allow tool", "Allow read", "Allow write", "Allow bash") {
 		return "waiting"
 	}
 	// Claude Code tool-use patterns — agent is actively executing something.

@@ -491,6 +491,22 @@ func handleSwarmSessionsAPI(w http.ResponseWriter, r *http.Request, ctx context.
 			}
 			json.NewEncoder(w).Encode(state)
 
+		case http.MethodPatch:
+			var req struct {
+				Name string `json:"name"`
+			}
+			json.NewDecoder(r.Body).Decode(&req)
+			if req.Name == "" {
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]string{"error": "name required"})
+				return
+			}
+			database.ExecContext(ctx,
+				"UPDATE swarm_sessions SET name = ?, updated_at = ? WHERE id = ?",
+				req.Name, time.Now().Unix(), sessionID)
+			swarmBroadcaster.schedule(sessionID)
+			w.WriteHeader(http.StatusNoContent)
+
 		case http.MethodDelete:
 			database.ExecContext(ctx, "DELETE FROM swarm_sessions WHERE id = ?", sessionID)
 			w.WriteHeader(http.StatusNoContent)
@@ -904,6 +920,32 @@ func handleSwarmAgentsAPI(w http.ResponseWriter, r *http.Request, ctx context.Co
 				"UPDATE swarm_agents SET current_task_id = ? WHERE id = ? AND session_id = ?",
 				taskID, agentID, sessionID)
 		}
+		if name, ok := req["name"].(string); ok && name != "" {
+			database.ExecContext(ctx,
+				"UPDATE swarm_agents SET name = ? WHERE id = ? AND session_id = ?",
+				name, agentID, sessionID)
+		}
+		if mission, ok := req["mission"]; ok {
+			if mission == nil {
+				database.ExecContext(ctx, "UPDATE swarm_agents SET mission = NULL WHERE id = ? AND session_id = ?", agentID, sessionID)
+			} else if s, ok := mission.(string); ok {
+				database.ExecContext(ctx, "UPDATE swarm_agents SET mission = ? WHERE id = ? AND session_id = ?", swarmNullStr(s), agentID, sessionID)
+			}
+		}
+		if project, ok := req["project"]; ok {
+			if project == nil {
+				database.ExecContext(ctx, "UPDATE swarm_agents SET project = NULL WHERE id = ? AND session_id = ?", agentID, sessionID)
+			} else if s, ok := project.(string); ok {
+				database.ExecContext(ctx, "UPDATE swarm_agents SET project = ? WHERE id = ? AND session_id = ?", swarmNullStr(s), agentID, sessionID)
+			}
+		}
+		if repoPath, ok := req["repo_path"]; ok {
+			if repoPath == nil {
+				database.ExecContext(ctx, "UPDATE swarm_agents SET repo_path = NULL WHERE id = ? AND session_id = ?", agentID, sessionID)
+			} else if s, ok := repoPath.(string); ok {
+				database.ExecContext(ctx, "UPDATE swarm_agents SET repo_path = ? WHERE id = ? AND session_id = ?", swarmNullStr(s), agentID, sessionID)
+			}
+		}
 		_ = now
 		swarmBroadcaster.schedule(sessionID)
 		w.WriteHeader(http.StatusNoContent)
@@ -1024,10 +1066,24 @@ func handleSwarmTasksAPI(w http.ResponseWriter, r *http.Request, ctx context.Con
 				"UPDATE swarm_tasks SET agent_id = NULL, updated_at = ? WHERE id = ? AND session_id = ?",
 				now, taskID, sessionID)
 		}
-		if title, ok := req["title"].(string); ok {
+		if title, ok := req["title"].(string); ok && title != "" {
 			database.ExecContext(ctx,
 				"UPDATE swarm_tasks SET title = ?, updated_at = ? WHERE id = ? AND session_id = ?",
 				title, now, taskID, sessionID)
+		}
+		if desc, ok := req["description"]; ok {
+			if desc == nil {
+				database.ExecContext(ctx, "UPDATE swarm_tasks SET description = NULL, updated_at = ? WHERE id = ? AND session_id = ?", now, taskID, sessionID)
+			} else if s, ok := desc.(string); ok {
+				database.ExecContext(ctx, "UPDATE swarm_tasks SET description = ?, updated_at = ? WHERE id = ? AND session_id = ?", swarmNullStr(s), now, taskID, sessionID)
+			}
+		}
+		if proj, ok := req["project"]; ok {
+			if proj == nil {
+				database.ExecContext(ctx, "UPDATE swarm_tasks SET project = NULL, updated_at = ? WHERE id = ? AND session_id = ?", now, taskID, sessionID)
+			} else if s, ok := proj.(string); ok {
+				database.ExecContext(ctx, "UPDATE swarm_tasks SET project = ?, updated_at = ? WHERE id = ? AND session_id = ?", swarmNullStr(s), now, taskID, sessionID)
+			}
 		}
 		swarmBroadcaster.schedule(sessionID)
 		w.WriteHeader(http.StatusNoContent)
