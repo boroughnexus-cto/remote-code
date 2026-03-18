@@ -419,6 +419,10 @@ func handleSwarmAPI(w http.ResponseWriter, r *http.Request, ctx context.Context,
 		handleSwarmCleanupAPI(w, r, ctx)
 		return
 	}
+	if len(pathParts) > 0 && pathParts[0] == "transcribe" {
+		handleSwarmTranscribeAPI(w, r)
+		return
+	}
 	if len(pathParts) == 0 || pathParts[0] != "sessions" {
 		w.WriteHeader(http.StatusNotFound)
 		json.NewEncoder(w).Encode(map[string]string{"error": "unknown swarm endpoint"})
