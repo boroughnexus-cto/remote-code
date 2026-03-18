@@ -71,6 +71,7 @@ func main() {
 	go startCIPoller(context.Background())
 	go startPlaneAdapter(context.Background())
 	go startTriagePoller(context.Background())
+	startAutoDispatchLoop(context.Background())
 
 	// Setup HTTP routes
 	http.HandleFunc("/", serveHome)

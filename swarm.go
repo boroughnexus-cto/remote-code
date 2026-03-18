@@ -967,6 +967,10 @@ func handleSwarmTasksAPI(w http.ResponseWriter, r *http.Request, ctx context.Con
 		}
 		writeSwarmEvent(ctx, sessionID, "", id, "task_created", req.Title)
 		swarmBroadcaster.schedule(sessionID)
+		// Auto-dispatch to an idle worker if the task starts queued.
+		if req.Stage == "queued" || req.Stage == "" {
+			go autoDispatchQueuedTasks(context.Background(), sessionID)
+		}
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(task)
 		return
@@ -1004,6 +1008,10 @@ func handleSwarmTasksAPI(w http.ResponseWriter, r *http.Request, ctx context.Con
 			// Auto-create PR when task moves to deploy
 			if stage == "deploy" {
 				go tryCreatePR(context.Background(), sessionID, taskID)
+			}
+			// Auto-dispatch if moved back to queued (e.g. blocked recovery)
+			if stage == "queued" {
+				go autoDispatchQueuedTasks(context.Background(), sessionID)
 			}
 		}
 		if agentID, ok := req["agent_id"].(string); ok {

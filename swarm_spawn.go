@@ -159,6 +159,12 @@ func spawnSwarmAgent(ctx context.Context, sessionID, agentID string) error {
 			injectToSwarmAgent(context.Background(), agentID,
 				"Welcome back. Please read RESUME_CONTEXT.md for context on what you were working on, then continue where you left off.")
 		}()
+	} else {
+		// New worker agent — after Claude starts, auto-dispatch any queued tasks.
+		go func() {
+			time.Sleep(12 * time.Second) // wait for Claude to be ready
+			autoDispatchQueuedTasks(context.Background(), sessionID)
+		}()
 	}
 
 	// Persist to DB
