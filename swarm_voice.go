@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -21,18 +20,20 @@ import (
 // ---------------------------------------------------------------------------
 
 type voiceConfig struct {
-	sttURL    string
-	ttsURL    string
-	ttsVoice  string
-	chatModel string
+	sttURL       string
+	ttsURL       string
+	ttsVoice     string
+	chatModel    string
+	anthropicKey string
 }
 
 func getVoiceConfig() voiceConfig {
 	return voiceConfig{
-		sttURL:    envOrDefault("SWARM_STT_URL", "http://10.0.1.226:8300"),
-		ttsURL:    envOrDefault("SWARM_TTS_URL", "http://10.0.1.226:8880"),
-		ttsVoice:  envOrDefault("SWARM_TTS_VOICE", "bf_emma"),
-		chatModel: envOrDefault("SWARM_VOICE_MODEL", "claude-haiku-4-5-20251001"),
+		sttURL:       envOrDefault("SWARM_STT_URL", "http://10.0.1.226:8300"),
+		ttsURL:       envOrDefault("SWARM_TTS_URL", "http://10.0.1.226:8880"),
+		ttsVoice:     envOrDefault("SWARM_TTS_VOICE", "af_heart"),
+		chatModel:    envOrDefault("SWARM_VOICE_MODEL", "claude-haiku-4-5-20251001"),
+		anthropicKey: os.Getenv("ANTHROPIC_API_KEY"),
 	}
 }
 
@@ -97,7 +98,6 @@ var (
 // STT — POST /api/swarm/transcribe
 // ---------------------------------------------------------------------------
 
-// handleSwarmTranscribeAPI accepts multipart audio and proxies to speaches STT.
 func handleSwarmTranscribeAPI(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
@@ -203,29 +203,33 @@ func handleSwarmTranscribeAPI(w http.ResponseWriter, r *http.Request) {
 }
 
 // ---------------------------------------------------------------------------
-// TTS — POST /api/swarm/tts
+// TTS — POST /api/swarm/tts  (streaming PCM)
 // ---------------------------------------------------------------------------
 
-// handleSwarmTTSAPI converts text to speech via Kokoro and returns MP3.
+// handleSwarmTTSAPI proxies to Kokoro and streams raw PCM back to the client.
+// The browser plays PCM chunks via Web Audio API as they arrive (~300ms TTFA).
+// Falls back to MP3 if client requests it via ?format=mp3.
 func handleSwarmTTSAPI(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-
 	if r.Method != http.MethodPost {
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
 
 	if !ttsCircuit.allow() {
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusServiceUnavailable)
 		json.NewEncoder(w).Encode(map[string]string{"error": "TTS service temporarily unavailable"}) //nolint:errcheck
 		return
 	}
 
 	var req struct {
-		Text  string `json:"text"`
-		Voice string `json:"voice"`
+		Text   string `json:"text"`
+		Voice  string `json:"voice"`
+		Format string `json:"format"` // "pcm" (default) or "mp3"
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Text == "" {
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]string{"error": "text required"}) //nolint:errcheck
 		return
@@ -238,18 +242,25 @@ func handleSwarmTTSAPI(w http.ResponseWriter, r *http.Request) {
 	if req.Voice == "" {
 		req.Voice = cfg.ttsVoice
 	}
+	format := req.Format
+	if format == "" {
+		format = "pcm"
+	}
 
-	body, _ := json.Marshal(map[string]string{
+	body, _ := json.Marshal(map[string]interface{}{
 		"model":           "kokoro",
 		"input":           req.Text,
 		"voice":           req.Voice,
-		"response_format": "mp3",
+		"response_format": format,
+		"speed":           1.05, // slightly faster feels natural in conversation
+		"stream":          true,
 	})
 
 	upstream, err := http.NewRequestWithContext(r.Context(), http.MethodPost,
 		cfg.ttsURL+"/v1/audio/speech", bytes.NewReader(body))
 	if err != nil {
 		ttsCircuit.fail()
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(map[string]string{"error": "request build error"}) //nolint:errcheck
 		return
@@ -260,6 +271,7 @@ func handleSwarmTTSAPI(w http.ResponseWriter, r *http.Request) {
 	resp, err := client.Do(upstream)
 	if err != nil {
 		ttsCircuit.fail()
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadGateway)
 		json.NewEncoder(w).Encode(map[string]string{"error": "TTS unreachable: " + err.Error()}) //nolint:errcheck
 		return
@@ -269,6 +281,7 @@ func handleSwarmTTSAPI(w http.ResponseWriter, r *http.Request) {
 	if resp.StatusCode != http.StatusOK {
 		ttsCircuit.fail()
 		errBody, _ := io.ReadAll(resp.Body)
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadGateway)
 		json.NewEncoder(w).Encode(map[string]string{ //nolint:errcheck
 			"error":  "TTS returned " + resp.Status,
@@ -277,20 +290,34 @@ func handleSwarmTTSAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Buffer full MP3 (Kokoro synthesises fast ~150-300ms)
-	audio, err := io.ReadAll(io.LimitReader(resp.Body, 5<<20))
-	if err != nil {
-		ttsCircuit.fail()
-		w.WriteHeader(http.StatusBadGateway)
-		json.NewEncoder(w).Encode(map[string]string{"error": "TTS read error: " + err.Error()}) //nolint:errcheck
-		return
-	}
-
 	ttsCircuit.succeed()
-	w.Header().Set("Content-Type", "audio/mpeg")
+
+	// Stream the audio directly to the client — no buffering.
+	if format == "pcm" {
+		w.Header().Set("Content-Type", "audio/pcm;rate=24000")
+	} else {
+		w.Header().Set("Content-Type", "audio/mpeg")
+	}
 	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Transfer-Encoding", "chunked")
 	w.WriteHeader(http.StatusOK)
-	w.Write(audio) //nolint:errcheck
+
+	if f, ok := w.(http.Flusher); ok {
+		// Stream in 4KB chunks and flush after each so the browser gets audio ASAP.
+		buf := make([]byte, 4096)
+		for {
+			n, err := resp.Body.Read(buf)
+			if n > 0 {
+				w.Write(buf[:n]) //nolint:errcheck
+				f.Flush()
+			}
+			if err != nil {
+				break
+			}
+		}
+	} else {
+		io.Copy(w, resp.Body) //nolint:errcheck
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -300,26 +327,18 @@ func handleSwarmTTSAPI(w http.ResponseWriter, r *http.Request) {
 type voiceChatRequest struct {
 	Message   string `json:"message"`
 	SessionID string `json:"session_id"`
-	// Only user turns accepted from client — server never trusts assistant content
+	// Only user turns accepted from client
 	History []struct {
 		Role    string `json:"role"`
 		Content string `json:"content"`
 	} `json:"history"`
 }
 
-// claudeBinary is the path to the claude CLI, overridable via env var.
-func claudeBinary() string {
-	if v := os.Getenv("CLAUDE_BIN"); v != "" {
-		return v
-	}
-	if p, err := exec.LookPath("claude"); err == nil {
-		return p
-	}
-	return "/usr/local/bin/claude"
+type anthropicMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
 }
 
-// handleSwarmVoiceChatAPI runs the voice chat pipeline via the claude CLI
-// (subscription auth — no API key required).
 func handleSwarmVoiceChatAPI(w http.ResponseWriter, r *http.Request, ctx context.Context) {
 	w.Header().Set("Content-Type", "application/json")
 
@@ -335,83 +354,189 @@ func handleSwarmVoiceChatAPI(w http.ResponseWriter, r *http.Request, ctx context
 		return
 	}
 
+	cfg := getVoiceConfig()
+	if cfg.anthropicKey == "" {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		json.NewEncoder(w).Encode(map[string]string{"error": "ANTHROPIC_API_KEY not configured"}) //nolint:errcheck
+		return
+	}
+
 	swarmCtx := buildVoiceSwarmContext(ctx, req.SessionID)
 
 	systemPrompt := "You are a voice assistant for SwarmOps, an AI agent orchestration platform. " +
-		"You help the operator understand and control their AI coding agents. " +
-		swarmCtx + " " +
-		"Rules: Respond in 1-3 sentences suitable for spoken audio. " +
-		"No markdown, bullet points, headers, or code blocks. " +
-		"Use natural conversational language. " +
-		"Be direct and specific — reference agent names, task names, and counts. " +
-		"If asked to do something you cannot do yet, say so in one sentence."
+		"You help the operator understand and control their AI coding agents in real time.\n\n" +
+		swarmCtx + "\n\n" +
+		"Rules:\n" +
+		"- Respond in 1-3 sentences suitable for spoken audio.\n" +
+		"- No markdown, bullet points, headers, or code blocks.\n" +
+		"- Use natural conversational language.\n" +
+		"- Be direct and specific — reference agent names, task names, and counts.\n" +
+		"- When reporting what an agent said or is doing, quote it briefly and naturally.\n" +
+		"- If asked to do something you cannot do, say so clearly in one sentence."
 
-	// Build conversation history as plain text — only trust user turns.
-	// Keep last 6 user turns to bound prompt size.
-	var histLines []string
+	var messages []anthropicMessage
 	for _, h := range req.History {
 		if h.Role != "user" || strings.TrimSpace(h.Content) == "" {
 			continue
 		}
-		histLines = append(histLines, strings.TrimSpace(h.Content))
+		messages = append(messages, anthropicMessage{Role: "user", Content: h.Content})
+		messages = append(messages, anthropicMessage{Role: "assistant", Content: "Got it."})
 	}
-	if len(histLines) > 6 {
-		histLines = histLines[len(histLines)-6:]
+	messages = append(messages, anthropicMessage{Role: "user", Content: req.Message})
+
+	if len(messages) > 16 {
+		messages = messages[len(messages)-16:]
+	}
+	for len(messages) > 0 && messages[0].Role != "user" {
+		messages = messages[1:]
 	}
 
-	var prompt strings.Builder
-	for _, line := range histLines {
-		prompt.WriteString("Previous message: ")
-		prompt.WriteString(line)
-		prompt.WriteString("\n")
-	}
-	prompt.WriteString(req.Message)
+	reqBody, _ := json.Marshal(map[string]interface{}{
+		"model":      cfg.chatModel,
+		"max_tokens": 200,
+		"system":     systemPrompt,
+		"messages":   messages,
+	})
 
-	cfg := getVoiceConfig()
-	bin := claudeBinary()
-
-	// 20s timeout — claude CLI startup + inference for haiku is typically 1-3s
-	cmdCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
-	defer cancel()
-
-	cmd := exec.CommandContext(cmdCtx, bin,
-		"-p", prompt.String(),
-		"--system-prompt", systemPrompt,
-		"--model", cfg.chatModel,
-	)
-
-	out, err := cmd.Output()
+	anthropicReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost,
+		"https://api.anthropic.com/v1/messages", bytes.NewReader(reqBody))
 	if err != nil {
-		var exitErr *exec.ExitError
-		detail := ""
-		if errors.As(err, &exitErr) {
-			detail = string(exitErr.Stderr)
-		}
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "request build error"}) //nolint:errcheck
+		return
+	}
+	anthropicReq.Header.Set("Content-Type", "application/json")
+	anthropicReq.Header.Set("x-api-key", cfg.anthropicKey)
+	anthropicReq.Header.Set("anthropic-version", "2023-06-01")
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(anthropicReq)
+	if err != nil {
+		w.WriteHeader(http.StatusBadGateway)
+		json.NewEncoder(w).Encode(map[string]string{"error": "LLM unreachable: " + err.Error()}) //nolint:errcheck
+		return
+	}
+	defer resp.Body.Close()
+
+	respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if readErr != nil {
+		w.WriteHeader(http.StatusBadGateway)
+		json.NewEncoder(w).Encode(map[string]string{"error": "LLM read error"}) //nolint:errcheck
+		return
+	}
+	if resp.StatusCode != http.StatusOK {
 		w.WriteHeader(http.StatusBadGateway)
 		json.NewEncoder(w).Encode(map[string]string{ //nolint:errcheck
-			"error":  "claude CLI error: " + err.Error(),
-			"detail": detail,
+			"error":  "LLM returned " + resp.Status,
+			"detail": string(respBody),
 		})
 		return
 	}
 
-	text := strings.TrimSpace(string(out))
-	if text == "" {
+	var anthropicResp struct {
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal(respBody, &anthropicResp); err != nil || len(anthropicResp.Content) == 0 {
 		w.WriteHeader(http.StatusBadGateway)
-		json.NewEncoder(w).Encode(map[string]string{"error": "empty response from claude"}) //nolint:errcheck
+		json.NewEncoder(w).Encode(map[string]string{"error": "LLM parse error"}) //nolint:errcheck
 		return
 	}
 
+	text := strings.TrimSpace(anthropicResp.Content[0].Text)
 	json.NewEncoder(w).Encode(map[string]string{"text": text}) //nolint:errcheck
+}
+
+// ---------------------------------------------------------------------------
+// Voice inject — POST /api/swarm/voice/inject
+// Send a voice command directly to the session's orchestrator/dispatcher tmux.
+// Returns immediate confirmation + recent agent output.
+// ---------------------------------------------------------------------------
+
+func handleSwarmVoiceInjectAPI(w http.ResponseWriter, r *http.Request, ctx context.Context) {
+	w.Header().Set("Content-Type", "application/json")
+
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		Message   string `json:"message"`
+		SessionID string `json:"session_id"`
+		AgentRole string `json:"agent_role"` // "orchestrator" or "dispatcher", default orchestrator
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Message) == "" || req.SessionID == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "message and session_id required"}) //nolint:errcheck
+		return
+	}
+
+	role := req.AgentRole
+	if role == "" {
+		role = "orchestrator"
+	}
+	// Accept dispatcher as an alias
+	if role == "dispatcher" {
+		role = "orchestrator"
+	}
+
+	// Find the target agent
+	var agentID, agentName, tmuxSession string
+	err := database.QueryRowContext(ctx,
+		`SELECT id, name, COALESCE(tmux_session,'') FROM swarm_agents
+		 WHERE session_id = ? AND role = ? AND tmux_session IS NOT NULL
+		 ORDER BY created_at DESC LIMIT 1`,
+		req.SessionID, role,
+	).Scan(&agentID, &agentName, &tmuxSession)
+	if err != nil {
+		w.WriteHeader(http.StatusConflict)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": fmt.Sprintf("no live %s agent in session — spawn one first", role),
+		}) //nolint:errcheck
+		return
+	}
+
+	if err := injectToSwarmAgent(ctx, agentID, req.Message); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()}) //nolint:errcheck
+		return
+	}
+
+	writeSwarmEvent(ctx, req.SessionID, agentID, "", "voice_inject", req.Message) //nolint:errcheck
+
+	// Capture recent output so the voice UI can report what the agent was doing
+	recentOutput := captureAgentTmuxOutput(tmuxSession, 30)
+
+	json.NewEncoder(w).Encode(map[string]string{ //nolint:errcheck
+		"agent_name":    agentName,
+		"agent_role":    role,
+		"recent_output": recentOutput,
+	})
 }
 
 // ---------------------------------------------------------------------------
 // SwarmOps context builder
 // ---------------------------------------------------------------------------
 
-// buildVoiceSwarmContext assembles a plain-text summary of SwarmOps state for
-// injection into the voice assistant system prompt. Uses %q formatting on all
-// user-controlled strings to prevent prompt injection.
+// captureAgentTmuxOutput returns the last n visible lines from a tmux pane.
+func captureAgentTmuxOutput(tmuxSession string, lines int) string {
+	if tmuxSession == "" {
+		return ""
+	}
+	out, err := exec.Command("tmux", "capture-pane", "-t", tmuxSession, "-p",
+		"-S", fmt.Sprintf("-%d", lines)).Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// buildVoiceSwarmContext assembles a plain-text summary of SwarmOps state
+// for the voice assistant system prompt. Includes live tmux output from
+// orchestrator/dispatcher agents so the assistant can relay what they're doing.
 func buildVoiceSwarmContext(ctx context.Context, sessionID string) string {
 	var parts []string
 
@@ -423,25 +548,35 @@ func buildVoiceSwarmContext(ctx context.Context, sessionID string) string {
 			parts = append(parts, fmt.Sprintf("Current session: %q", name))
 		}
 
-		// Agents
+		// Agents — include tmux output for orchestrator/dispatcher roles
 		rows, err := database.QueryContext(ctx,
-			"SELECT name, role, status, mission FROM swarm_agents WHERE session_id = ? ORDER BY role, name",
+			`SELECT name, role, status, COALESCE(mission,''), COALESCE(tmux_session,'')
+			 FROM swarm_agents WHERE session_id = ? ORDER BY role, name`,
 			sessionID)
 		if err == nil {
-			var lines []string
+			var agentLines []string
 			for rows.Next() {
-				var agName, role, status string
-				var mission *string
-				_ = rows.Scan(&agName, &role, &status, &mission)
+				var agName, role, status, mission, tmuxSess string
+				_ = rows.Scan(&agName, &role, &status, &mission, &tmuxSess)
 				line := fmt.Sprintf("%q (%s, %s)", agName, role, status)
-				if mission != nil && *mission != "" {
-					line += ": " + truncate(*mission, 50)
+				if mission != "" {
+					line += ": " + truncate(mission, 50)
 				}
-				lines = append(lines, line)
+				agentLines = append(agentLines, line)
+
+				// Capture live output for orchestrator/dispatcher
+				if tmuxSess != "" && (role == "orchestrator" || role == "dispatcher") {
+					output := captureAgentTmuxOutput(tmuxSess, 40)
+					if output != "" {
+						parts = append(parts,
+							fmt.Sprintf("%s %q recent activity:\n%s",
+								role, agName, truncate(output, 800)))
+					}
+				}
 			}
 			rows.Close()
-			if len(lines) > 0 {
-				parts = append(parts, "Agents: "+strings.Join(lines, "; "))
+			if len(agentLines) > 0 {
+				parts = append(parts, "Agents: "+strings.Join(agentLines, "; "))
 			}
 		}
 
@@ -450,19 +585,19 @@ func buildVoiceSwarmContext(ctx context.Context, sessionID string) string {
 			"SELECT title, stage FROM swarm_tasks WHERE session_id = ? ORDER BY created_at DESC LIMIT 8",
 			sessionID)
 		if err == nil {
-			var lines []string
+			var taskLines []string
 			for rows2.Next() {
 				var title, stage string
 				_ = rows2.Scan(&title, &stage)
-				lines = append(lines, fmt.Sprintf("%q (%s)", truncate(title, 40), stage))
+				taskLines = append(taskLines, fmt.Sprintf("%q (%s)", truncate(title, 40), stage))
 			}
 			rows2.Close()
-			if len(lines) > 0 {
-				parts = append(parts, "Tasks: "+strings.Join(lines, "; "))
+			if len(taskLines) > 0 {
+				parts = append(parts, "Tasks: "+strings.Join(taskLines, "; "))
 			}
 		}
 	} else {
-		// Dashboard summary
+		// Dashboard summary across all sessions
 		rows, err := database.QueryContext(ctx, `
 			SELECT s.name,
 			       COUNT(DISTINCT a.id),
@@ -500,13 +635,22 @@ func buildVoiceSwarmContext(ctx context.Context, sessionID string) string {
 // ---------------------------------------------------------------------------
 
 func handleSwarmVoiceAPI(w http.ResponseWriter, r *http.Request, ctx context.Context, pathParts []string) {
-	if len(pathParts) > 0 && pathParts[0] == "chat" {
-		handleSwarmVoiceChatAPI(w, r, ctx)
+	if len(pathParts) == 0 {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]string{"error": "unknown voice endpoint"}) //nolint:errcheck
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusNotFound)
-	json.NewEncoder(w).Encode(map[string]string{"error": "unknown voice endpoint"}) //nolint:errcheck
+	switch pathParts[0] {
+	case "chat":
+		handleSwarmVoiceChatAPI(w, r, ctx)
+	case "inject":
+		handleSwarmVoiceInjectAPI(w, r, ctx)
+	default:
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]string{"error": "unknown voice endpoint"}) //nolint:errcheck
+	}
 }
 
 // ---------------------------------------------------------------------------

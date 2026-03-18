@@ -26,6 +26,7 @@
 		"vite": "^7.0.4"
 	},
 	"dependencies": {
+		"@ricky0123/vad-web": "^0.0.30",
 		"monaco-editor": "^0.55.1"
 	}
 }
