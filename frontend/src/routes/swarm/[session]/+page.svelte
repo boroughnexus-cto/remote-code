@@ -6,6 +6,7 @@
 	import TaskCard from '$lib/components/swarm/TaskCard.svelte';
 	import OrchestratorPanel from '$lib/components/swarm/OrchestratorPanel.svelte';
 	import EventFeed from '$lib/components/swarm/EventFeed.svelte';
+	import VoiceConversation from '$lib/components/VoiceConversation.svelte';
 
 	const STAGES = ['spec', 'implement', 'test', 'deploy', 'done'] as const;
 	type Stage = (typeof STAGES)[number];
@@ -98,6 +99,8 @@
 	let addingAgent = $state(false);
 	let spawningAgentId = $state<string | null>(null);
 	let injectingTaskId = $state<string | null>(null);
+
+	let voiceOpen = $state(false);
 
 	// Add task form — per-column
 	let showTaskForm = $state<Record<string, boolean>>({});
@@ -379,6 +382,18 @@
 					{resuming ? 'Resuming…' : `Resume ${resumableCount}`}
 				</button>
 			{/if}
+			<!-- Voice button -->
+			<button
+				type="button"
+				onclick={() => (voiceOpen = true)}
+				title="Voice assistant"
+				class="flex items-center justify-center w-10 h-10 rounded-xl border border-vanna-teal/40 text-vanna-teal hover:bg-vanna-teal/10 transition-colors"
+			>
+				<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+						d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
+				</svg>
+			</button>
 			<button
 				type="button"
 				onclick={() => (showAgentForm = !showAgentForm)}
@@ -586,4 +601,8 @@
 	<div class="mt-6">
 		<EventFeed {events} {agents} />
 	</div>
+{/if}
+
+{#if voiceOpen}
+	<VoiceConversation sessionId={sessionId} onClose={() => (voiceOpen = false)} />
 {/if}

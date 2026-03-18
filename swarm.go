@@ -423,6 +423,14 @@ func handleSwarmAPI(w http.ResponseWriter, r *http.Request, ctx context.Context,
 		handleSwarmTranscribeAPI(w, r)
 		return
 	}
+	if len(pathParts) > 0 && pathParts[0] == "tts" {
+		handleSwarmTTSAPI(w, r)
+		return
+	}
+	if len(pathParts) > 0 && pathParts[0] == "voice" {
+		handleSwarmVoiceAPI(w, r, ctx, pathParts[1:])
+		return
+	}
 	if len(pathParts) == 0 || pathParts[0] != "sessions" {
 		w.WriteHeader(http.StatusNotFound)
 		json.NewEncoder(w).Encode(map[string]string{"error": "unknown swarm endpoint"})
