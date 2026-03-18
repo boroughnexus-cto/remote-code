@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
 	"os"
+	"os/exec"
 	"strings"
 	"sync"
 	"time"
@@ -19,20 +21,18 @@ import (
 // ---------------------------------------------------------------------------
 
 type voiceConfig struct {
-	sttURL       string
-	ttsURL       string
-	ttsVoice     string
-	chatModel    string
-	anthropicKey string
+	sttURL    string
+	ttsURL    string
+	ttsVoice  string
+	chatModel string
 }
 
 func getVoiceConfig() voiceConfig {
 	return voiceConfig{
-		sttURL:       envOrDefault("SWARM_STT_URL", "http://10.0.1.226:8300"),
-		ttsURL:       envOrDefault("SWARM_TTS_URL", "http://10.0.1.226:8880"),
-		ttsVoice:     envOrDefault("SWARM_TTS_VOICE", "bf_emma"),
-		chatModel:    envOrDefault("SWARM_VOICE_MODEL", "claude-haiku-4-5-20251001"),
-		anthropicKey: os.Getenv("ANTHROPIC_API_KEY"),
+		sttURL:    envOrDefault("SWARM_STT_URL", "http://10.0.1.226:8300"),
+		ttsURL:    envOrDefault("SWARM_TTS_URL", "http://10.0.1.226:8880"),
+		ttsVoice:  envOrDefault("SWARM_TTS_VOICE", "bf_emma"),
+		chatModel: envOrDefault("SWARM_VOICE_MODEL", "claude-haiku-4-5-20251001"),
 	}
 }
 
@@ -307,13 +307,19 @@ type voiceChatRequest struct {
 	} `json:"history"`
 }
 
-type anthropicMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+// claudeBinary is the path to the claude CLI, overridable via env var.
+func claudeBinary() string {
+	if v := os.Getenv("CLAUDE_BIN"); v != "" {
+		return v
+	}
+	if p, err := exec.LookPath("claude"); err == nil {
+		return p
+	}
+	return "/usr/local/bin/claude"
 }
 
-// handleSwarmVoiceChatAPI calls Claude haiku with SwarmOps context and returns a
-// voice-optimised text response.
+// handleSwarmVoiceChatAPI runs the voice chat pipeline via the claude CLI
+// (subscription auth — no API key required).
 func handleSwarmVoiceChatAPI(w http.ResponseWriter, r *http.Request, ctx context.Context) {
 	w.Header().Set("Content-Type", "application/json")
 
@@ -329,103 +335,73 @@ func handleSwarmVoiceChatAPI(w http.ResponseWriter, r *http.Request, ctx context
 		return
 	}
 
-	cfg := getVoiceConfig()
-	if cfg.anthropicKey == "" {
-		w.WriteHeader(http.StatusServiceUnavailable)
-		json.NewEncoder(w).Encode(map[string]string{"error": "ANTHROPIC_API_KEY not configured"}) //nolint:errcheck
-		return
-	}
-
 	swarmCtx := buildVoiceSwarmContext(ctx, req.SessionID)
 
-	systemPrompt := "You are a voice assistant for SwarmOps, an AI agent orchestration platform.\n" +
-		"You help the operator understand and control their AI coding agents.\n\n" +
-		swarmCtx + "\n\n" +
-		"Rules:\n" +
-		"- Respond in 1-3 sentences suitable for spoken audio.\n" +
-		"- No markdown, bullet points, headers, or code blocks.\n" +
-		"- Use natural conversational language.\n" +
-		"- Be direct and specific. Reference agent names, task names, and counts.\n" +
-		"- If asked to do something you cannot do yet, say so clearly in one sentence."
+	systemPrompt := "You are a voice assistant for SwarmOps, an AI agent orchestration platform. " +
+		"You help the operator understand and control their AI coding agents. " +
+		swarmCtx + " " +
+		"Rules: Respond in 1-3 sentences suitable for spoken audio. " +
+		"No markdown, bullet points, headers, or code blocks. " +
+		"Use natural conversational language. " +
+		"Be direct and specific — reference agent names, task names, and counts. " +
+		"If asked to do something you cannot do yet, say so in one sentence."
 
-	// Build alternating messages from client-supplied user turns only.
-	// We inject a brief assistant ack between each prior user turn to satisfy
-	// Anthropic's alternating requirement without trusting client content.
-	var messages []anthropicMessage
+	// Build conversation history as plain text — only trust user turns.
+	// Keep last 6 user turns to bound prompt size.
+	var histLines []string
 	for _, h := range req.History {
 		if h.Role != "user" || strings.TrimSpace(h.Content) == "" {
-			continue // ignore any assistant turns the client supplies
+			continue
 		}
-		messages = append(messages, anthropicMessage{Role: "user", Content: h.Content})
-		messages = append(messages, anthropicMessage{Role: "assistant", Content: "Understood."})
+		histLines = append(histLines, strings.TrimSpace(h.Content))
 	}
-	messages = append(messages, anthropicMessage{Role: "user", Content: req.Message})
-
-	// Keep last 16 messages (8 user turns)
-	if len(messages) > 16 {
-		messages = messages[len(messages)-16:]
-	}
-	// Ensure first message is from user
-	for len(messages) > 0 && messages[0].Role != "user" {
-		messages = messages[1:]
+	if len(histLines) > 6 {
+		histLines = histLines[len(histLines)-6:]
 	}
 
-	reqBody, _ := json.Marshal(map[string]interface{}{
-		"model":      cfg.chatModel,
-		"max_tokens": 150,
-		"system":     systemPrompt,
-		"messages":   messages,
-	})
+	var prompt strings.Builder
+	for _, line := range histLines {
+		prompt.WriteString("Previous message: ")
+		prompt.WriteString(line)
+		prompt.WriteString("\n")
+	}
+	prompt.WriteString(req.Message)
 
-	anthropicReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost,
-		"https://api.anthropic.com/v1/messages", bytes.NewReader(reqBody))
+	cfg := getVoiceConfig()
+	bin := claudeBinary()
+
+	// 20s timeout — claude CLI startup + inference for haiku is typically 1-3s
+	cmdCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(cmdCtx, bin,
+		"-p", prompt.String(),
+		"--system-prompt", systemPrompt,
+		"--model", cfg.chatModel,
+	)
+
+	out, err := cmd.Output()
 	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": "request build error"}) //nolint:errcheck
-		return
-	}
-	anthropicReq.Header.Set("Content-Type", "application/json")
-	anthropicReq.Header.Set("x-api-key", cfg.anthropicKey)
-	anthropicReq.Header.Set("anthropic-version", "2023-06-01")
-
-	client := &http.Client{Timeout: 15 * time.Second}
-	resp, err := client.Do(anthropicReq)
-	if err != nil {
-		w.WriteHeader(http.StatusBadGateway)
-		json.NewEncoder(w).Encode(map[string]string{"error": "LLM unreachable: " + err.Error()}) //nolint:errcheck
-		return
-	}
-	defer resp.Body.Close()
-
-	respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if readErr != nil {
-		w.WriteHeader(http.StatusBadGateway)
-		json.NewEncoder(w).Encode(map[string]string{"error": "LLM read error: " + readErr.Error()}) //nolint:errcheck
-		return
-	}
-
-	if resp.StatusCode != http.StatusOK {
+		var exitErr *exec.ExitError
+		detail := ""
+		if errors.As(err, &exitErr) {
+			detail = string(exitErr.Stderr)
+		}
 		w.WriteHeader(http.StatusBadGateway)
 		json.NewEncoder(w).Encode(map[string]string{ //nolint:errcheck
-			"error":  "LLM returned " + resp.Status,
-			"detail": string(respBody),
+			"error":  "claude CLI error: " + err.Error(),
+			"detail": detail,
 		})
 		return
 	}
 
-	var anthropicResp struct {
-		Content []struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
-		} `json:"content"`
-	}
-	if err := json.Unmarshal(respBody, &anthropicResp); err != nil || len(anthropicResp.Content) == 0 {
+	text := strings.TrimSpace(string(out))
+	if text == "" {
 		w.WriteHeader(http.StatusBadGateway)
-		json.NewEncoder(w).Encode(map[string]string{"error": "LLM response parse error"}) //nolint:errcheck
+		json.NewEncoder(w).Encode(map[string]string{"error": "empty response from claude"}) //nolint:errcheck
 		return
 	}
 
-	text := strings.TrimSpace(anthropicResp.Content[0].Text)
 	json.NewEncoder(w).Encode(map[string]string{"text": text}) //nolint:errcheck
 }
 
