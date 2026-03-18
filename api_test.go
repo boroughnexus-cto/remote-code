@@ -41,20 +41,22 @@ func setupTestDB(t *testing.T) {
 	ctx := context.Background()
 
 	// Clean ELO tables first (due to foreign key constraints)
-	database.ExecContext(ctx, "DELETE FROM agent_competitions")
+	database.ExecContext(ctx, "DELETE FROM agent_competitions") //nolint:errcheck
 
 	// Clean other tables
-	database.ExecContext(ctx, "DELETE FROM task_executions")
-	database.ExecContext(ctx, "DELETE FROM tasks")
-	database.ExecContext(ctx, "DELETE FROM worktrees")
-	database.ExecContext(ctx, "DELETE FROM base_directories")
-	database.ExecContext(ctx, "DELETE FROM projects")
-	database.ExecContext(ctx, "DELETE FROM agents")
-	database.ExecContext(ctx, "DELETE FROM roots")
+	database.ExecContext(ctx, "DELETE FROM task_executions")  //nolint:errcheck
+	database.ExecContext(ctx, "DELETE FROM tasks")             //nolint:errcheck
+	database.ExecContext(ctx, "DELETE FROM worktrees")         //nolint:errcheck
+	database.ExecContext(ctx, "DELETE FROM base_directories")  //nolint:errcheck
+	database.ExecContext(ctx, "DELETE FROM projects")          //nolint:errcheck
+	database.ExecContext(ctx, "DELETE FROM agents")            //nolint:errcheck
+	database.ExecContext(ctx, "DELETE FROM roots")             //nolint:errcheck
 
-	// Reset AUTOINCREMENT counters so first root/project always gets ID=1.
-	// The GET /api/projects API queries with root_id=1 by convention.
-	database.ExecContext(ctx, "DELETE FROM sqlite_sequence WHERE name IN ('roots','projects','agents','tasks','base_directories','task_executions')")
+	// Reset AUTOINCREMENT counters. The GET /api/projects API hardcodes root_id=1
+	// (see api.go: GetProjectsByRootID(ctx, 1)). Tests create a root dynamically and
+	// use root.ID, so resetting the counter ensures root.ID==1 matches the API's expectation.
+	// This workaround can be removed if/when the API is updated to derive the root ID dynamically.
+	database.ExecContext(ctx, "DELETE FROM sqlite_sequence WHERE name IN ('roots','projects','agents','tasks','base_directories','task_executions')") //nolint:errcheck
 }
 
 func TestProjectsAPI_GET_Empty(t *testing.T) {

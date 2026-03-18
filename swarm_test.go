@@ -690,7 +690,7 @@ func TestEscalation_Respond_NotFound(t *testing.T) {
 	setupSwarmDB(t)
 	sessionID := createSwarmSession(t, "esc-notfound-test")
 	t.Cleanup(func() { os.RemoveAll(swarmSessionDir(sessionID)) })
-	os.MkdirAll(swarmEscalationsDir(sessionID), 0755)
+	os.MkdirAll(swarmEscalationsDir(sessionID), 0755) //nolint:errcheck
 
 	// Valid ID format but file doesn't exist → 404/conflict
 	w := swarmReq(t, "POST",
@@ -706,7 +706,7 @@ func TestEscalation_API_ListViaState(t *testing.T) {
 	sessionID := createSwarmSession(t, "esc-api-list-test")
 
 	dir := swarmEscalationsDir(sessionID)
-	os.MkdirAll(dir, 0755)
+	os.MkdirAll(dir, 0755) //nolint:errcheck
 	t.Cleanup(func() { os.RemoveAll(swarmSessionDir(sessionID)) })
 
 	// Write an escalation file

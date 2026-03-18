@@ -335,7 +335,7 @@ func despawnSwarmAgent(ctx context.Context, sessionID, agentID string) error {
 
 	// Kill tmux session (ignore errors — session may already be dead)
 	if tmuxSession != "" {
-		exec.Command("tmux", "kill-session", "-t", tmuxSession).Run()
+		exec.Command("tmux", "kill-session", "-t", tmuxSession).Run() //nolint:errcheck
 	}
 
 	// Remove worktree + branch
@@ -689,7 +689,7 @@ func writeResumeContext(ctx context.Context, agentID, sessionID, worktreePath st
 		for noteRows.Next() {
 			var content, createdBy string
 			var ts int64
-			noteRows.Scan(&content, &createdBy, &ts)
+			noteRows.Scan(&content, &createdBy, &ts) //nolint:errcheck
 			t := time.Unix(ts, 0).Format("2006-01-02 15:04")
 			notes = append(notes, fmt.Sprintf("[%s by %s] %s", t, createdBy, content))
 		}
@@ -931,7 +931,7 @@ func buildSiBotBriefing(ctx context.Context, sessionID string) string {
 	var agents []agentInfo
 	for agentRows.Next() {
 		var a agentInfo
-		agentRows.Scan(&a.id, &a.name, &a.role, &a.status, &a.mission)
+		agentRows.Scan(&a.id, &a.name, &a.role, &a.status, &a.mission) //nolint:errcheck
 		agents = append(agents, a)
 	}
 
@@ -950,7 +950,7 @@ func buildSiBotBriefing(ctx context.Context, sessionID string) string {
 		defer taskRows.Close()
 		for taskRows.Next() {
 			var t taskInfo
-			taskRows.Scan(&t.title, &t.stage, &t.agentName)
+			taskRows.Scan(&t.title, &t.stage, &t.agentName) //nolint:errcheck
 			tasks = append(tasks, t)
 		}
 	}
