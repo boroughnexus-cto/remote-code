@@ -119,3 +119,10 @@ app.db
 test.txt
 remote-code-backup.db
 remote-code-backup-2.db
+swarmops
+swarmops-new
+swarmops.db
+swarmops-test*.db
+swarmops-test*.db-shm
+swarmops-test*.db-wal
+work-summary.md
