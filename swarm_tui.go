@@ -46,6 +46,7 @@ const (
 	tuiModalNewSession
 	tuiModalNewAgent
 	tuiModalNewTask
+	tuiModalQuickAgent // fast 1-field worker spawn
 )
 
 // ─── Data types ───────────────────────────────────────────────────────────────
@@ -417,6 +418,9 @@ func newTUIModal(kind tuiModalKind, sid string) *tuiModal {
 			{"Description", "details (optional)"},
 			{"Project", "project (optional)"},
 		}
+	case tuiModalQuickAgent:
+		specs = []spec{{"Name", "e.g. Alice  (spawns as worker)"},
+		}
 	}
 	fields := make([]tuiModalField, len(specs))
 	for i, s := range specs {
@@ -432,6 +436,7 @@ func newTUIModal(kind tuiModalKind, sid string) *tuiModal {
 		tuiModalNewSession: "New Session",
 		tuiModalNewAgent:   "New Agent",
 		tuiModalNewTask:    "New Task",
+		tuiModalQuickAgent: "+ Quick Spawn Worker",
 	}
 	return &tuiModal{kind: kind, title: titles[kind], fields: fields, sid: sid}
 }
@@ -945,6 +950,13 @@ func (m tuiModel) updateSidebar(msg tea.KeyMsg) (tuiModel, []tea.Cmd) {
 			cmds = append(cmds, m.client.post("resume", path, nil))
 		}
 
+	case "+":
+		sid := m.selSessionID()
+		if sid != "" {
+			m.modal = newTUIModal(tuiModalQuickAgent, sid)
+			m.focus = tuiFocusModal
+		}
+
 	case "n":
 		sid := m.selSessionID()
 		if sid != "" {
@@ -1144,6 +1156,15 @@ func (m tuiModel) submitModal() tea.Cmd {
 		return m.client.post("create-task",
 			"/api/swarm/sessions/"+mo.sid+"/tasks",
 			map[string]string{"title": title, "description": mo.value(1), "project": mo.value(2)},
+		)
+	case tuiModalQuickAgent:
+		name := mo.value(0)
+		if name == "" {
+			return nil
+		}
+		return m.client.post("create-agent",
+			"/api/swarm/sessions/"+mo.sid+"/agents",
+			map[string]string{"name": name, "role": "worker"},
 		)
 	}
 	return nil
@@ -1619,20 +1640,127 @@ func (m tuiModel) viewInput() string {
 }
 
 func (m tuiModel) viewStatusBar() string {
-	if m.flash == "" {
-		return dimStyle.Width(m.w).Render("  —")
+	// Left: contextual info about selected item
+	var leftParts []string
+	it := m.selItem()
+	if it != nil {
+		switch it.kind {
+		case tuiItemSession:
+			sess := m.lookupSession(it.sid)
+			if sess != nil {
+				st := m.states[it.sid]
+				live := 0
+				var totalTok int64
+				for _, a := range st.Agents {
+					if a.TmuxSession != nil {
+						live++
+					}
+					totalTok += a.TokensUsed
+				}
+				leftParts = append(leftParts,
+					lipgloss.NewStyle().Foreground(colorTeal).Bold(true).Render(truncStr(sess.Name, 24)))
+				leftParts = append(leftParts,
+					dimStyle.Render(fmt.Sprintf("%d agents (%d live) · %d tasks", len(st.Agents), live, len(st.Tasks))))
+				if totalTok > 0 {
+					leftParts = append(leftParts,
+						dimStyle.Render(formatTokensK(totalTok)+" tok"))
+				}
+				if sess.AutopilotEnabled {
+					leftParts = append(leftParts,
+						lipgloss.NewStyle().Foreground(colorTeal).Render("⚙ auto"))
+				}
+			}
+		case tuiItemAgent:
+			agent := m.lookupAgent(it.sid, it.eid)
+			if agent != nil {
+				_, roleColor := tuiRoleConfig(agent.Role)
+				_, statusLabel, statusColor := tuiStatusConfig(agent.Status, m.frame)
+				leftParts = append(leftParts,
+					lipgloss.NewStyle().Foreground(roleColor).Bold(true).Render(truncStr(agent.Name, 16)))
+				leftParts = append(leftParts,
+					lipgloss.NewStyle().Foreground(statusColor).Render(statusLabel))
+				if agent.ModelName != "" {
+					modelShort := strings.TrimPrefix(agent.ModelName, "claude-")
+					leftParts = append(leftParts, dimStyle.Render(modelShort))
+				}
+				if agent.TokensUsed > 0 {
+					leftParts = append(leftParts,
+						lipgloss.NewStyle().Foreground(colorTeal).Render(formatTokensK(agent.TokensUsed)+" tok"))
+				}
+				if agent.ContextPct > 0 {
+					var barC lipgloss.Color
+					switch {
+					case agent.ContextPct >= ctxPctRotate:
+						barC = colorRed
+					case agent.ContextPct >= ctxPctWarning:
+						barC = colorYellow
+					default:
+						barC = colorGreen
+					}
+					leftParts = append(leftParts,
+						lipgloss.NewStyle().Foreground(barC).Render(fmt.Sprintf("ctx %.0f%%", agent.ContextPct*100)))
+				}
+				if agent.CurrentFile != nil {
+					leftParts = append(leftParts,
+						dimStyle.Render("f:"+tuiBaseName(*agent.CurrentFile, 20)))
+				}
+			}
+		case tuiItemTask:
+			task := m.lookupTask(it.sid, it.eid)
+			if task != nil {
+				stageC := tuiStageColor(task.Stage)
+				leftParts = append(leftParts,
+					lipgloss.NewStyle().Foreground(stageC).Bold(true).Render(truncStr(task.Title, 28)))
+				leftParts = append(leftParts,
+					lipgloss.NewStyle().Foreground(stageC).Render(task.Stage))
+				if task.Phase != nil {
+					leftParts = append(leftParts, dimStyle.Render(*task.Phase))
+				}
+				if task.CIStatus != nil && *task.CIStatus != "" {
+					leftParts = append(leftParts, dimStyle.Render("CI:"+*task.CIStatus))
+				}
+			}
+		}
 	}
-	icon := "✓"
-	c := colorGreen
-	if m.flashErr {
-		icon = "✗"
-		c = colorRed
+
+	// Right: flash message
+	var rightStr string
+	if m.flash != "" {
+		icon := "✓"
+		c := colorGreen
+		if m.flashErr {
+			icon = "✗"
+			c = colorRed
+		}
+		rightStr = lipgloss.NewStyle().Foreground(c).Render(icon + " " + m.flash)
 	}
-	return lipgloss.NewStyle().Foreground(c).Width(m.w).Render("  " + icon + " " + m.flash)
+
+	leftStr := "  " + strings.Join(leftParts, "  ·  ")
+	if len(leftParts) == 0 {
+		leftStr = "  —"
+	}
+
+	barStyle := lipgloss.NewStyle().
+		Background(lipgloss.Color("#0a1628")).
+		Foreground(colorDim)
+
+	if rightStr == "" {
+		return barStyle.Width(m.w).Render(leftStr)
+	}
+
+	// Pad left to fill width, then append right
+	rightLen := lipgloss.Width(rightStr) + 2
+	leftWidth := m.w - rightLen
+	if leftWidth < 0 {
+		leftWidth = 0
+	}
+	leftRendered := barStyle.Width(leftWidth).Render(leftStr)
+	rightRendered := barStyle.Render("  " + rightStr)
+	return leftRendered + rightRendered
 }
 
 func (m tuiModel) viewHelp() string {
-	keys := "  ↑↓/jk nav  ·  Enter attach  ·  Tab// input  ·  s spawn  ·  d stop  ·  n agent  ·  t task  ·  c session  ·  e escalations  ·  g goals  ·  A autopilot  ·  W work queue  ·  R refresh  ·  q quit  ·  /goal <desc>"
+	keys := "  ↑↓/jk nav  ·  Enter attach  ·  Tab// input  ·  s spawn  ·  d stop  ·  + quick-agent  ·  n agent  ·  t task  ·  c session  ·  e escalations  ·  g goals  ·  A autopilot  ·  W queue  ·  R refresh  ·  q quit"
 	return dimStyle.Width(m.w).Render(keys)
 }
 

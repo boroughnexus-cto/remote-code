@@ -69,7 +69,7 @@ func planeReq(ctx context.Context, cfg *planeConfig, method, path string, body i
 	if err != nil {
 		return nil, 0, err
 	}
-	req.Header.Set("X-Api-Token", cfg.apiKey)
+	req.Header.Set("x-api-key", cfg.apiKey)
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
