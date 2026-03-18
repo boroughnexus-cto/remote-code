@@ -159,6 +159,7 @@ func applyMigrations(database *sql.DB) error {
 		"db/migrations/028_agent_metrics.sql",
 		"db/migrations/029_event_log.sql",
 		"db/migrations/030_role_prompts.sql",
+		"db/migrations/031_fix_tasks_fk.sql",
 	}
 
 	for _, migrationPath := range migrations {

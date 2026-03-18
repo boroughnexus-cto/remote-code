@@ -39,10 +39,10 @@ func TestMain(m *testing.M) {
 func setupTestDB(t *testing.T) {
 	// Clean existing data for isolated tests
 	ctx := context.Background()
-	
+
 	// Clean ELO tables first (due to foreign key constraints)
 	database.ExecContext(ctx, "DELETE FROM agent_competitions")
-	
+
 	// Clean other tables
 	database.ExecContext(ctx, "DELETE FROM task_executions")
 	database.ExecContext(ctx, "DELETE FROM tasks")
@@ -51,6 +51,10 @@ func setupTestDB(t *testing.T) {
 	database.ExecContext(ctx, "DELETE FROM projects")
 	database.ExecContext(ctx, "DELETE FROM agents")
 	database.ExecContext(ctx, "DELETE FROM roots")
+
+	// Reset AUTOINCREMENT counters so first root/project always gets ID=1.
+	// The GET /api/projects API queries with root_id=1 by convention.
+	database.ExecContext(ctx, "DELETE FROM sqlite_sequence WHERE name IN ('roots','projects','agents','tasks','base_directories','task_executions')")
 }
 
 func TestProjectsAPI_GET_Empty(t *testing.T) {
@@ -115,30 +119,18 @@ func TestProjectsAPI_POST_Create(t *testing.T) {
 
 func TestProjectsAPI_GET_WithProjects(t *testing.T) {
 	setupTestDB(t)
-	
-	// Create a project with root_id = 1 (which is what the API uses)
+
 	ctx := context.Background()
-	_, err := queries.CreateProject(ctx, db.CreateProjectParams{
-		RootID: 1,
+	root, err := queries.CreateRoot(ctx, db.CreateRootParams{LocalPort: "8080"})
+	if err != nil {
+		t.Fatalf("Failed to create root: %v", err)
+	}
+	_, err = queries.CreateProject(ctx, db.CreateProjectParams{
+		RootID: root.ID,
 		Name:   "Another Test Project",
 	})
 	if err != nil {
-		// If root_id = 1 doesn't exist, create it first
-		_, err = queries.CreateRoot(ctx, db.CreateRootParams{
-			LocalPort: "8080",
-		})
-		if err != nil {
-			t.Fatalf("Failed to create root: %v", err)
-		}
-		
-		// Try creating the project again
-		_, err = queries.CreateProject(ctx, db.CreateProjectParams{
-			RootID: 1,
-			Name:   "Another Test Project",
-		})
-		if err != nil {
-			t.Fatalf("Failed to create project: %v", err)
-		}
+		t.Fatalf("Failed to create project: %v", err)
 	}
 	
 	req := httptest.NewRequest("GET", "/api/projects", nil)
@@ -205,28 +197,18 @@ func TestProjectsAPI_ArraysNotNull(t *testing.T) {
 	setupTestDB(t)
 	
 	ctx := context.Background()
-	_, err := queries.CreateProject(ctx, db.CreateProjectParams{
-		RootID: 1,
+	root, err := queries.CreateRoot(ctx, db.CreateRootParams{LocalPort: "8080"})
+	if err != nil {
+		t.Fatalf("Failed to create root: %v", err)
+	}
+	_, err = queries.CreateProject(ctx, db.CreateProjectParams{
+		RootID: root.ID,
 		Name:   "Test Project",
 	})
 	if err != nil {
-		// Create root first if it doesn't exist
-		_, err = queries.CreateRoot(ctx, db.CreateRootParams{
-			LocalPort: "8080",
-		})
-		if err != nil {
-			t.Fatalf("Failed to create root: %v", err)
-		}
-		
-		_, err = queries.CreateProject(ctx, db.CreateProjectParams{
-			RootID: 1,
-			Name:   "Test Project",
-		})
-		if err != nil {
-			t.Fatalf("Failed to create project: %v", err)
-		}
+		t.Fatalf("Failed to create project: %v", err)
 	}
-	
+
 	req := httptest.NewRequest("GET", "/api/projects", nil)
 	w := httptest.NewRecorder()
 	
@@ -249,12 +231,12 @@ func TestProjectsAPI_ArraysNotNull(t *testing.T) {
 	
 	project := projects[0]
 	
-	// Check that base_directories is an array, not null
-	baseDirs, exists := project["base_directories"]
+	// Check that baseDirectories is an array, not null (JSON tag is "baseDirectories")
+	baseDirs, exists := project["baseDirectories"]
 	if !exists {
-		t.Errorf("base_directories field missing from response")
+		t.Errorf("baseDirectories field missing from response")
 	} else if baseDirs == nil {
-		t.Errorf("base_directories should not be null, should be an empty array")
+		t.Errorf("baseDirectories should not be null, should be an empty array")
 	}
 	
 	// Check that tasks is an array, not null
@@ -291,33 +273,63 @@ func TestProjectTasksAPI_GET(t *testing.T) {
 
 func TestProjectTasksAPI_POST(t *testing.T) {
 	setupTestDB(t)
-	
-	taskData := map[string]interface{}{
-		"title":       "Test Task",
-		"description": "Test task description",
-		"status":      "todo",
+
+	// Create root and project first
+	ctx := context.Background()
+	root, err := queries.CreateRoot(ctx, db.CreateRootParams{LocalPort: "8080"})
+	if err != nil {
+		t.Fatalf("Failed to create root: %v", err)
 	}
-	
+	project, err := queries.CreateProject(ctx, db.CreateProjectParams{RootID: root.ID, Name: "Test Project"})
+	if err != nil {
+		t.Fatalf("Failed to create project: %v", err)
+	}
+
+	// Create a base directory via the API to get a valid base_directory_id
+	dirData := map[string]interface{}{
+		"path":           "/test/dir",
+		"gitInitialized": false,
+	}
+	dirJSON, _ := json.Marshal(dirData)
+	dirReq := httptest.NewRequest("POST", fmt.Sprintf("/api/projects/%d/base-directories", project.ID), bytes.NewBuffer(dirJSON))
+	dirReq.Header.Set("Content-Type", "application/json")
+	dirW := httptest.NewRecorder()
+	handleAPI(dirW, dirReq)
+	if dirW.Code != http.StatusOK {
+		t.Fatalf("Failed to create base directory: %d — %s", dirW.Code, dirW.Body.String())
+	}
+	var dir BaseDirectory
+	if err := json.Unmarshal(dirW.Body.Bytes(), &dir); err != nil {
+		t.Fatalf("Failed to unmarshal base directory: %v", err)
+	}
+
+	taskData := map[string]interface{}{
+		"title":           "Test Task",
+		"description":     "Test task description",
+		"status":          "todo",
+		"baseDirectoryId": dir.BaseDirectoryId,
+	}
+
 	jsonData, _ := json.Marshal(taskData)
-	req := httptest.NewRequest("POST", "/api/projects/1/tasks", bytes.NewBuffer(jsonData))
+	req := httptest.NewRequest("POST", fmt.Sprintf("/api/projects/%d/tasks", project.ID), bytes.NewBuffer(jsonData))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
-	
+
 	handleAPI(w, req)
-	
+
 	if w.Code != http.StatusOK {
 		t.Errorf("Expected status 200, got %d. Response: %s", w.Code, w.Body.String())
 	}
-	
+
 	var task Task
 	if err := json.Unmarshal(w.Body.Bytes(), &task); err != nil {
 		t.Errorf("Failed to unmarshal response: %v", err)
 	}
-	
+
 	if task.Title != "Test Task" {
 		t.Errorf("Expected task title 'Test Task', got '%s'", task.Title)
 	}
-	
+
 	if task.Status != "todo" {
 		t.Errorf("Expected task status 'todo', got '%s'", task.Status)
 	}
@@ -325,29 +337,19 @@ func TestProjectTasksAPI_POST(t *testing.T) {
 
 func TestProjectBaseDirectoriesAPI_POST(t *testing.T) {
 	setupTestDB(t)
-	
-	// Create a project first
+
+	// Create root and project first
 	ctx := context.Background()
+	root, err := queries.CreateRoot(ctx, db.CreateRootParams{LocalPort: "8080"})
+	if err != nil {
+		t.Fatalf("Failed to create root: %v", err)
+	}
 	project, err := queries.CreateProject(ctx, db.CreateProjectParams{
-		RootID: 1,
+		RootID: root.ID,
 		Name:   "Test Project",
 	})
 	if err != nil {
-		// Create root first if it doesn't exist
-		_, err = queries.CreateRoot(ctx, db.CreateRootParams{
-			LocalPort: "8080",
-		})
-		if err != nil {
-			t.Fatalf("Failed to create root: %v", err)
-		}
-		
-		project, err = queries.CreateProject(ctx, db.CreateProjectParams{
-			RootID: 1,
-			Name:   "Test Project",
-		})
-		if err != nil {
-			t.Fatalf("Failed to create project: %v", err)
-		}
+		t.Fatalf("Failed to create project: %v", err)
 	}
 	
 	directoryData := map[string]interface{}{

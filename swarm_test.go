@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -730,5 +731,144 @@ func TestEscalation_API_ListViaState(t *testing.T) {
 	mustDecodeJSON(t, w, &state)
 	if len(state.Escalations) == 0 {
 		t.Error("expected at least one escalation in session state")
+	}
+}
+
+// ─── Bulk Endpoint Tests ──────────────────────────────────────────────────────
+
+func TestSwarmBulk_ValidIDs(t *testing.T) {
+	setupSwarmDB(t)
+	idA := createSwarmSession(t, "bulk-a")
+	idB := createSwarmSession(t, "bulk-b")
+
+	w := swarmReq(t, "GET", "/api/swarm/sessions/bulk?ids="+idA+","+idB, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var result map[string]*SwarmState
+	mustDecodeJSON(t, w, &result)
+
+	if _, ok := result[idA]; !ok {
+		t.Errorf("expected session %s in bulk response", idA)
+	}
+	if _, ok := result[idB]; !ok {
+		t.Errorf("expected session %s in bulk response", idB)
+	}
+}
+
+func TestSwarmBulk_EmptyIDs(t *testing.T) {
+	setupSwarmDB(t)
+
+	w := swarmReq(t, "GET", "/api/swarm/sessions/bulk?ids=", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var result map[string]*SwarmState
+	mustDecodeJSON(t, w, &result)
+	if len(result) != 0 {
+		t.Errorf("expected empty object, got %d entries", len(result))
+	}
+}
+
+func TestSwarmBulk_TooManyIDs(t *testing.T) {
+	setupSwarmDB(t)
+
+	ids := make([]string, maxBulkSessionIDs+1)
+	for i := range ids {
+		ids[i] = fmt.Sprintf("fake-id-%d", i)
+	}
+	w := swarmReq(t, "GET", "/api/swarm/sessions/bulk?ids="+strings.Join(ids, ","), nil)
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for too many IDs, got %d", w.Code)
+	}
+}
+
+func TestSwarmBulk_MixedValidInvalid(t *testing.T) {
+	setupSwarmDB(t)
+	realID := createSwarmSession(t, "bulk-mixed")
+
+	w := swarmReq(t, "GET", "/api/swarm/sessions/bulk?ids="+realID+",fake-nonexistent-id", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var result map[string]*SwarmState
+	mustDecodeJSON(t, w, &result)
+	if _, ok := result[realID]; !ok {
+		t.Errorf("expected real session %s in result", realID)
+	}
+	if _, ok := result["fake-nonexistent-id"]; ok {
+		t.Errorf("fake ID should not appear in result")
+	}
+}
+
+// ─── Session DELETE Cascade Tests ─────────────────────────────────────────────
+
+func TestSwarmSession_DeleteCascade(t *testing.T) {
+	setupSwarmDB(t)
+	ctx := context.Background()
+
+	sessionID := createSwarmSession(t, "cascade-test")
+	agentID := createSwarmAgent(t, sessionID, "cascade-agent")
+	taskID := createSwarmTask(t, sessionID, "cascade-task")
+	_ = createSwarmGoal(t, sessionID, "cascade-goal")
+
+	// Insert rows in tables that require application-level cascade
+	database.ExecContext(ctx,
+		"INSERT INTO swarm_events (session_id, agent_id, task_id, type, payload, ts) VALUES (?, ?, ?, 'test', '{}', ?)",
+		sessionID, agentID, taskID, time.Now().Unix(),
+	)
+	database.ExecContext(ctx,
+		"INSERT INTO swarm_agent_notes (agent_id, session_id, content, created_by, created_at) VALUES (?, ?, 'note', 'test', ?)",
+		agentID, sessionID, time.Now().Unix(),
+	)
+
+	// Delete the session
+	w := swarmReq(t, "DELETE", "/api/swarm/sessions/"+sessionID, nil)
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// Verify session is gone
+	var count int
+	database.QueryRowContext(ctx, "SELECT COUNT(*) FROM swarm_sessions WHERE id=?", sessionID).Scan(&count)
+	if count != 0 {
+		t.Error("session should be deleted")
+	}
+
+	// FK cascade should have removed agents and tasks
+	database.QueryRowContext(ctx, "SELECT COUNT(*) FROM swarm_agents WHERE session_id=?", sessionID).Scan(&count)
+	if count != 0 {
+		t.Errorf("agents should be cascade-deleted, got %d", count)
+	}
+	database.QueryRowContext(ctx, "SELECT COUNT(*) FROM swarm_tasks WHERE session_id=?", sessionID).Scan(&count)
+	if count != 0 {
+		t.Errorf("tasks should be cascade-deleted, got %d", count)
+	}
+
+	// Application-level cascade
+	database.QueryRowContext(ctx, "SELECT COUNT(*) FROM swarm_events WHERE session_id=?", sessionID).Scan(&count)
+	if count != 0 {
+		t.Errorf("events should be cascade-deleted, got %d", count)
+	}
+	database.QueryRowContext(ctx, "SELECT COUNT(*) FROM swarm_agent_notes WHERE session_id=?", sessionID).Scan(&count)
+	if count != 0 {
+		t.Errorf("agent notes should be cascade-deleted, got %d", count)
+	}
+	database.QueryRowContext(ctx, "SELECT COUNT(*) FROM swarm_goals WHERE session_id=?", sessionID).Scan(&count)
+	if count != 0 {
+		t.Errorf("goals should be cascade-deleted, got %d", count)
+	}
+}
+
+func TestSwarmSession_Delete_Nonexistent(t *testing.T) {
+	setupSwarmDB(t)
+
+	w := swarmReq(t, "DELETE", "/api/swarm/sessions/nonexistent-session-00000", nil)
+	// 204 or 404 are both acceptable — must not be 500
+	if w.Code == http.StatusInternalServerError {
+		t.Errorf("deleting nonexistent session returned 500: %s", w.Body.String())
 	}
 }

@@ -82,6 +82,9 @@ func waitForClaudeReady(tmuxName string, timeout time.Duration) {
 
 // validateSwarmRepoPath ensures repoPath resolves to a directory under the user's
 // home directory, preventing path traversal attacks via a malicious repo_path value.
+// EvalSymlinks is used to detect symlink escapes (e.g. $HOME/link -> /etc).
+// For paths that don't fully exist (worktree about to be created), resolves
+// the deepest existing ancestor to catch symlinks in intermediate directories.
 func validateSwarmRepoPath(repoPath string) error {
 	abs, err := filepath.Abs(repoPath)
 	if err != nil {
@@ -91,10 +94,46 @@ func validateSwarmRepoPath(repoPath string) error {
 	if err != nil {
 		return fmt.Errorf("cannot determine home dir: %w", err)
 	}
-	if !strings.HasPrefix(abs, home+string(filepath.Separator)) {
+
+	// Try to resolve symlinks for the full path first.
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		// Path doesn't fully exist — walk up to find the deepest existing ancestor
+		// and resolve symlinks there. This prevents escape via a symlinked parent dir.
+		resolved = resolveExistingAncestor(abs)
+	}
+
+	if !strings.HasPrefix(resolved, home+string(filepath.Separator)) {
 		return fmt.Errorf("repo_path must be under home directory (%s)", home)
 	}
 	return nil
+}
+
+// resolveExistingAncestor walks up p until it finds an existing path component,
+// resolves symlinks on that component, then reconstructs the full path.
+// This handles the case where a worktree path doesn't exist yet but a
+// symlinked ancestor could escape the home directory.
+func resolveExistingAncestor(p string) string {
+	// Collect non-existing tail components
+	var tail []string
+	cur := p
+	for {
+		resolved, err := filepath.EvalSymlinks(cur)
+		if err == nil {
+			// Reconstruct: resolved ancestor + non-existing tail
+			for i := len(tail) - 1; i >= 0; i-- {
+				resolved = filepath.Join(resolved, tail[i])
+			}
+			return resolved
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			// Reached filesystem root without finding existing ancestor
+			return p
+		}
+		tail = append(tail, filepath.Base(cur))
+		cur = parent
+	}
 }
 
 func swarmShortID(id string) string {
