@@ -1443,13 +1443,17 @@ func (m tuiModel) viewHUD() string {
 			Render(fmt.Sprintf("⚙%d auto", autopilotCount)))
 	}
 	var totalTokens int64
+	var totalCost float64
 	for _, st := range m.states {
 		for _, a := range st.Agents {
 			totalTokens += a.TokensUsed
+			totalCost += estimateCostUSD(a.ModelName, a.TokensUsed)
 		}
 	}
 	if totalTokens > 0 {
-		parts = append(parts, dimStyle.Render(formatTokensK(totalTokens)+" tok"))
+		tokStr := formatTokensK(totalTokens) + " tok"
+		costStr := formatCostUSD(totalCost)
+		parts = append(parts, dimStyle.Render(tokStr+"  "+costStr))
 	}
 	return hudStyle.Width(m.w).Render(strings.Join(parts, "  "))
 }
@@ -1827,11 +1831,13 @@ func (m tuiModel) viewStatusBar() string {
 				st := m.states[it.sid]
 				live := 0
 				var totalTok int64
+				var sessCost float64
 				for _, a := range st.Agents {
 					if a.TmuxSession != nil {
 						live++
 					}
 					totalTok += a.TokensUsed
+					sessCost += estimateCostUSD(a.ModelName, a.TokensUsed)
 				}
 				leftParts = append(leftParts,
 					lipgloss.NewStyle().Foreground(colorTeal).Bold(true).Render(truncStr(sess.Name, 24)))
@@ -1839,7 +1845,7 @@ func (m tuiModel) viewStatusBar() string {
 					dimStyle.Render(fmt.Sprintf("%d agents (%d live) · %d tasks", len(st.Agents), live, len(st.Tasks))))
 				if totalTok > 0 {
 					leftParts = append(leftParts,
-						dimStyle.Render(formatTokensK(totalTok)+" tok"))
+						dimStyle.Render(formatTokensK(totalTok)+" tok  "+formatCostUSD(sessCost)))
 				}
 				if sess.AutopilotEnabled {
 					leftParts = append(leftParts,
@@ -1860,8 +1866,9 @@ func (m tuiModel) viewStatusBar() string {
 					leftParts = append(leftParts, dimStyle.Render(modelShort))
 				}
 				if agent.TokensUsed > 0 {
+					costStr := formatCostUSD(estimateCostUSD(agent.ModelName, agent.TokensUsed))
 					leftParts = append(leftParts,
-						lipgloss.NewStyle().Foreground(colorTeal).Render(formatTokensK(agent.TokensUsed)+" tok"))
+						lipgloss.NewStyle().Foreground(colorTeal).Render(formatTokensK(agent.TokensUsed)+" tok  "+costStr))
 				}
 				if agent.ContextPct > 0 {
 					var barC lipgloss.Color
@@ -2809,6 +2816,38 @@ func formatTokensK(n int64) string {
 		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
 	}
 	return fmt.Sprintf("%dk", n/1000)
+}
+
+// estimateCostUSD returns a rough blended cost estimate (input+output) based on
+// the model name and total token count. Rates are per-million-token blended
+// estimates (roughly 70% input / 30% output).
+func estimateCostUSD(modelName string, tokens int64) float64 {
+	// Blended rates in dollars per token.
+	const (
+		rateOpus   = 45.0 / 1_000_000 // claude-opus*
+		rateSonnet = 9.0 / 1_000_000  // claude-sonnet* (default)
+		rateHaiku  = 2.4 / 1_000_000  // claude-haiku*
+	)
+	var rate float64
+	switch {
+	case strings.Contains(modelName, "opus"):
+		rate = rateOpus
+	case strings.Contains(modelName, "haiku"):
+		rate = rateHaiku
+	default:
+		rate = rateSonnet
+	}
+	return rate * float64(tokens)
+}
+
+func formatCostUSD(c float64) string {
+	if c < 0.005 {
+		return "<$0.01"
+	}
+	if c < 1.0 {
+		return fmt.Sprintf("~$%.2f", c)
+	}
+	return fmt.Sprintf("~$%.1f", c)
 }
 
 // ─── Goals view ──────────────────────────────────────────────────────────────

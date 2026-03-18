@@ -272,7 +272,7 @@ func swarmStuckTimeout() time.Duration {
 			return time.Duration(secs) * time.Second
 		}
 	}
-	return 15 * time.Minute
+	return 30 * time.Minute
 }
 
 func startSwarmMonitor() {
@@ -408,13 +408,20 @@ func isTmuxSessionAlive(session string) bool {
 // a transition to coding/testing/done, it is promoted to stuck. Set to "0"
 // to disable time-based escalation.
 func detectSwarmAgentStatus(tmuxSession string) string {
-	out, err := exec.Command("tmux", "capture-pane", "-t", tmuxSession, "-p", "-S", "-8").CombinedOutput()
+	// Capture 30 lines — enough to see Claude Code indicators even after a
+	// long-running tool call has produced many lines of output.
+	out, err := exec.Command("tmux", "capture-pane", "-t", tmuxSession, "-p", "-S", "-30").CombinedOutput()
 	if err != nil {
 		return "stuck"
 	}
 	pane := string(out)
 
-	// Claude Code tool-use patterns
+	// Waiting for human input — check first, highest priority for operator action.
+	if containsAny(pane, "Do you want to proceed", "Press Enter", "(y/n)", "waiting for input",
+		"Proceed?", "Allow this action?", "bypass permissions") {
+		return "waiting"
+	}
+	// Claude Code tool-use patterns — agent is actively executing something.
 	if containsAny(pane, "Write(", "Edit(", "str_replace", "create_file", "write_file") {
 		return "coding"
 	}
@@ -424,20 +431,22 @@ func detectSwarmAgentStatus(tmuxSession string) string {
 	if containsAny(pane, "Read(", "read_file", "view_file", "Search(", "Grep(") {
 		return "coding"
 	}
-	// Claude's active indicator symbols and thinking spinner
+	if containsAny(pane, "Agent(", "TodoWrite(", "TodoRead(", "Glob(", "MultiEdit(") {
+		return "coding"
+	}
+	// Claude's active output indicators (thinking/generating text).
 	if containsAny(pane, "⏺", "◆", "●", "↳", "✓") {
 		return "thinking"
 	}
-	// Waiting for human input
-	if containsAny(pane, "Do you want to proceed", "Press Enter", "(y/n)", "waiting for input") {
-		return "waiting"
-	}
-	// Error states
-	if containsAny(pane, "Error:", "FAILED", "fatal:", "panic:") {
+	// Error states — only clear terminal errors, not partial matches like "Error handling".
+	if containsAny(pane, "\nError:", "fatal:", "panic:", "FAILED\n", "command not found") {
 		return "stuck"
 	}
-
-	return "thinking"
+	// Fallback: if none of the above matched, the agent is most likely running a
+	// long command whose output has scrolled past the captured window (e.g. npm
+	// install, go build, a test suite). Classify as "coding" so the stuck timer
+	// is not advanced. Only genuine waiting/error patterns trigger escalation.
+	return "coding"
 }
 
 func containsAny(s string, subs ...string) bool {
