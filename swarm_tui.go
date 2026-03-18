@@ -632,6 +632,7 @@ func (m *tuiModel) updateVP() {
 		if agent != nil && agent.TmuxSession != nil {
 			if content, ok := m.termContent[it.eid]; ok && content != "" {
 				m.vp.SetContent(content)
+				m.vp.GotoBottom()
 				return
 			}
 			m.vp.SetContent(dimStyle.Render("  Fetching terminal…"))
@@ -887,7 +888,14 @@ func (m tuiModel) updateSidebar(msg tea.KeyMsg) (tuiModel, []tea.Cmd) {
 		if it != nil && it.kind == tuiItemAgent {
 			agent := m.lookupAgent(it.sid, it.eid)
 			if agent != nil && agent.TmuxSession != nil {
-				cmd := exec.Command("tmux", "attach-session", "-t", *agent.TmuxSession)
+				// Use switch-client when already inside tmux (avoids nesting warning),
+				// fall back to attach-session otherwise.
+				var cmd *exec.Cmd
+				if os.Getenv("TMUX") != "" {
+					cmd = exec.Command("tmux", "switch-client", "-t", *agent.TmuxSession)
+				} else {
+					cmd = exec.Command("tmux", "attach-session", "-t", *agent.TmuxSession)
+				}
 				cmds = append(cmds, tea.ExecProcess(cmd, func(err error) tea.Msg {
 					return tuiAttachMsg{err: err}
 				}))
