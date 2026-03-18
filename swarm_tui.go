@@ -604,6 +604,9 @@ type tuiModel struct {
 	// Despawn confirmation (two-press: first d sets, second d executes, esc clears)
 	pendingDespawn *tuiSidebarItem
 
+	// Session delete confirmation (two-press: first X sets, second X executes, esc clears)
+	pendingDeleteSession *tuiSidebarItem
+
 	// Help overlay (hold ?)
 	helpVisible bool
 	helpVersion int
@@ -1056,6 +1059,11 @@ func (m tuiModel) updateSidebar(msg tea.KeyMsg) (tuiModel, []tea.Cmd) {
 		m.pendingDespawn = nil
 		m.flash = ""
 	}
+	// Cancel pending session delete on any key except X
+	if m.pendingDeleteSession != nil && msg.String() != "X" {
+		m.pendingDeleteSession = nil
+		m.flash = ""
+	}
 	switch msg.String() {
 	case "q", "ctrl+c":
 		m.ws.closeAll()
@@ -1126,6 +1134,34 @@ func (m tuiModel) updateSidebar(msg tea.KeyMsg) (tuiModel, []tea.Cmd) {
 				}
 			} else {
 				m.setFlash("Agent not running", false)
+			}
+		}
+
+	case "X":
+		it := m.selItem()
+		if it != nil && it.kind == tuiItemSession {
+			sess := m.lookupSession(it.sid)
+			if sess != nil {
+				if m.pendingDeleteSession != nil && m.pendingDeleteSession.sid == it.sid {
+					// Second press — confirmed, delete session
+					path := "/api/swarm/sessions/" + it.sid
+					cmds = append(cmds, func() tea.Msg {
+						_, status, err := m.client.do("DELETE", path, nil)
+						if err != nil || status >= 400 {
+							return tuiErrMsg{op: "delete-session", text: "delete failed"}
+						}
+						return tuiDoneMsg{op: "delete-session"}
+					})
+					m.pendingDeleteSession = nil
+					// Move cursor up if at end
+					if m.cursor > 0 {
+						m.cursor--
+					}
+				} else {
+					// First press — require confirmation
+					m.pendingDeleteSession = it
+					m.setFlash("Delete session \""+sess.Name+"\"? Press X again to confirm, Esc to cancel", true)
+				}
 			}
 		}
 
@@ -1753,12 +1789,18 @@ func (m tuiModel) viewSidebar(h int) string {
 					live++
 				}
 			}
+			pendingDel := m.pendingDeleteSession != nil && m.pendingDeleteSession.sid == it.sid
 			name := truncStr(sess.Name, tuiSidebarW-7)
 			suffix := ""
-			if live > 0 {
+			if pendingDel {
+				suffix = lipgloss.NewStyle().Foreground(colorRed).Bold(true).Render(" ✗?")
+			} else if live > 0 {
 				suffix = lipgloss.NewStyle().Foreground(colorTeal).Render(fmt.Sprintf(" ·%d", live))
 			}
 			base := lipgloss.NewStyle().Foreground(colorText).Bold(true)
+			if pendingDel {
+				base = base.Foreground(colorRed)
+			}
 			if sel {
 				base = base.Background(colorSubtle)
 			}
@@ -2665,17 +2707,19 @@ func (m tuiModel) viewHelpScreen() string {
 	sb.WriteString(dim("    Set via /goal <description> in the chat bar, or synced from Plane.\n") + "\n")
 
 	sb.WriteString(h("  Task") + "\n")
-	sb.WriteString("    A unit of work assigned to one agent. Lifecycle:\n")
+	sb.WriteString("    A unit of work assigned to one agent. Talos 8-phase lifecycle:\n")
 	sb.WriteString("    " +
 		badge("spec", colorDim) + " → " +
-		badge("queued", colorBlue) + " → " +
-		badge("assigned", colorTeal) + " → " +
-		badge("running", colorGreen) + " → " +
-		badge("review", colorOrange) + " → " +
+		badge("plan", colorBlue) + " → " +
+		badge("review", colorPurple) + " → " +
+		badge("impl", colorTeal) + " → " +
+		badge("review", colorPurple) + " → " +
+		badge("judge", colorPurple) + " → " +
 		badge("deploy", colorOrange) + " → " +
-		badge("done", colorGreen) + "\n")
-	sb.WriteString(dim("    Blocked tasks auto-revert to queued. Auto-dispatch fires immediately\n"))
-	sb.WriteString(dim("    when a task is created or an idle agent becomes available.\n") + "\n")
+		badge("docs", colorDim) + "\n")
+	sb.WriteString(dim("    Task state machine: queued → assigned → running → needs_review / complete\n"))
+	sb.WriteString(dim("    Blocked tasks auto-revert to queued. Auto-dispatch fires on new tasks\n"))
+	sb.WriteString(dim("    and when idle agents become available.\n") + "\n")
 
 	sb.WriteString(h("  Agent") + "\n")
 	sb.WriteString("    A Claude Code instance running in a tmux session. Two roles:\n")
@@ -2697,6 +2741,7 @@ func (m tuiModel) viewHelpScreen() string {
 	sb.WriteString(h("ACTIONS") + "\n")
 	sb.WriteString(key("s", "Spawn agent (opens browser)") + "\n")
 	sb.WriteString(key("d  d", "Stop agent (press twice to confirm)") + "\n")
+	sb.WriteString(key("X  X", "Delete session (press twice to confirm)") + "\n")
 	sb.WriteString(key("+", "Quick-spawn a worker (name only)") + "\n")
 	sb.WriteString(key("n", "New agent (full form)") + "\n")
 	sb.WriteString(key("t", "New task") + "\n")
@@ -2930,6 +2975,22 @@ func monitorBar(status string, frame int) string {
 
 func tuiStageColor(stage string) lipgloss.Color {
 	switch stage {
+	// Talos phases
+	case "spec":
+		return colorDim
+	case "plan":
+		return colorBlue
+	case "implement":
+		return colorTeal
+	case "test":
+		return colorYellow
+	case "judge":
+		return colorPurple
+	case "deploy":
+		return colorOrange
+	case "document":
+		return colorDim
+	// Task lifecycle states
 	case "queued":
 		return colorDim
 	case "assigned":
@@ -2944,7 +3005,7 @@ func tuiStageColor(stage string) lipgloss.Color {
 		return colorYellow
 	case "needs_human":
 		return colorOrange
-	case "complete":
+	case "complete", "done":
 		return colorGreen
 	case "failed":
 		return colorRed
@@ -2960,6 +3021,22 @@ func tuiStageColor(stage string) lipgloss.Color {
 // shortStage returns a compact display label for a task stage.
 func shortStage(stage string) string {
 	switch stage {
+	// Talos phases
+	case "spec":
+		return "spec  "
+	case "plan":
+		return "plan  "
+	case "implement":
+		return "impl  "
+	case "test":
+		return "test  "
+	case "judge":
+		return "judge "
+	case "deploy":
+		return "deploy"
+	case "document":
+		return "docs  "
+	// Task lifecycle states
 	case "queued":
 		return "queued"
 	case "assigned":
@@ -2974,7 +3051,7 @@ func shortStage(stage string) string {
 		return "review"
 	case "needs_human":
 		return "HUMAN?"
-	case "complete":
+	case "complete", "done":
 		return "done  "
 	case "failed":
 		return "FAIL  "
