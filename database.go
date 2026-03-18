@@ -40,8 +40,16 @@ func initDatabaseWithPathAndReturn(dbPath string) (*sql.DB, *db.Queries, string)
 		}
 	}
 
-	// Open database connection
-	database, err := sql.Open("sqlite", dbPath)
+	// Open database connection.
+	// _pragma=foreign_keys%3Don sets foreign_keys=ON for every connection in the pool,
+	// since SQLite PRAGMA settings are per-connection and database/sql uses a pool.
+	dsn := dbPath
+	if !strings.Contains(dbPath, "?") {
+		dsn = dbPath + "?_pragma=foreign_keys%3Don"
+	} else {
+		dsn = dbPath + "&_pragma=foreign_keys%3Don"
+	}
+	database, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		log.Fatalf("Failed to open database: %v", err)
 	}

@@ -585,10 +585,10 @@ func handleSwarmSessionsAPI(w http.ResponseWriter, r *http.Request, ctx context.
 				json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 				return
 			}
+			defer tx.Rollback() //nolint:errcheck — no-op after Commit
 			if _, err := tx.ExecContext(ctx,
 				"INSERT INTO swarm_sessions (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)",
 				id, req.Name, now, now); err != nil {
-				tx.Rollback() //nolint:errcheck
 				w.WriteHeader(http.StatusInternalServerError)
 				json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 				return
@@ -598,7 +598,6 @@ func handleSwarmSessionsAPI(w http.ResponseWriter, r *http.Request, ctx context.
 			if _, err := tx.ExecContext(ctx,
 				"INSERT INTO swarm_agents (id, session_id, name, role, mission, status, created_at) VALUES (?, ?, 'SiBot', 'orchestrator', ?, 'idle', ?)",
 				sibotID, id, sibotMission, now); err != nil {
-				tx.Rollback() //nolint:errcheck
 				w.WriteHeader(http.StatusInternalServerError)
 				json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 				return
@@ -874,12 +873,25 @@ func handleSwarmDashboardAPI(w http.ResponseWriter, r *http.Request, ctx context
 // handleSwarmBulkAPI returns full state for multiple sessions in one call.
 // GET /api/swarm/sessions/bulk?ids=id1,id2,...
 // Reduces TUI fetchAll from 1+N HTTP round-trips to 2 (dashboard + bulk).
+const maxBulkSessionIDs = 100
+
 func handleSwarmBulkAPI(w http.ResponseWriter, r *http.Request, ctx context.Context) {
+	w.Header().Set("Content-Type", "application/json")
 	if r.Method != http.MethodGet {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	ids := strings.Split(r.URL.Query().Get("ids"), ",")
+	rawIDs := r.URL.Query().Get("ids")
+	if rawIDs == "" {
+		json.NewEncoder(w).Encode(map[string]interface{}{}) //nolint:errcheck
+		return
+	}
+	ids := strings.Split(rawIDs, ",")
+	if len(ids) > maxBulkSessionIDs {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": fmt.Sprintf("too many ids (max %d)", maxBulkSessionIDs)}) //nolint:errcheck
+		return
+	}
 	result := make(map[string]*SwarmState, len(ids))
 	for _, id := range ids {
 		if id = strings.TrimSpace(id); id == "" {
@@ -889,7 +901,6 @@ func handleSwarmBulkAPI(w http.ResponseWriter, r *http.Request, ctx context.Cont
 			result[id] = state
 		}
 	}
-	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(result) //nolint:errcheck
 }
 
