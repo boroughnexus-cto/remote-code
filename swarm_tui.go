@@ -144,9 +144,17 @@ type tuiDoneMsg      struct{ op string }
 type tuiAttachMsg    struct{ err error }
 type tuiWorkQueueMsg struct{ items []WorkQueueItem }
 type tuiIcingaMsg   struct{ services []IcingaService }
+type tuiHelpHideMsg struct{ version int }
 
 func tuiAnimTick() tea.Cmd {
 	return tea.Tick(150*time.Millisecond, func(time.Time) tea.Msg { return tuiAnimTickMsg{} })
+}
+
+func hideHelpAfter(version int) tea.Cmd {
+	return func() tea.Msg {
+		time.Sleep(700 * time.Millisecond)
+		return tuiHelpHideMsg{version: version}
+	}
 }
 
 // ─── API client ───────────────────────────────────────────────────────────────
@@ -513,6 +521,10 @@ type tuiModel struct {
 	// Despawn confirmation (two-press: first d sets, second d executes, esc clears)
 	pendingDespawn *tuiSidebarItem
 
+	// Help overlay (hold ?)
+	helpVisible bool
+	helpVersion int
+
 	// Icinga monitor view (I key)
 	icingaView     bool
 	icingaServices []IcingaService // sorted by state
@@ -815,6 +827,11 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.setFlash(label, false)
 		cmds = append(cmds, m.client.fetchAll())
 
+	case tuiHelpHideMsg:
+		if msg.version == m.helpVersion {
+			m.helpVisible = false
+		}
+
 	case tuiIcingaMsg:
 		m.icingaServices = msg.services
 		m.icingaTopCur = 0
@@ -830,6 +847,17 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, m.client.fetchAll())
 
 	case tea.KeyMsg:
+		// ? shows hold-to-view help from anywhere; each press resets the hide timer.
+		if msg.String() == "?" {
+			m.helpVisible = true
+			m.helpVersion++
+			cmds = append(cmds, hideHelpAfter(m.helpVersion))
+			break
+		}
+		// Any other key hides the help overlay immediately.
+		if m.helpVisible {
+			m.helpVisible = false
+		}
 		if m.evtDetailView != nil {
 			if msg.String() == "q" || msg.String() == "esc" {
 				m.evtDetailView = nil
@@ -1311,6 +1339,9 @@ func (m tuiModel) submitModal() tea.Cmd {
 func (m tuiModel) View() string {
 	if m.w == 0 {
 		return "Loading…"
+	}
+	if m.helpVisible {
+		return m.viewHelpScreen()
 	}
 	if m.modal != nil {
 		return m.viewModal()
@@ -2319,6 +2350,112 @@ func (m tuiModel) viewIcingaScreen() string {
 
 	sb.WriteString("\n" + dimStyle.Render("  Tab switch-pane  ·  j/k navigate  ·  g/G first/last  ·  r refresh  ·  q close"))
 	return sb.String()
+}
+
+// ─── Help screen ──────────────────────────────────────────────────────────────
+
+func (m tuiModel) viewHelpScreen() string {
+	h := func(s string) string {
+		return lipgloss.NewStyle().Foreground(colorTeal).Bold(true).Render(s)
+	}
+	dim := func(s string) string { return dimStyle.Render(s) }
+	key := func(k, desc string) string {
+		return fmt.Sprintf("  %-14s %s", lipgloss.NewStyle().Foreground(colorText).Render(k), dim(desc))
+	}
+	badge := func(s string, c lipgloss.Color) string {
+		return lipgloss.NewStyle().Foreground(c).Bold(true).Render(s)
+	}
+
+	var sb strings.Builder
+
+	sb.WriteString(lipgloss.NewStyle().Foreground(colorTeal).Bold(true).
+		Render("SwarmOps") + dim("  —  AI Agent Swarm Orchestrator") + "\n\n")
+
+	// ── Concepts ──
+	sb.WriteString(h("CONCEPTS") + "\n\n")
+
+	sb.WriteString(h("  Session") + "\n")
+	sb.WriteString("    A swarm run. Groups agents, goals, and tasks into one workspace.\n")
+	sb.WriteString(dim("    Create with c. Resumable — agents re-attach on restart.\n") + "\n")
+
+	sb.WriteString(h("  Goal") + "\n")
+	sb.WriteString("    A high-level objective. SiBot decomposes it into concrete tasks.\n")
+	sb.WriteString(dim("    Set via /goal <description> in the chat bar, or synced from Plane.\n") + "\n")
+
+	sb.WriteString(h("  Task") + "\n")
+	sb.WriteString("    A unit of work assigned to one agent. Lifecycle:\n")
+	sb.WriteString("    " +
+		badge("spec", colorDim) + " → " +
+		badge("queued", colorBlue) + " → " +
+		badge("assigned", colorTeal) + " → " +
+		badge("running", colorGreen) + " → " +
+		badge("review", colorOrange) + " → " +
+		badge("deploy", colorOrange) + " → " +
+		badge("done", colorGreen) + "\n")
+	sb.WriteString(dim("    Blocked tasks auto-revert to queued. Auto-dispatch fires immediately\n"))
+	sb.WriteString(dim("    when a task is created or an idle agent becomes available.\n") + "\n")
+
+	sb.WriteString(h("  Agent") + "\n")
+	sb.WriteString("    A Claude Code instance running in a tmux session. Two roles:\n")
+	sb.WriteString("    " + badge("orchestrator", colorTeal) + dim("  SiBot — decomposes goals, assigns tasks, manages workers\n"))
+	sb.WriteString("    " + badge("worker     ", colorGreen) + dim("  Implements tasks, reports progress, requests escalation\n"))
+	sb.WriteString(dim("    Context rotation fires at 70% / 85% / 95% usage with handoff.\n") + "\n")
+
+	sb.WriteString(h("  Project") + "\n")
+	sb.WriteString("    A Plane project linked to the session. In autopilot mode the backlog\n")
+	sb.WriteString(dim("    is polled and issues become goals automatically (toggle with A).\n") + "\n")
+
+	// ── Keys ──
+	sb.WriteString(h("NAVIGATION") + "\n")
+	sb.WriteString(key("↑↓  j k", "Move sidebar cursor") + "\n")
+	sb.WriteString(key("Enter", "Attach to agent's tmux session") + "\n")
+	sb.WriteString(key("Tab  /", "Focus chat / message bar") + "\n")
+	sb.WriteString(key("q", "Quit") + "\n\n")
+
+	sb.WriteString(h("ACTIONS") + "\n")
+	sb.WriteString(key("s", "Spawn agent (opens browser)") + "\n")
+	sb.WriteString(key("d  d", "Stop agent (press twice to confirm)") + "\n")
+	sb.WriteString(key("+", "Quick-spawn a worker (name only)") + "\n")
+	sb.WriteString(key("n", "New agent (full form)") + "\n")
+	sb.WriteString(key("t", "New task") + "\n")
+	sb.WriteString(key("c", "New session") + "\n")
+	sb.WriteString(key("A", "Toggle autopilot (Plane sync)") + "\n\n")
+
+	sb.WriteString(h("VIEWS") + "\n")
+	sb.WriteString(key("I", "Icinga monitor — services + recent alerts") + "\n")
+	sb.WriteString(key("L", "Event log — full retrospective, agent filter, detail") + "\n")
+	sb.WriteString(key("e", "Escalations — pending human-in-the-loop requests") + "\n")
+	sb.WriteString(key("g", "Goals — goal status + budget tracking") + "\n")
+	sb.WriteString(key("W", "Work queue — Plane backlog") + "\n")
+	sb.WriteString(key("R", "Refresh all data") + "\n\n")
+
+	sb.WriteString(dim("  Hold ? to keep this screen open · release to dismiss"))
+
+	boxW := m.w - 4
+	if boxW > 90 {
+		boxW = 90
+	}
+	box := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(colorTeal).
+		Padding(1, 3).
+		Width(boxW).
+		Render(sb.String())
+
+	padTop := (m.h - lipgloss.Height(box)) / 2
+	if padTop < 0 {
+		padTop = 0
+	}
+	padLeft := (m.w - lipgloss.Width(box)) / 2
+	if padLeft < 0 {
+		padLeft = 0
+	}
+	indent := strings.Repeat(" ", padLeft)
+	rows := strings.Split(box, "\n")
+	for i, r := range rows {
+		rows[i] = indent + r
+	}
+	return strings.Repeat("\n", padTop) + strings.Join(rows, "\n")
 }
 
 func (m tuiModel) viewModal() string {
