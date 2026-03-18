@@ -60,12 +60,12 @@ func spawnSwarmAgent(ctx context.Context, sessionID, agentID string) error {
 	if err := checkSessionCostLimit(ctx, sessionID); err != nil {
 		return err
 	}
-	// SiBot / orchestrator can spawn without a repo_path
+	// Orchestrators get SiBot spawn; any other agent without a repo gets a scratch workdir.
 	if repoPath == "" && agentRole == "orchestrator" {
 		return spawnSiBotAgent(ctx, sessionID, agentID)
 	}
 	if repoPath == "" {
-		return fmt.Errorf("agent has no repo_path configured — edit the agent and add a repository path")
+		return spawnScratchAgent(ctx, sessionID, agentID)
 	}
 
 	tmuxName := swarmTmuxName(agentID)
@@ -589,6 +589,55 @@ func writeResumeContext(ctx context.Context, agentID, sessionID, worktreePath st
 
 	filePath := filepath.Join(worktreePath, "RESUME_CONTEXT.md")
 	return os.WriteFile(filePath, []byte(sb.String()), 0644)
+}
+
+// -----------------
+// Scratch agent (no repo_path, no git worktree)
+// -----------------
+
+func spawnScratchAgent(ctx context.Context, sessionID, agentID string) error {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("could not determine home dir: %v", err)
+	}
+	workDir := filepath.Join(homeDir, ".swarmops", "agents", agentID)
+	if err := os.MkdirAll(workDir, 0755); err != nil {
+		return fmt.Errorf("mkdir agent workdir: %v", err)
+	}
+
+	tmuxName := swarmTmuxName(agentID)
+	log.Printf("swarm: spawning scratch agent %s — tmux=%s workdir=%s", agentID[:8], tmuxName, workDir)
+
+	if err := initBlackboard(sessionID); err != nil {
+		log.Printf("swarm: warning — initBlackboard: %v", err)
+	}
+	if _, _, err := initAgentDirs(sessionID, agentID); err != nil {
+		log.Printf("swarm: warning — initAgentDirs: %v", err)
+	}
+
+	if out, err := exec.Command("tmux", "new-session", "-d", "-s", tmuxName, "-c", workDir).CombinedOutput(); err != nil {
+		return fmt.Errorf("tmux new-session: %v: %s", err, out)
+	}
+
+	exec.Command("tmux", "setenv", "-t", tmuxName, "SWARM_AGENT_ID", agentID).Run()   //nolint:errcheck
+	exec.Command("tmux", "setenv", "-t", tmuxName, "SWARM_SESSION_ID", sessionID).Run() //nolint:errcheck
+
+	if err := writeAgentClaudeSettings(workDir); err != nil {
+		log.Printf("swarm: warning — could not write .claude/settings.json: %v", err)
+	}
+
+	if out, err := exec.Command("tmux", "send-keys", "-t", tmuxName, swarmClaudeCommand, "Enter").CombinedOutput(); err != nil {
+		log.Printf("swarm: warning — could not send claude command: %v: %s", err, out)
+	}
+
+	_, err = database.ExecContext(ctx,
+		"UPDATE swarm_agents SET worktree_path = ?, tmux_session = ?, status = 'thinking' WHERE id = ?",
+		workDir, tmuxName, agentID,
+	)
+	if err == nil {
+		writeSwarmEvent(ctx, sessionID, agentID, "", "agent_spawned", tmuxName)
+	}
+	return err
 }
 
 // -----------------
