@@ -37,7 +37,7 @@ func loadRolePrompt(ctx context.Context, role string) (prompt string, version in
 // writeAgentCLAUDE writes the agent's role prompt + spawn context to CLAUDE.md
 // in the given workdir so Claude Code picks it up automatically on startup.
 func writeAgentCLAUDE(workDir, sessionID, agentID, role, mission, prompt string) error {
-	apiBase := "http://localhost:8080"
+	apiBase := swarmAPIBase()
 	spawnType := "worktree"
 	if strings.Contains(workDir, "/.swarmops/agents/") {
 		spawnType = "scratch (no git)"
@@ -57,7 +57,7 @@ func writeAgentCLAUDE(workDir, sessionID, agentID, role, mission, prompt string)
 		fmt.Fprintf(&sb, "- Mission: %s\n", mission)
 	}
 
-	return os.WriteFile(filepath.Join(workDir, "CLAUDE.md"), []byte(sb.String()), 0644)
+	return os.WriteFile(filepath.Join(workDir, "CLAUDE.md"), []byte(sb.String()), 0600)
 }
 
 // waitForClaudeReady polls the tmux pane until Claude Code's prompt is visible
@@ -79,6 +79,23 @@ func waitForClaudeReady(tmuxName string, timeout time.Duration) {
 // -----------------
 // ID helpers
 // -----------------
+
+// validateSwarmRepoPath ensures repoPath resolves to a directory under the user's
+// home directory, preventing path traversal attacks via a malicious repo_path value.
+func validateSwarmRepoPath(repoPath string) error {
+	abs, err := filepath.Abs(repoPath)
+	if err != nil {
+		return fmt.Errorf("cannot resolve path: %w", err)
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("cannot determine home dir: %w", err)
+	}
+	if !strings.HasPrefix(abs, home+string(filepath.Separator)) {
+		return fmt.Errorf("repo_path must be under home directory (%s)", home)
+	}
+	return nil
+}
 
 func swarmShortID(id string) string {
 	if len(id) >= 12 {
@@ -136,6 +153,11 @@ func spawnSwarmAgent(ctx context.Context, sessionID, agentID string) error {
 	}
 	if repoPath == "" {
 		return spawnScratchAgent(ctx, sessionID, agentID)
+	}
+
+	// Validate repoPath is under the user's home directory to prevent path traversal.
+	if err := validateSwarmRepoPath(repoPath); err != nil {
+		return fmt.Errorf("invalid repo_path: %w", err)
 	}
 
 	tmuxName := swarmTmuxName(agentID)
@@ -948,7 +970,7 @@ func buildSiBotBriefing(ctx context.Context, sessionID string) string {
 // -----------------
 
 func writeOrchestratorContext(worktreePath, sessionID string) error {
-	apiBase := "http://localhost:8080"
+	apiBase := swarmAPIBase()
 
 	content := fmt.Sprintf(`# SiBot — Swarm Orchestrator
 

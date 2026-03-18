@@ -115,6 +115,10 @@ func pollAllAgentOutboxes() {
 		}
 		agents = append(agents, a)
 	}
+	if err := rows.Err(); err != nil {
+		log.Printf("ipc: agent outbox rows error: %v", err)
+		return
+	}
 
 	for _, a := range agents {
 		eventsFile := filepath.Join(a.outboxPath, "events.jsonl")
@@ -198,9 +202,13 @@ func handleIPCEvent(ctx context.Context, sessionID, agentID string, ev IPCEvent)
 				log.Printf("ipc: StartTask error: %v", err)
 			}
 			if ev.Note != "" {
+				note := ev.Note
+				if len(note) > 2000 {
+					note = note[:2000]
+				}
 				database.ExecContext(ctx, //nolint:errcheck
 					"INSERT INTO swarm_agent_notes (agent_id, session_id, content, created_by, created_at) VALUES (?,?,?,?,?)",
-					agentID, sessionID, ev.Note, "agent", time.Now().Unix(),
+					agentID, sessionID, note, "agent", time.Now().Unix(),
 				)
 			}
 			writeSwarmEvent(ctx, sessionID, agentID, ev.TaskID, "task_progress", ev.Note)
@@ -314,11 +322,20 @@ func handleHeartbeat(ctx context.Context, sessionID, agentID string, ev IPCEvent
 
 	switch {
 	case pct >= ctxPctEmergency:
-		// Emergency: note it, then hard-kill after a short window
+		// Guard against duplicate emergency goroutines: check if already in emergency.
+		var state string
+		database.QueryRowContext(ctx, "SELECT COALESCE(context_state,'normal') FROM swarm_agents WHERE id=?", agentID).Scan(&state) //nolint:errcheck
+		if state == "emergency" {
+			return // goroutine already scheduled
+		}
 		database.ExecContext(ctx, //nolint:errcheck
 			"UPDATE swarm_agents SET context_state='emergency' WHERE id=?", agentID)
+		// Capture the current tmux session so the kill goroutine can verify
+		// the agent hasn't already rotated by the time the timer fires.
+		var capturedTmux string
+		database.QueryRowContext(ctx, "SELECT COALESCE(tmux_session,'') FROM swarm_agents WHERE id=?", agentID).Scan(&capturedTmux) //nolint:errcheck
 		log.Printf("ipc: EMERGENCY context %s — scheduling hard kill in %s", agentID[:8], emergencyKillDelay)
-		go emergencyRotateAgent(ctx, sessionID, agentID)
+		go emergencyRotateAgent(ctx, sessionID, agentID, capturedTmux)
 
 	case pct >= ctxPctRotate:
 		// Graceful rotation: ask agent to produce handoff then we'll restart
@@ -377,8 +394,18 @@ func handleHeartbeat(ctx context.Context, sessionID, agentID string, ev IPCEvent
 	}
 }
 
-func emergencyRotateAgent(ctx context.Context, sessionID, agentID string) {
+func emergencyRotateAgent(ctx context.Context, sessionID, agentID, capturedTmux string) {
 	time.Sleep(emergencyKillDelay)
+
+	// Verify the agent is still the same tmux session that triggered the emergency.
+	// If the session changed, the agent already rotated — do not kill a new one.
+	var currentTmux string
+	database.QueryRowContext(ctx, "SELECT COALESCE(tmux_session,'') FROM swarm_agents WHERE id=?", agentID).Scan(&currentTmux) //nolint:errcheck
+	if capturedTmux != "" && currentTmux != capturedTmux {
+		log.Printf("ipc: emergency kill aborted — agent %s already rotated", agentID[:8])
+		return
+	}
+
 	log.Printf("ipc: emergency kill agent %s", agentID[:8])
 
 	// Get agent info before kill
@@ -386,7 +413,7 @@ func emergencyRotateAgent(ctx context.Context, sessionID, agentID string) {
 	database.QueryRowContext(ctx,
 		"SELECT COALESCE(tmux_session,''), COALESCE(current_task_id,'') FROM swarm_agents WHERE id=?",
 		agentID,
-	).Scan(&tmuxSession, &taskID)
+	).Scan(&tmuxSession, &taskID) //nolint:errcheck
 
 	// Kill tmux session
 	if tmuxSession != "" {

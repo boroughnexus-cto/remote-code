@@ -214,7 +214,21 @@ func writeEscalation(sessionID, agentID, taskID, reason string) {
 
 // ─── SiBot immediate briefing ─────────────────────────────────────────────────
 
+// sibotDebouncer coalesces rapid briefSiBotImmediate calls (e.g. task_complete
+// + watchdog + IPC all firing within seconds) into a single inject per session.
+var sibotDebouncer = &broadcastDebouncer{
+	pending: make(map[string]*time.Timer),
+}
+
+// briefSiBotImmediate schedules a SiBot briefing with debouncing so that a
+// burst of simultaneous events (handoff + watchdog + block) produces one inject.
 func briefSiBotImmediate(sessionID string) {
+	sibotDebouncer.scheduleWithDelay(sessionID, 5*time.Second, func() {
+		doBriefSiBotImmediate(sessionID)
+	})
+}
+
+func doBriefSiBotImmediate(sessionID string) {
 	ctx := context.Background()
 	var agentID, tmuxSession string
 	err := database.QueryRowContext(ctx,

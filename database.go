@@ -51,6 +51,11 @@ func initDatabaseWithPathAndReturn(dbPath string) (*sql.DB, *db.Queries, string)
 		log.Fatalf("Failed to ping database: %v", err)
 	}
 
+	// Enable foreign key enforcement (SQLite disables it by default)
+	if _, err := database.Exec("PRAGMA foreign_keys = ON"); err != nil {
+		log.Printf("database: PRAGMA foreign_keys: %v", err)
+	}
+
 	// Apply migrations
 	if err := applyMigrations(database); err != nil {
 		log.Fatalf("Failed to apply migrations: %v", err)

@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os/exec"
+	"strings"
 	"time"
 )
 
@@ -79,13 +81,60 @@ func watchdogTick() {
 	heartbeatCutoff := now - int64(watchdogHeartbeatTimeout.Seconds())
 	absoluteCutoff := now - int64(watchdogAbsoluteTimeout.Seconds())
 
+	// Build alive-session set once to avoid N subprocess calls per task
+	aliveSessions := listAliveTmuxSessions()
+
 	for _, t := range tasks {
-		reason := watchdogCheckTask(t, now, heartbeatCutoff, absoluteCutoff)
+		reason := watchdogCheckTaskWithAlive(t, now, heartbeatCutoff, absoluteCutoff, aliveSessions)
 		if reason == "" {
 			continue
 		}
 		timeoutTask(ctx, t, reason)
 	}
+}
+
+// listAliveTmuxSessions runs tmux once and returns a set of live session names.
+// Returns nil if tmux is unavailable or has no sessions (caller treats all as dead).
+func listAliveTmuxSessions() map[string]bool {
+	out, err := exec.Command("tmux", "list-sessions", "-F", "#{session_name}").Output()
+	if err != nil {
+		return nil // no sessions or tmux not running
+	}
+	result := make(map[string]bool)
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if line != "" {
+			result[line] = true
+		}
+	}
+	return result
+}
+
+// watchdogCheckTaskWithAlive is like watchdogCheckTask but uses a pre-built
+// alive-session set instead of calling isTmuxSessionAlive per task.
+func watchdogCheckTaskWithAlive(t watchdogTask, now, heartbeatCutoff, absoluteCutoff int64, alive map[string]bool) string {
+	isAlive := func(session string) bool {
+		if alive == nil {
+			return isTmuxSessionAlive(session) // fallback if listing failed
+		}
+		return alive[session]
+	}
+
+	if t.startedAt > 0 && t.startedAt < absoluteCutoff {
+		return fmt.Sprintf("absolute timeout after %s", watchdogAbsoluteTimeout)
+	}
+	if t.heartbeatAt > 0 && t.heartbeatAt < heartbeatCutoff {
+		if t.tmuxSession == "" || !isAlive(t.tmuxSession) {
+			return fmt.Sprintf("heartbeat stale for %.0fm and agent offline",
+				float64(now-t.heartbeatAt)/60)
+		}
+	}
+	if t.heartbeatAt == 0 && t.startedAt > 0 && t.startedAt < heartbeatCutoff {
+		if t.tmuxSession == "" || !isAlive(t.tmuxSession) {
+			return fmt.Sprintf("no heartbeat received and agent offline after %.0fm",
+				float64(now-t.startedAt)/60)
+		}
+	}
+	return ""
 }
 
 // watchdogCheckTask returns a timeout reason string if the task should be timed

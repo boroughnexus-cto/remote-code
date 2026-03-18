@@ -243,15 +243,31 @@ func (c *swarmClient) fetchAll() tea.Cmd {
 		if err := json.Unmarshal(b, &dash); err != nil {
 			return tuiErrMsg{op: "fetch", text: "parse error: " + err.Error()}
 		}
+		// Use bulk endpoint to fetch all session states in one call instead of 1+N round-trips
 		states := make(map[string]tuiState, len(dash.Sessions))
-		for _, s := range dash.Sessions {
-			b2, st2, err2 := c.do("GET", "/api/swarm/sessions/"+s.ID, nil)
-			if err2 != nil || st2 != 200 {
-				continue
+		if len(dash.Sessions) > 0 {
+			ids := make([]string, 0, len(dash.Sessions))
+			for _, s := range dash.Sessions {
+				ids = append(ids, s.ID)
 			}
-			var st tuiState
-			if json.Unmarshal(b2, &st) == nil {
-				states[s.ID] = st
+			b2, st2, err2 := c.do("GET", "/api/swarm/sessions/bulk?ids="+strings.Join(ids, ","), nil)
+			if err2 == nil && st2 == 200 {
+				var bulk map[string]tuiState
+				if json.Unmarshal(b2, &bulk) == nil {
+					states = bulk
+				}
+			} else {
+				// Fallback: per-session requests if bulk unavailable
+				for _, s := range dash.Sessions {
+					b3, st3, err3 := c.do("GET", "/api/swarm/sessions/"+s.ID, nil)
+					if err3 != nil || st3 != 200 {
+						continue
+					}
+					var st tuiState
+					if json.Unmarshal(b3, &st) == nil {
+						states[s.ID] = st
+					}
+				}
 			}
 		}
 		return tuiDataMsg{sessions: dash.Sessions, states: states}
@@ -655,6 +671,14 @@ func newTUIModel() tuiModel {
 // ─── Sidebar helpers ──────────────────────────────────────────────────────────
 
 func (m *tuiModel) rebuildItems() {
+	// Save selection identity before rebuild so cursor follows the item, not the index
+	var selKind tuiItemKind
+	var selSID, selEID string
+	if m.cursor < len(m.items) {
+		it := m.items[m.cursor]
+		selKind, selSID, selEID = it.kind, it.sid, it.eid
+	}
+
 	m.items = nil
 	for _, sess := range m.sessions {
 		m.items = append(m.items, tuiSidebarItem{kind: tuiItemSession, sid: sess.ID})
@@ -667,6 +691,14 @@ func (m *tuiModel) rebuildItems() {
 		}
 		for _, t := range st.Tasks {
 			m.items = append(m.items, tuiSidebarItem{kind: tuiItemTask, sid: sess.ID, eid: t.ID})
+		}
+	}
+
+	// Restore cursor by identity; fall back to clamping if not found
+	for i, it := range m.items {
+		if it.kind == selKind && it.sid == selSID && it.eid == selEID {
+			m.cursor = i
+			return
 		}
 	}
 	if m.cursor >= len(m.items) {

@@ -106,13 +106,21 @@ type SwarmState struct {
 // WebSocket Hub
 // -----------------
 
+// wsClient wraps a WebSocket connection with a per-connection write mutex.
+// Gorilla WS requires one concurrent writer per connection; the mutex prevents
+// races between the debouncer timer and other broadcast paths.
+type wsClient struct {
+	conn *websocket.Conn
+	mu   sync.Mutex
+}
+
 type SwarmHub struct {
 	mu      sync.RWMutex
-	clients map[string]map[*websocket.Conn]bool
+	clients map[string]map[*wsClient]bool
 }
 
 var swarmHub = &SwarmHub{
-	clients: make(map[string]map[*websocket.Conn]bool),
+	clients: make(map[string]map[*wsClient]bool),
 }
 
 // broadcastDebouncer coalesces rapid mutations into a single broadcast per session,
@@ -142,20 +150,38 @@ func (b *broadcastDebouncer) schedule(sessionID string) {
 	})
 }
 
-func (h *SwarmHub) subscribe(sessionID string, conn *websocket.Conn) {
+// scheduleWithDelay schedules fn to run after delay, coalescing rapid calls.
+func (b *broadcastDebouncer) scheduleWithDelay(key string, delay time.Duration, fn func()) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if t, ok := b.pending[key]; ok {
+		t.Reset(delay)
+		return
+	}
+	b.pending[key] = time.AfterFunc(delay, func() {
+		b.mu.Lock()
+		delete(b.pending, key)
+		b.mu.Unlock()
+		fn()
+	})
+}
+
+func (h *SwarmHub) subscribe(sessionID string, conn *websocket.Conn) *wsClient {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.clients[sessionID] == nil {
-		h.clients[sessionID] = make(map[*websocket.Conn]bool)
+		h.clients[sessionID] = make(map[*wsClient]bool)
 	}
-	h.clients[sessionID][conn] = true
+	client := &wsClient{conn: conn}
+	h.clients[sessionID][client] = true
+	return client
 }
 
-func (h *SwarmHub) unsubscribe(sessionID string, conn *websocket.Conn) {
+func (h *SwarmHub) unsubscribe(sessionID string, client *wsClient) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.clients[sessionID] != nil {
-		delete(h.clients[sessionID], conn)
+		delete(h.clients[sessionID], client)
 	}
 }
 
@@ -166,16 +192,24 @@ func (h *SwarmHub) broadcast(sessionID string, msg interface{}) {
 		return
 	}
 	h.mu.RLock()
-	conns := make([]*websocket.Conn, 0, len(h.clients[sessionID]))
-	for conn := range h.clients[sessionID] {
-		conns = append(conns, conn)
+	clients := make([]*wsClient, 0, len(h.clients[sessionID]))
+	for c := range h.clients[sessionID] {
+		clients = append(clients, c)
 	}
 	h.mu.RUnlock()
-	for _, conn := range conns {
-		if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
+	// Collect failures after write loop, then unsubscribe to avoid modifying map during iteration
+	var failed []*wsClient
+	for _, c := range clients {
+		c.mu.Lock()
+		err := c.conn.WriteMessage(websocket.TextMessage, data)
+		c.mu.Unlock()
+		if err != nil {
 			log.Printf("swarm hub: write error: %v", err)
-			h.unsubscribe(sessionID, conn)
+			failed = append(failed, c)
 		}
+	}
+	for _, c := range failed {
+		h.unsubscribe(sessionID, c)
 	}
 }
 
@@ -191,10 +225,12 @@ func generateSwarmID() string {
 
 // writeSwarmEvent logs an event to the swarm_events table.
 func writeSwarmEvent(ctx context.Context, sessionID, agentID, taskID, eventType, payload string) {
-	database.ExecContext(ctx,
+	if _, err := database.ExecContext(ctx,
 		"INSERT INTO swarm_events (session_id, agent_id, task_id, type, payload, ts) VALUES (?, ?, ?, ?, ?, ?)",
 		sessionID, swarmNullStr(agentID), swarmNullStr(taskID), eventType, swarmNullStr(payload), time.Now().Unix(),
-	)
+	); err != nil {
+		log.Printf("swarm: writeSwarmEvent error: %v", err)
+	}
 }
 
 func swarmNullStr(s string) interface{} {
@@ -379,10 +415,8 @@ func handleSwarmWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 
-	swarmHub.subscribe(sessionID, conn)
-	defer swarmHub.unsubscribe(sessionID, conn)
-
-	// Send full state snapshot on connect
+	// Send full state snapshot before subscribing to avoid a data race on the
+	// initial write (the connection is not yet in the hub, so no concurrent broadcasts).
 	ctx := context.Background()
 	state, err := getSwarmState(ctx, sessionID)
 	if err != nil {
@@ -391,8 +425,11 @@ func handleSwarmWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	msg := map[string]interface{}{"type": "swarm_state", "state": state}
 	if data, err := json.Marshal(msg); err == nil {
-		conn.WriteMessage(websocket.TextMessage, data)
+		conn.WriteMessage(websocket.TextMessage, data) //nolint:errcheck
 	}
+
+	client := swarmHub.subscribe(sessionID, conn)
+	defer swarmHub.unsubscribe(sessionID, client)
 
 	// Drain incoming messages (reserved for future client→server events)
 	for {
@@ -407,6 +444,7 @@ func handleSwarmWebSocket(w http.ResponseWriter, r *http.Request) {
 // -----------------
 
 func handleSwarmAPI(w http.ResponseWriter, r *http.Request, ctx context.Context, pathParts []string) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1MB limit on all swarm endpoints
 	if len(pathParts) > 0 && pathParts[0] == "dashboard" {
 		handleSwarmDashboardAPI(w, r, ctx)
 		return
@@ -429,6 +467,10 @@ func handleSwarmAPI(w http.ResponseWriter, r *http.Request, ctx context.Context,
 	}
 	if len(pathParts) > 0 && pathParts[0] == "voice" {
 		handleSwarmVoiceAPI(w, r, ctx, pathParts[1:])
+		return
+	}
+	if len(pathParts) > 0 && pathParts[0] == "sessions" && len(pathParts) > 1 && pathParts[1] == "bulk" {
+		handleSwarmBulkAPI(w, r, ctx)
 		return
 	}
 	if len(pathParts) == 0 || pathParts[0] != "sessions" {
@@ -535,19 +577,37 @@ func handleSwarmSessionsAPI(w http.ResponseWriter, r *http.Request, ctx context.
 			}
 			id := generateSwarmID()
 			now := time.Now().Unix()
-			if _, err := database.ExecContext(ctx,
-				"INSERT INTO swarm_sessions (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)",
-				id, req.Name, now, now); err != nil {
+			// Wrap session + SiBot creation in a transaction so we never have a
+			// session without its orchestrator agent.
+			tx, err := database.BeginTx(ctx, nil)
+			if err != nil {
 				w.WriteHeader(http.StatusInternalServerError)
 				json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 				return
 			}
-			// Auto-create SiBot orchestrator for every session
+			if _, err := tx.ExecContext(ctx,
+				"INSERT INTO swarm_sessions (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)",
+				id, req.Name, now, now); err != nil {
+				tx.Rollback() //nolint:errcheck
+				w.WriteHeader(http.StatusInternalServerError)
+				json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+				return
+			}
 			sibotID := generateSwarmID()
 			sibotMission := "Orchestrate and coordinate the swarm to achieve the user's goals"
-			database.ExecContext(ctx,
+			if _, err := tx.ExecContext(ctx,
 				"INSERT INTO swarm_agents (id, session_id, name, role, mission, status, created_at) VALUES (?, ?, 'SiBot', 'orchestrator', ?, 'idle', ?)",
-				sibotID, id, sibotMission, now)
+				sibotID, id, sibotMission, now); err != nil {
+				tx.Rollback() //nolint:errcheck
+				w.WriteHeader(http.StatusInternalServerError)
+				json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+				return
+			}
+			if err := tx.Commit(); err != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+				json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+				return
+			}
 			w.WriteHeader(http.StatusCreated)
 			json.NewEncoder(w).Encode(SwarmSession{ID: id, Name: req.Name, CreatedAt: now, UpdatedAt: now})
 
@@ -593,7 +653,27 @@ func handleSwarmSessionsAPI(w http.ResponseWriter, r *http.Request, ctx context.
 			w.WriteHeader(http.StatusNoContent)
 
 		case http.MethodDelete:
-			database.ExecContext(ctx, "DELETE FROM swarm_sessions WHERE id = ?", sessionID)
+			// Despawn running agents first so tmux sessions are cleaned up
+			agentRows, _ := database.QueryContext(ctx,
+				"SELECT id FROM swarm_agents WHERE session_id = ? AND tmux_session IS NOT NULL", sessionID)
+			if agentRows != nil {
+				var agentIDs []string
+				for agentRows.Next() {
+					var aid string
+					agentRows.Scan(&aid) //nolint:errcheck
+					agentIDs = append(agentIDs, aid)
+				}
+				agentRows.Close()
+				for _, aid := range agentIDs {
+					despawnSwarmAgent(ctx, sessionID, aid) //nolint:errcheck
+				}
+			}
+			// Delete tables without FK to swarm_sessions (application-level cascade)
+			database.ExecContext(ctx, "DELETE FROM swarm_agent_notes WHERE session_id = ?", sessionID) //nolint:errcheck
+			database.ExecContext(ctx, "DELETE FROM swarm_events WHERE session_id = ?", sessionID)      //nolint:errcheck
+			database.ExecContext(ctx, "DELETE FROM swarm_goals WHERE session_id = ?", sessionID)       //nolint:errcheck
+			// Delete session — FK ON DELETE CASCADE handles swarm_agents and swarm_tasks
+			database.ExecContext(ctx, "DELETE FROM swarm_sessions WHERE id = ?", sessionID) //nolint:errcheck
 			w.WriteHeader(http.StatusNoContent)
 
 		default:
@@ -743,7 +823,9 @@ func handleSwarmDashboardAPI(w http.ResponseWriter, r *http.Request, ctx context
 		FROM swarm_sessions s
 		LEFT JOIN swarm_agents a ON a.session_id = s.id
 		LEFT JOIN swarm_tasks  t ON t.session_id = s.id
-		LEFT JOIN swarm_events e ON e.session_id = s.id
+		LEFT JOIN (
+			SELECT session_id, MAX(ts) AS ts FROM swarm_events GROUP BY session_id
+		) e ON e.session_id = s.id
 		GROUP BY s.id
 		ORDER BY s.updated_at DESC
 	`)
@@ -787,6 +869,28 @@ func handleSwarmDashboardAPI(w http.ResponseWriter, r *http.Request, ctx context
 		sessions = []SessionStats{}
 	}
 	json.NewEncoder(w).Encode(map[string]interface{}{"sessions": sessions})
+}
+
+// handleSwarmBulkAPI returns full state for multiple sessions in one call.
+// GET /api/swarm/sessions/bulk?ids=id1,id2,...
+// Reduces TUI fetchAll from 1+N HTTP round-trips to 2 (dashboard + bulk).
+func handleSwarmBulkAPI(w http.ResponseWriter, r *http.Request, ctx context.Context) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	ids := strings.Split(r.URL.Query().Get("ids"), ",")
+	result := make(map[string]*SwarmState, len(ids))
+	for _, id := range ids {
+		if id = strings.TrimSpace(id); id == "" {
+			continue
+		}
+		if state, err := getSwarmState(ctx, id); err == nil {
+			result[id] = state
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(result) //nolint:errcheck
 }
 
 // swarmAPIBase returns the base URL agents use to reach this server.
@@ -988,8 +1092,11 @@ func handleSwarmAgentsAPI(w http.ResponseWriter, r *http.Request, ctx context.Co
 	switch r.Method {
 	case http.MethodPatch:
 		var req map[string]interface{}
-		json.NewDecoder(r.Body).Decode(&req)
-		now := time.Now().Unix()
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "invalid JSON"})
+			return
+		}
 		if status, ok := req["status"].(string); ok {
 			database.ExecContext(ctx,
 				"UPDATE swarm_agents SET status = ? WHERE id = ? AND session_id = ?",
@@ -1031,7 +1138,6 @@ func handleSwarmAgentsAPI(w http.ResponseWriter, r *http.Request, ctx context.Co
 				database.ExecContext(ctx, "UPDATE swarm_agents SET repo_path = ? WHERE id = ? AND session_id = ?", swarmNullStr(s), agentID, sessionID)
 			}
 		}
-		_ = now
 		swarmBroadcaster.schedule(sessionID)
 		w.WriteHeader(http.StatusNoContent)
 
