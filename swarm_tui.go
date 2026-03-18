@@ -143,6 +143,7 @@ type tuiErrMsg       struct{ op, text string }
 type tuiDoneMsg      struct{ op string }
 type tuiAttachMsg    struct{ err error }
 type tuiWorkQueueMsg struct{ items []WorkQueueItem }
+type tuiIcingaMsg   struct{ services []IcingaService }
 
 func tuiAnimTick() tea.Cmd {
 	return tea.Tick(150*time.Millisecond, func(time.Time) tea.Msg { return tuiAnimTickMsg{} })
@@ -274,6 +275,12 @@ func (c *swarmClient) get(op, path string) tea.Cmd {
 			var items []WorkQueueItem
 			if json.Unmarshal(b, &items) == nil {
 				return tuiWorkQueueMsg{items: items}
+			}
+		}
+		if op == "icinga" {
+			var svcs []IcingaService
+			if json.Unmarshal(b, &svcs) == nil {
+				return tuiIcingaMsg{services: svcs}
 			}
 		}
 		return tuiDoneMsg{op: op}
@@ -505,6 +512,13 @@ type tuiModel struct {
 
 	// Despawn confirmation (two-press: first d sets, second d executes, esc clears)
 	pendingDespawn *tuiSidebarItem
+
+	// Icinga monitor view (I key)
+	icingaView     bool
+	icingaServices []IcingaService // sorted by state
+	icingaTopCur   int             // cursor in top pane (services)
+	icingaBotCur   int             // cursor in bottom pane (recent alerts)
+	icingaFocus    int             // 0=top, 1=bottom
 
 	// Event log view (L key)
 	evtLogView      bool
@@ -801,6 +815,12 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.setFlash(label, false)
 		cmds = append(cmds, m.client.fetchAll())
 
+	case tuiIcingaMsg:
+		m.icingaServices = msg.services
+		m.icingaTopCur = 0
+		// Scroll bottom pane to show most recent alert at top.
+		m.icingaBotCur = 0
+
 	case tuiWorkQueueMsg:
 		m.workQueueItems = msg.items
 		m.updateVP()
@@ -814,6 +834,8 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if msg.String() == "q" || msg.String() == "esc" {
 				m.evtDetailView = nil
 			}
+		} else if m.icingaView {
+			m, cmds = m.updateIcingaView(msg)
 		} else if m.evtLogView {
 			m, cmds = m.updateEventLog(msg)
 		} else if m.workQueueView {
@@ -1046,6 +1068,14 @@ func (m tuiModel) updateSidebar(msg tea.KeyMsg) (tuiModel, []tea.Cmd) {
 			path := "/api/swarm/sessions/" + sid + "/plane/issues?state_group=backlog,unstarted"
 			cmds = append(cmds, m.client.get("workqueue", path))
 		}
+
+	case "I":
+		m.icingaView = true
+		m.icingaServices = nil // show loading state
+		m.icingaTopCur = 0
+		m.icingaBotCur = 0
+		m.icingaFocus = 0
+		cmds = append(cmds, m.client.get("icinga", "/api/icinga/services"))
 
 	case "L":
 		sid := m.selSessionID()
@@ -1287,6 +1317,9 @@ func (m tuiModel) View() string {
 	}
 	if m.evtDetailView != nil {
 		return m.viewEventDetailScreen()
+	}
+	if m.icingaView {
+		return m.viewIcingaScreen()
 	}
 	if m.evtLogView {
 		return m.viewEventLogScreen()
@@ -1872,7 +1905,7 @@ func (m tuiModel) viewStatusBar() string {
 }
 
 func (m tuiModel) viewHelp() string {
-	keys := "  ↑↓/jk nav  ·  Enter attach  ·  Tab// input  ·  s spawn  ·  d stop  ·  + quick-agent  ·  n agent  ·  t task  ·  c session  ·  L event-log  ·  e escalations  ·  g goals  ·  A autopilot  ·  W queue  ·  R refresh  ·  q quit"
+	keys := "  ↑↓/jk nav  ·  Enter attach  ·  Tab// input  ·  s spawn  ·  d stop  ·  + quick-agent  ·  n agent  ·  t task  ·  c session  ·  I icinga  ·  L event-log  ·  e escalations  ·  g goals  ·  A autopilot  ·  W queue  ·  R refresh  ·  q quit"
 	return dimStyle.Width(m.w).Render(keys)
 }
 
@@ -2034,6 +2067,257 @@ func (m tuiModel) viewEventDetailScreen() string {
 	}
 
 	sb.WriteString("\n" + dimStyle.Render("  Esc / q to return to event log"))
+	return sb.String()
+}
+
+// ─── Icinga monitor view ──────────────────────────────────────────────────────
+
+func (m tuiModel) updateIcingaView(msg tea.KeyMsg) (tuiModel, []tea.Cmd) {
+	// Non-OK services (top pane data) and recent alerts (bottom pane — same set sorted by time)
+	nonOK := icingaNonOK(m.icingaServices)
+	n := len(m.icingaServices)
+	nb := len(nonOK)
+
+	switch msg.String() {
+	case "q", "esc":
+		m.icingaView = false
+	case "tab":
+		m.icingaFocus = 1 - m.icingaFocus
+	case "r", "R":
+		return m, []tea.Cmd{m.client.get("icinga", "/api/icinga/services")}
+	case "j", "down":
+		if m.icingaFocus == 0 {
+			if m.icingaTopCur < n-1 {
+				m.icingaTopCur++
+			}
+		} else {
+			if m.icingaBotCur < nb-1 {
+				m.icingaBotCur++
+			}
+		}
+	case "k", "up":
+		if m.icingaFocus == 0 {
+			if m.icingaTopCur > 0 {
+				m.icingaTopCur--
+			}
+		} else {
+			if m.icingaBotCur > 0 {
+				m.icingaBotCur--
+			}
+		}
+	case "g":
+		if m.icingaFocus == 0 {
+			m.icingaTopCur = 0
+		} else {
+			m.icingaBotCur = 0
+		}
+	case "G":
+		if m.icingaFocus == 0 {
+			m.icingaTopCur = max(0, n-1)
+		} else {
+			m.icingaBotCur = max(0, nb-1)
+		}
+	}
+	return m, nil
+}
+
+// icingaNonOK returns non-OK services sorted by last_change descending (most recent alert first).
+func icingaNonOK(svcs []IcingaService) []IcingaService {
+	var out []IcingaService
+	for _, s := range svcs {
+		if s.State != 0 {
+			out = append(out, s)
+		}
+	}
+	// Sort by last_change desc (most recently fired first).
+	for i := 0; i < len(out)-1; i++ {
+		for j := i + 1; j < len(out); j++ {
+			if out[j].LastChange > out[i].LastChange {
+				out[i], out[j] = out[j], out[i]
+			}
+		}
+	}
+	return out
+}
+
+func icingaStateLabel(state, stateType int, acked, downtime bool) string {
+	label := map[int]string{0: "OK", 1: "WARN", 2: "CRIT", 3: "UNKN"}[state]
+	if stateType == 0 {
+		label += "(SOFT)"
+	}
+	color := map[int]lipgloss.Color{
+		0: colorGreen, 1: colorOrange, 2: colorRed, 3: colorDim,
+	}[state]
+	s := lipgloss.NewStyle().Foreground(color).Bold(state == 2).Render(label)
+	if acked {
+		s += dimStyle.Render("✓")
+	}
+	if downtime {
+		s += dimStyle.Render("⏸")
+	}
+	return s
+}
+
+func (m tuiModel) viewIcingaScreen() string {
+	svcs := m.icingaServices
+	alerts := icingaNonOK(svcs)
+
+	// Counts for header.
+	var nCrit, nWarn, nUnkn, nOK int
+	for _, s := range svcs {
+		switch s.State {
+		case 2:
+			nCrit++
+		case 1:
+			nWarn++
+		case 3:
+			nUnkn++
+		default:
+			nOK++
+		}
+	}
+
+	var sb strings.Builder
+	sb.WriteString(m.viewHUD() + "\n")
+
+	// ── Header ──
+	hdr := lipgloss.NewStyle().Foreground(colorTeal).Bold(true).Render("Icinga Services")
+	if svcs == nil {
+		hdr += dimStyle.Render("  Loading…")
+	} else {
+		hdr += "  " +
+			lipgloss.NewStyle().Foreground(colorRed).Render(fmt.Sprintf("%d CRIT", nCrit)) + "  " +
+			lipgloss.NewStyle().Foreground(colorOrange).Render(fmt.Sprintf("%d WARN", nWarn)) + "  " +
+			lipgloss.NewStyle().Foreground(colorDim).Render(fmt.Sprintf("%d UNKN", nUnkn)) + "  " +
+			lipgloss.NewStyle().Foreground(colorGreen).Render(fmt.Sprintf("%d OK", nOK)) +
+			dimStyle.Render(fmt.Sprintf("  (%d total)", len(svcs)))
+	}
+	sb.WriteString(hdr + "\n\n")
+
+	// Split the available height: subtract HUD (2) + header (2) + divider (1) + help (1).
+	bodyH := m.h - 6
+	if bodyH < 8 {
+		bodyH = 8
+	}
+	topH := bodyH * 60 / 100
+	botH := bodyH - topH
+
+	topFocused := m.icingaFocus == 0
+	botFocused := m.icingaFocus == 1
+
+	focusBorder := func(focused bool) lipgloss.Color {
+		if focused {
+			return colorTeal
+		}
+		return colorDim
+	}
+
+	// ── Top pane: all services, sorted CRIT→WARN→UNKN→OK ──
+	topTitle := lipgloss.NewStyle().Foreground(focusBorder(topFocused)).Render("All Services")
+	sb.WriteString(topTitle + "\n")
+
+	if svcs == nil {
+		sb.WriteString(dimStyle.Render("  Fetching…") + "\n")
+	} else if len(svcs) == 0 {
+		sb.WriteString(dimStyle.Render("  No services found") + "\n")
+	} else {
+		visible := topH - 1
+		if visible < 1 {
+			visible = 1
+		}
+		start := m.icingaTopCur - visible/2
+		if start < 0 {
+			start = 0
+		}
+		end := start + visible
+		if end > len(svcs) {
+			end = len(svcs)
+		}
+		if end-start < visible && start > 0 {
+			start = end - visible
+			if start < 0 {
+				start = 0
+			}
+		}
+		nameW := max(20, m.w/5)
+		hostW := max(14, m.w/8)
+		outW := m.w - nameW - hostW - 18
+		if outW < 10 {
+			outW = 10
+		}
+
+		for i := start; i < end; i++ {
+			s := svcs[i]
+			hostStr := truncStr(s.Host, hostW)
+			svcStr := truncStr(s.Service, nameW)
+			outStr := truncStr(s.Output, outW)
+			rawLine := fmt.Sprintf("%-*s  %-*s  %s", hostW, hostStr, nameW, svcStr, outStr)
+			if i == m.icingaTopCur && topFocused {
+				rawLine = lipgloss.NewStyle().Background(lipgloss.Color("#1a3050")).Render(rawLine)
+			}
+			sb.WriteString("  " + icingaStateLabel(s.State, s.StateType, s.Acked, s.Downtime) + "  " + rawLine + "\n")
+		}
+		if len(svcs) > visible {
+			sb.WriteString(dimStyle.Render(fmt.Sprintf("  %d/%d", m.icingaTopCur+1, len(svcs))) + "\n")
+		}
+	}
+
+	// ── Divider ──
+	divColor := colorDim
+	sb.WriteString(lipgloss.NewStyle().Foreground(divColor).Render(strings.Repeat("─", m.w)) + "\n")
+
+	// ── Bottom pane: recent non-OK alerts ──
+	botTitle := lipgloss.NewStyle().Foreground(focusBorder(botFocused)).Render(
+		fmt.Sprintf("Recent Alerts (%d non-OK)", len(alerts)),
+	)
+	sb.WriteString(botTitle + "\n")
+
+	if len(alerts) == 0 && svcs != nil {
+		sb.WriteString(lipgloss.NewStyle().Foreground(colorGreen).Render("  ✓ All services OK") + "\n")
+	} else {
+		visible := botH - 2
+		if visible < 1 {
+			visible = 1
+		}
+		start := m.icingaBotCur - visible/2
+		if start < 0 {
+			start = 0
+		}
+		end := start + visible
+		if end > len(alerts) {
+			end = len(alerts)
+		}
+		if end-start < visible && start > 0 {
+			start = end - visible
+			if start < 0 {
+				start = 0
+			}
+		}
+		nameW := max(20, m.w/5)
+		hostW := max(14, m.w/8)
+		outW := m.w - nameW - hostW - 28
+		if outW < 10 {
+			outW = 10
+		}
+
+		for i := start; i < end; i++ {
+			s := alerts[i]
+			ts := time.Unix(s.LastChange, 0).Format("01-02 15:04")
+			hostStr := truncStr(s.Host, hostW)
+			svcStr := truncStr(s.Service, nameW)
+			outStr := truncStr(s.Output, outW)
+			rawLine := fmt.Sprintf("%s  %-*s  %-*s  %s", ts, hostW, hostStr, nameW, svcStr, outStr)
+			if i == m.icingaBotCur && botFocused {
+				rawLine = lipgloss.NewStyle().Background(lipgloss.Color("#1a3050")).Render(rawLine)
+			}
+			sb.WriteString("  " + icingaStateLabel(s.State, s.StateType, s.Acked, s.Downtime) + "  " + rawLine + "\n")
+		}
+		if len(alerts) > visible {
+			sb.WriteString(dimStyle.Render(fmt.Sprintf("  %d/%d", m.icingaBotCur+1, len(alerts))) + "\n")
+		}
+	}
+
+	sb.WriteString("\n" + dimStyle.Render("  Tab switch-pane  ·  j/k navigate  ·  g/G first/last  ·  r refresh  ·  q close"))
 	return sb.String()
 }
 
