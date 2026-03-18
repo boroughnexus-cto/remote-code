@@ -506,6 +506,13 @@ type tuiModel struct {
 	// Despawn confirmation (two-press: first d sets, second d executes, esc clears)
 	pendingDespawn *tuiSidebarItem
 
+	// Event log view (L key)
+	evtLogView      bool
+	evtCursor       int
+	evtAgentFilter  string
+	evtDetailView   *tuiEvent
+	vpRawEvents     map[string][]tuiEvent
+
 	// Clients
 	client *swarmClient
 	ws     *tuiWSManager
@@ -524,6 +531,7 @@ func newTUIModel() tuiModel {
 	return tuiModel{
 		states:      make(map[string]tuiState),
 		vpLines:     make(map[string][]string),
+		vpRawEvents: make(map[string][]tuiEvent),
 		termContent: make(map[string]string),
 		chatInput:   ta,
 		escInput:    ei,
@@ -605,25 +613,39 @@ func (m tuiModel) lookupSession(sid string) *tuiSession {
 // ─── Event feed ───────────────────────────────────────────────────────────────
 
 func (m *tuiModel) appendEvents(sid string, state tuiState) {
-	// Rebuild the full event list from state (state.Events is ordered, deduped by server)
-	lines := make([]string, 0, len(state.Events))
+	// Build agent name lookup
+	agentNames := make(map[string]string, len(state.Agents))
+	for _, a := range state.Agents {
+		agentNames[a.ID] = a.Name
+	}
+
+	// Apply agent filter
+	var evts []tuiEvent
 	for _, ev := range state.Events {
-		ts := time.Unix(ev.Ts, 0).Format("15:04:05")
-		agentName := ""
-		for _, a := range state.Agents {
-			if a.ID == ev.AgentID {
-				agentName = truncStr(a.Name, 10)
-				break
+		if m.evtAgentFilter != "" {
+			name := agentNames[ev.AgentID]
+			if !strings.Contains(strings.ToLower(name), strings.ToLower(m.evtAgentFilter)) {
+				continue
 			}
 		}
-		payload := truncStr(ev.Payload, 44)
-		typeStr := lipgloss.NewStyle().Foreground(tuiEventColor(ev.Type)).Render(truncStr(ev.Type, 22))
-		line := fmt.Sprintf("%s  %s  %-10s  %s", ts, typeStr, agentName, payload)
-		lines = append(lines, line)
+		evts = append(evts, ev)
 	}
-	// Cap at 200
-	if len(lines) > 200 {
-		lines = lines[len(lines)-200:]
+
+	// Cap at 500 raw events
+	if len(evts) > 500 {
+		evts = evts[len(evts)-500:]
+	}
+	m.vpRawEvents[sid] = evts
+
+	// Render lines
+	lines := make([]string, 0, len(evts))
+	for _, ev := range evts {
+		ts := time.Unix(ev.Ts, 0).Format("15:04:05")
+		agentName := truncStr(agentNames[ev.AgentID], 12)
+		payload := truncStr(ev.Payload, 80)
+		typeStr := lipgloss.NewStyle().Foreground(tuiEventColor(ev.Type)).Render(truncStr(ev.Type, 26))
+		line := fmt.Sprintf("%s  %s  %-12s  %s", ts, typeStr, agentName, payload)
+		lines = append(lines, line)
 	}
 	m.vpLines[sid] = lines
 }
@@ -788,7 +810,13 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, m.client.fetchAll())
 
 	case tea.KeyMsg:
-		if m.workQueueView {
+		if m.evtDetailView != nil {
+			if msg.String() == "q" || msg.String() == "esc" {
+				m.evtDetailView = nil
+			}
+		} else if m.evtLogView {
+			m, cmds = m.updateEventLog(msg)
+		} else if m.workQueueView {
 			if msg.String() == "q" || msg.String() == "esc" {
 				m.workQueueView = false
 				m.workQueueItems = nil
@@ -1019,10 +1047,88 @@ func (m tuiModel) updateSidebar(msg tea.KeyMsg) (tuiModel, []tea.Cmd) {
 			cmds = append(cmds, m.client.get("workqueue", path))
 		}
 
+	case "L":
+		sid := m.selSessionID()
+		if sid != "" {
+			evts := m.vpRawEvents[sid]
+			m.evtLogView = true
+			m.evtDetailView = nil
+			m.evtCursor = max(0, len(evts)-1)
+		}
+
 	case "R":
 		cmds = append(cmds, m.client.fetchAll())
 	}
 	return m, cmds
+}
+
+func (m tuiModel) updateEventLog(msg tea.KeyMsg) (tuiModel, []tea.Cmd) {
+	sid := m.selSessionID()
+	evts := m.vpRawEvents[sid]
+	n := len(evts)
+	state := m.states[sid]
+
+	agentNames := make(map[string]string)
+	for _, a := range state.Agents {
+		agentNames[a.ID] = a.Name
+	}
+
+	switch msg.String() {
+	case "q", "esc":
+		m.evtLogView = false
+		m.evtDetailView = nil
+	case "j", "down":
+		if m.evtCursor < n-1 {
+			m.evtCursor++
+		}
+	case "k", "up":
+		if m.evtCursor > 0 {
+			m.evtCursor--
+		}
+	case "g":
+		m.evtCursor = 0
+	case "G":
+		m.evtCursor = max(0, n-1)
+	case "f":
+		// Toggle filter by agent of event under cursor
+		if m.evtCursor >= 0 && m.evtCursor < n {
+			ev := evts[m.evtCursor]
+			name := agentNames[ev.AgentID]
+			if name != "" {
+				if m.evtAgentFilter == name {
+					m.evtAgentFilter = ""
+				} else {
+					m.evtAgentFilter = name
+				}
+				// Refilter
+				for _, sess := range m.sessions {
+					if st, ok := m.states[sess.ID]; ok {
+						m.appendEvents(sess.ID, st)
+					}
+				}
+				m.updateVP()
+				// Reposition cursor at bottom of filtered results
+				evts = m.vpRawEvents[sid]
+				m.evtCursor = max(0, len(evts)-1)
+			}
+		}
+	case "F":
+		m.evtAgentFilter = ""
+		for _, sess := range m.sessions {
+			if st, ok := m.states[sess.ID]; ok {
+				m.appendEvents(sess.ID, st)
+			}
+		}
+		m.updateVP()
+		evts = m.vpRawEvents[sid]
+		m.evtCursor = max(0, len(evts)-1)
+	case "enter":
+		if m.evtCursor >= 0 && m.evtCursor < n {
+			ev := evts[m.evtCursor]
+			m.evtDetailView = &ev
+		}
+	}
+	return m, nil
 }
 
 func (m tuiModel) updateEscalation(msg tea.KeyMsg) (tuiModel, []tea.Cmd) {
@@ -1178,6 +1284,12 @@ func (m tuiModel) View() string {
 	}
 	if m.modal != nil {
 		return m.viewModal()
+	}
+	if m.evtDetailView != nil {
+		return m.viewEventDetailScreen()
+	}
+	if m.evtLogView {
+		return m.viewEventLogScreen()
 	}
 	if m.workQueueView {
 		return m.viewWorkQueueScreen()
@@ -1760,7 +1872,7 @@ func (m tuiModel) viewStatusBar() string {
 }
 
 func (m tuiModel) viewHelp() string {
-	keys := "  ↑↓/jk nav  ·  Enter attach  ·  Tab// input  ·  s spawn  ·  d stop  ·  + quick-agent  ·  n agent  ·  t task  ·  c session  ·  e escalations  ·  g goals  ·  A autopilot  ·  W queue  ·  R refresh  ·  q quit"
+	keys := "  ↑↓/jk nav  ·  Enter attach  ·  Tab// input  ·  s spawn  ·  d stop  ·  + quick-agent  ·  n agent  ·  t task  ·  c session  ·  L event-log  ·  e escalations  ·  g goals  ·  A autopilot  ·  W queue  ·  R refresh  ·  q quit"
 	return dimStyle.Width(m.w).Render(keys)
 }
 
@@ -1790,6 +1902,138 @@ func (m tuiModel) viewWorkQueueScreen() string {
 	}
 
 	sb.WriteString("\n" + dimStyle.Render("  Press q or Esc to close"))
+	return sb.String()
+}
+
+func (m tuiModel) viewEventLogScreen() string {
+	sid := m.selSessionID()
+	evts := m.vpRawEvents[sid]
+	state := m.states[sid]
+
+	agentNames := make(map[string]string)
+	for _, a := range state.Agents {
+		agentNames[a.ID] = a.Name
+	}
+	taskTitles := make(map[string]string)
+	for _, t := range state.Tasks {
+		taskTitles[t.ID] = t.Title
+	}
+
+	var sb strings.Builder
+	sb.WriteString(m.viewHUD() + "\n")
+
+	title := lipgloss.NewStyle().Foreground(colorTeal).Bold(true).Render("Event Log")
+	filterBadge := ""
+	if m.evtAgentFilter != "" {
+		filterBadge = " " + lipgloss.NewStyle().Foreground(colorOrange).Render("[agent: "+m.evtAgentFilter+"]") +
+			dimStyle.Render(" (F clears)")
+	}
+	countStr := dimStyle.Render(fmt.Sprintf("  %d events", len(evts)))
+	sb.WriteString(title + filterBadge + countStr + "\n\n")
+
+	if len(evts) == 0 {
+		sb.WriteString(dimStyle.Render("  No events") + "\n")
+	} else {
+		// Show a window of events around the cursor
+		visible := m.h - 9
+		if visible < 5 {
+			visible = 5
+		}
+		start := m.evtCursor - visible/2
+		if start < 0 {
+			start = 0
+		}
+		end := start + visible
+		if end > len(evts) {
+			end = len(evts)
+		}
+		if end-start < visible && start > 0 {
+			start = end - visible
+			if start < 0 {
+				start = 0
+			}
+		}
+
+		for i := start; i < end; i++ {
+			ev := evts[i]
+			ts := time.Unix(ev.Ts, 0).Format("15:04:05")
+			agentName := truncStr(agentNames[ev.AgentID], 12)
+			typeColored := lipgloss.NewStyle().Foreground(tuiEventColor(ev.Type)).Render(fmt.Sprintf("%-26s", truncStr(ev.Type, 26)))
+			payload := truncStr(ev.Payload, 60)
+			line := fmt.Sprintf("%s  %s  %-12s  %s", ts, typeColored, agentName, payload)
+			if i == m.evtCursor {
+				line = lipgloss.NewStyle().Background(lipgloss.Color("#1a3050")).Foreground(lipgloss.Color("#e0e8f0")).Render(
+					fmt.Sprintf("%s  %-26s  %-12s  %s", ts, truncStr(ev.Type, 26), agentName, payload),
+				)
+			}
+			sb.WriteString("  " + line + "\n")
+		}
+		sb.WriteString(fmt.Sprintf("\n"+dimStyle.Render("  %d/%d"), m.evtCursor+1, len(evts)))
+	}
+
+	sb.WriteString("\n" + dimStyle.Render("  j/k navigate  ·  Enter detail  ·  f filter-agent  ·  F clear-filter  ·  g/G first/last  ·  q close"))
+	return sb.String()
+}
+
+func (m tuiModel) viewEventDetailScreen() string {
+	ev := m.evtDetailView
+	if ev == nil {
+		return ""
+	}
+	sid := m.selSessionID()
+	state := m.states[sid]
+	agentName := ""
+	for _, a := range state.Agents {
+		if a.ID == ev.AgentID {
+			agentName = a.Name
+			break
+		}
+	}
+	taskTitle := ""
+	for _, t := range state.Tasks {
+		if t.ID == ev.TaskID {
+			taskTitle = t.Title
+			break
+		}
+	}
+
+	var sb strings.Builder
+	sb.WriteString(m.viewHUD() + "\n")
+	sb.WriteString(lipgloss.NewStyle().Foreground(colorTeal).Bold(true).Render("Event Detail") + "\n\n")
+
+	meta := func(label, val string) string {
+		if val == "" {
+			return ""
+		}
+		return lipgloss.NewStyle().Foreground(colorText).Render(label+": ") +
+			lipgloss.NewStyle().Foreground(colorTeal).Render(val) + "\n"
+	}
+	sb.WriteString(meta("Type   ", ev.Type))
+	sb.WriteString(meta("Time   ", time.Unix(ev.Ts, 0).Format("2006-01-02 15:04:05")))
+	if agentName != "" {
+		sb.WriteString(meta("Agent  ", agentName))
+	}
+	if taskTitle != "" {
+		sb.WriteString(meta("Task   ", taskTitle))
+	}
+	sb.WriteString("\n")
+
+	if ev.Payload == "" {
+		sb.WriteString(dimStyle.Render("  (no payload)") + "\n")
+	} else {
+		sb.WriteString(lipgloss.NewStyle().Foreground(colorText).Render("Payload:") + "\n")
+		// Word-wrap payload to terminal width
+		wrapW := m.w - 4
+		if wrapW < 40 {
+			wrapW = 40
+		}
+		wrapped := wordWrap(ev.Payload, wrapW)
+		for _, line := range strings.Split(wrapped, "\n") {
+			sb.WriteString("  " + line + "\n")
+		}
+	}
+
+	sb.WriteString("\n" + dimStyle.Render("  Esc / q to return to event log"))
 	return sb.String()
 }
 
@@ -2085,6 +2329,43 @@ func truncStr(s string, n int) string {
 		return s
 	}
 	return string(runes[:n-1]) + "…"
+}
+
+// wordWrap wraps s to at most width runes per line, breaking on spaces.
+func wordWrap(s string, width int) string {
+	if width <= 0 {
+		return s
+	}
+	var out strings.Builder
+	for _, para := range strings.Split(s, "\n") {
+		words := strings.Fields(para)
+		if len(words) == 0 {
+			out.WriteByte('\n')
+			continue
+		}
+		col := 0
+		for i, w := range words {
+			wl := len([]rune(w))
+			if i == 0 {
+				out.WriteString(w)
+				col = wl
+			} else if col+1+wl > width {
+				out.WriteByte('\n')
+				out.WriteString(w)
+				col = wl
+			} else {
+				out.WriteByte(' ')
+				out.WriteString(w)
+				col += 1 + wl
+			}
+		}
+		out.WriteByte('\n')
+	}
+	result := out.String()
+	if len(result) > 0 && result[len(result)-1] == '\n' {
+		result = result[:len(result)-1]
+	}
+	return result
 }
 
 func tuiBaseName(path string, maxLen int) string {

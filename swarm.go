@@ -327,7 +327,7 @@ func getSwarmState(ctx context.Context, sessionID string) (*SwarmState, error) {
 
 	eventRows, err := database.QueryContext(ctx,
 		`SELECT id, session_id, COALESCE(agent_id,''), COALESCE(task_id,''), type, COALESCE(payload,''), ts
-		 FROM swarm_events WHERE session_id = ? ORDER BY ts DESC LIMIT 100`,
+		 FROM swarm_events WHERE session_id = ? ORDER BY id ASC LIMIT 500`,
 		sessionID,
 	)
 	events := []SwarmEvent{}
@@ -614,7 +614,7 @@ func handleSwarmOrchestratorAPI(w http.ResponseWriter, r *http.Request, ctx cont
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
-	writeSwarmEvent(ctx, sessionID, agentID, "", "orchestrator_message", truncate(req.Text, 120))
+	writeSwarmEvent(ctx, sessionID, agentID, "", "orchestrator_message", req.Text)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -876,7 +876,7 @@ func handleSwarmAgentsAPI(w http.ResponseWriter, r *http.Request, ctx context.Co
 				json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 				return
 			}
-			writeSwarmEvent(ctx, sessionID, agentID, "", "inject_brief", truncate(req.Text, 120))
+			writeSwarmEvent(ctx, sessionID, agentID, "", "inject_brief", req.Text)
 			w.WriteHeader(http.StatusNoContent)
 		default:
 			w.WriteHeader(http.StatusNotFound)
