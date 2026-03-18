@@ -18,6 +18,7 @@
 	let audioChunks: Blob[] = [];
 	let stream: MediaStream | null = null;
 	let mimeType = '';
+	let errorTimers: ReturnType<typeof setTimeout>[] = [];
 
 	onMount(() => {
 		supported = !!(
@@ -39,6 +40,8 @@
 
 	onDestroy(() => {
 		stopStream();
+		errorTimers.forEach((t) => clearTimeout(t));
+		errorTimers = [];
 	});
 
 	function stopStream() {
@@ -85,8 +88,10 @@
 				}
 
 				state = 'processing';
-				const ext = mimeType.includes('mp4') ? 'm4a' : 'webm';
-				const blob = new Blob(audioChunks, { type: mimeType || 'audio/webm' });
+				// Use the actual MIME type the recorder chose (may differ from our initial preference)
+				const actualMime = mediaRecorder?.mimeType || mimeType || 'audio/webm';
+				const ext = actualMime.includes('mp4') ? 'm4a' : 'webm';
+				const blob = new Blob(audioChunks, { type: actualMime });
 
 				try {
 					const form = new FormData();
@@ -110,12 +115,14 @@
 					const msg = err instanceof Error ? err.message : String(err);
 					errorMessage = msg.length > 60 ? 'Transcription failed' : msg;
 					state = 'error';
-					setTimeout(() => {
-						if (state === 'error') {
-							state = 'idle';
-							errorMessage = '';
-						}
-					}, 3000);
+					errorTimers.push(
+						setTimeout(() => {
+							if (state === 'error') {
+								state = 'idle';
+								errorMessage = '';
+							}
+						}, 3000)
+					);
 				}
 			};
 
@@ -126,12 +133,14 @@
 			errorMessage =
 				e.name === 'NotAllowedError' ? 'Microphone access denied' : `Mic error: ${e.message}`;
 			state = 'error';
-			setTimeout(() => {
-				if (state === 'error') {
-					state = 'idle';
-					errorMessage = '';
-				}
-			}, 3000);
+			errorTimers.push(
+				setTimeout(() => {
+					if (state === 'error') {
+						state = 'idle';
+						errorMessage = '';
+					}
+				}, 3000)
+			);
 		}
 	}
 </script>
