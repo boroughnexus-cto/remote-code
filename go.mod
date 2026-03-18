@@ -1,4 +1,4 @@
-module remote-code
+module swarmops
 
 go 1.24.2
 

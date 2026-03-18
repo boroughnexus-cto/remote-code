@@ -11,7 +11,7 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
-	"remote-code/db"
+	"swarmops/db"
 )
 
 var testDbPath string
@@ -25,7 +25,7 @@ func TestMain(m *testing.M) {
 	defer func() {
 		os.Remove(testDbPath)
 		// Also clean up any other test database files just in case
-		matches, _ := filepath.Glob("remote-code-test-*.db")
+		matches, _ := filepath.Glob("swarmops-test-*.db")
 		for _, match := range matches {
 			os.Remove(match)
 		}

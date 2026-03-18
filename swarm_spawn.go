@@ -56,6 +56,10 @@ func spawnSwarmAgent(ctx context.Context, sessionID, agentID string) error {
 	if tmuxSession != "" {
 		return fmt.Errorf("agent is already spawned in session %s", tmuxSession)
 	}
+	// Check cost circuit breaker before spawning.
+	if err := checkSessionCostLimit(ctx, sessionID); err != nil {
+		return err
+	}
 	// SiBot / orchestrator can spawn without a repo_path
 	if repoPath == "" && agentRole == "orchestrator" {
 		return spawnSiBotAgent(ctx, sessionID, agentID)
@@ -262,6 +266,69 @@ var (
 	stuckTimers   = map[string]time.Time{} // agentID → time status last changed
 	stuckTimersMu sync.Mutex
 )
+
+// swarmCostLimitUSD returns the per-session cost ceiling in USD.
+// Env: SWARM_COST_LIMIT_USD — float string (default "10.0"). Set to "0" to disable.
+func swarmCostLimitUSD() float64 {
+	if v := os.Getenv("SWARM_COST_LIMIT_USD"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			return f
+		}
+	}
+	return 10.0
+}
+
+// sessionEstimatedCostUSD sums blended cost estimates across all agents in a session.
+func sessionEstimatedCostUSD(ctx context.Context, sessionID string) float64 {
+	rows, err := database.QueryContext(ctx,
+		"SELECT COALESCE(model_name,''), COALESCE(tokens_used,0) FROM swarm_agents WHERE session_id = ?",
+		sessionID)
+	if err != nil {
+		return 0
+	}
+	defer rows.Close()
+	var total float64
+	for rows.Next() {
+		var model string
+		var tokens int64
+		rows.Scan(&model, &tokens)
+		total += swarmBlendedCostUSD(model, tokens)
+	}
+	return total
+}
+
+// swarmBlendedCostUSD returns a blended cost estimate (input+output) for a given model+token count.
+// Rates are per-million-token blended estimates (roughly 70% input / 30% output).
+func swarmBlendedCostUSD(modelName string, tokens int64) float64 {
+	const (
+		rateOpus   = 45.0 / 1_000_000
+		rateSonnet = 9.0 / 1_000_000
+		rateHaiku  = 2.4 / 1_000_000
+	)
+	var rate float64
+	switch {
+	case strings.Contains(modelName, "opus"):
+		rate = rateOpus
+	case strings.Contains(modelName, "haiku"):
+		rate = rateHaiku
+	default:
+		rate = rateSonnet
+	}
+	return rate * float64(tokens)
+}
+
+// checkSessionCostLimit returns an error if the session has exceeded SWARM_COST_LIMIT_USD.
+func checkSessionCostLimit(ctx context.Context, sessionID string) error {
+	limit := swarmCostLimitUSD()
+	if limit <= 0 {
+		return nil
+	}
+	cost := sessionEstimatedCostUSD(ctx, sessionID)
+	if cost >= limit {
+		return fmt.Errorf("session cost limit reached (~$%.2f of $%.2f limit) — set SWARM_COST_LIMIT_USD to raise or set to 0 to disable", cost, limit)
+	}
+	return nil
+}
 
 func swarmStuckTimeout() time.Duration {
 	if v := os.Getenv("SWARM_STUCK_TIMEOUT"); v != "" {
@@ -533,7 +600,7 @@ func spawnSiBotAgent(ctx context.Context, sessionID, agentID string) error {
 	if err != nil {
 		return fmt.Errorf("could not determine home dir: %v", err)
 	}
-	workDir := filepath.Join(homeDir, ".remote-code", "sibot", agentID)
+	workDir := filepath.Join(homeDir, ".swarmops", "sibot", agentID)
 	if err := os.MkdirAll(workDir, 0755); err != nil {
 		return fmt.Errorf("mkdir sibot workdir: %v", err)
 	}
@@ -858,7 +925,7 @@ AGENT_ID="${SWARM_AGENT_ID:-}"
 SESSION_ID="${SWARM_SESSION_ID:-}"
 [ -z "$AGENT_ID" ] || [ -z "$SESSION_ID" ] && exit 0
 
-OUTBOX_DIR="${HOME}/.remote-code/swarm/${SESSION_ID}/agents/${AGENT_ID}/outbox"
+OUTBOX_DIR="${HOME}/.swarmops/swarm/${SESSION_ID}/agents/${AGENT_ID}/outbox"
 [ ! -d "$OUTBOX_DIR" ] && exit 0
 
 EVENTS_FILE="${OUTBOX_DIR}/events.jsonl"
@@ -901,7 +968,7 @@ printf '{"event":"heartbeat","context_pct":%s,"model_name":"%s","tokens_used":%s
 var ensureHookOnce sync.Once
 
 // ensureSwarmHookScript writes the Stop hook shell script to
-// ~/.remote-code/swarm/hooks/agent-stop.sh and makes it executable.
+// ~/.swarmops/swarm/hooks/agent-stop.sh and makes it executable.
 // It is safe to call multiple times — uses sync.Once internally.
 func ensureSwarmHookScript() {
 	ensureHookOnce.Do(func() {

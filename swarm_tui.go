@@ -1521,6 +1521,7 @@ func (m tuiModel) View() string {
 
 func (m tuiModel) viewHUD() string {
 	var live, coding, thinking, waiting, stuck int
+	var tasksDone, tasksFailed, tasksTotal int
 	for _, st := range m.states {
 		for _, a := range st.Agents {
 			if a.TmuxSession != nil {
@@ -1537,11 +1538,41 @@ func (m tuiModel) viewHUD() string {
 				stuck++
 			}
 		}
+		for _, t := range st.Tasks {
+			tasksTotal++
+			switch t.Stage {
+			case "done", "review", "deploy", "merged":
+				tasksDone++
+			case "blocked":
+				tasksFailed++
+			}
+		}
 	}
 
-	parts := []string{titleStyle.Render("⬡ RC SWARM")}
+	parts := []string{titleStyle.Render("⬡ SwarmOps")}
 	parts = append(parts, dimStyle.Render("│"))
 	parts = append(parts, dimStyle.Render(fmt.Sprintf("%d session%s", len(m.sessions), pluralS(len(m.sessions)))))
+	if tasksTotal > 0 {
+		// Health score: done/(total-blocked) ratio as a progress-bar-style indicator
+		healthPct := 0
+		if tasksTotal > tasksFailed {
+			healthPct = tasksDone * 100 / (tasksTotal - tasksFailed)
+		}
+		healthStr := fmt.Sprintf("%d/%d tasks", tasksDone, tasksTotal)
+		var healthC lipgloss.Color
+		switch {
+		case tasksFailed > 0:
+			healthC = colorRed
+			healthStr += fmt.Sprintf(" (%d blocked)", tasksFailed)
+		case healthPct >= 80:
+			healthC = colorGreen
+		case healthPct >= 40:
+			healthC = colorTeal
+		default:
+			healthC = colorDim
+		}
+		parts = append(parts, lipgloss.NewStyle().Foreground(healthC).Render(healthStr))
+	}
 	if live > 0 {
 		parts = append(parts, lipgloss.NewStyle().Foreground(colorTeal).Render(fmt.Sprintf("⚡%d live", live)))
 	}
@@ -1590,7 +1621,13 @@ func (m tuiModel) viewHUD() string {
 	if totalTokens > 0 {
 		tokStr := formatTokensK(totalTokens) + " tok"
 		costStr := formatCostUSD(totalCost)
-		parts = append(parts, dimStyle.Render(tokStr+"  "+costStr))
+		costLimit := swarmCostLimitUSD()
+		if costLimit > 0 && totalCost >= costLimit {
+			warnStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#FF5555")).Bold(true)
+			parts = append(parts, warnStyle.Render("⚠ COST LIMIT "+formatCostUSD(totalCost)+"/"+formatCostUSD(costLimit)))
+		} else {
+			parts = append(parts, dimStyle.Render(tokStr+"  "+costStr))
+		}
 	}
 	return hudStyle.Width(m.w).Render(strings.Join(parts, "  "))
 }

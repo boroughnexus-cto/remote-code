@@ -12,7 +12,7 @@ import (
 	"os/exec"
 	"strings"
 
-	"remote-code/db"
+	"swarmops/db"
 
 	"github.com/creack/pty"
 	"github.com/gorilla/websocket"
@@ -49,7 +49,7 @@ var database *sql.DB
 var queries *db.Queries
 
 func main() {
-	// TUI subcommand: ./remote-code tui
+	// TUI subcommand: ./swarmops tui
 	if len(os.Args) > 1 && os.Args[1] == "tui" {
 		RunSwarmTUI()
 		return
@@ -142,7 +142,7 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	} else {
 		// Create or attach to global session for general terminal use
 		log.Printf("Creating/attaching to global terminal session")
-		cmd = exec.Command("tmux", "new-session", "-A", "-s", "remote-code")
+		cmd = exec.Command("tmux", "new-session", "-A", "-s", "swarmops")
 	}
 
 	// Ensure proper terminal environment for UTF-8 and colors

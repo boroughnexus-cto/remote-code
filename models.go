@@ -2,7 +2,7 @@ package main
 
 import (
 	"database/sql"
-	"remote-code/db"
+	"swarmops/db"
 )
 
 // Root represents the main configuration structure

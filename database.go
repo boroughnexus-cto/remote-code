@@ -9,19 +9,19 @@ import (
 	"strings"
 	"time"
 
-	"remote-code/db"
+	"swarmops/db"
 
 	_ "modernc.org/sqlite"
 )
 
 func initDatabase() (*sql.DB, *db.Queries) {
-	database, queries, _ := initDatabaseWithPathAndReturn("remote-code.db")
+	database, queries, _ := initDatabaseWithPathAndReturn("swarmops.db")
 	return database, queries
 }
 
 func initTestDatabase() (*sql.DB, *db.Queries, string) {
 	// Use a unique filename for each test run to avoid conflicts.
-	testDbPath := fmt.Sprintf("remote-code-test-%d.db", time.Now().UnixNano())
+	testDbPath := fmt.Sprintf("swarmops-test-%d.db", time.Now().UnixNano())
 	db, queries, path := initDatabaseWithPathAndReturn(testDbPath)
 	// WAL mode + busy_timeout prevents SQLITE_BUSY from background goroutines
 	// (broadcaster timers, goal injection goroutines) running concurrently with tests.

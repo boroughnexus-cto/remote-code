@@ -12,7 +12,7 @@ import (
 
 // ─── Directory layout ────────────────────────────────────────────────────────
 //
-//  ~/.remote-code/swarm/<sessionID>/
+//  ~/.swarmops/swarm/<sessionID>/
 //    blackboard/
 //      decisions.md      — append-only log of orchestrator decisions (regenerated)
 //      context.md        — running shared context snapshot
@@ -29,7 +29,7 @@ func swarmBaseDir() string {
 		log.Printf("swarm: os.UserHomeDir failed: %v — using /tmp", err)
 		home = "/tmp"
 	}
-	return filepath.Join(home, ".remote-code", "swarm")
+	return filepath.Join(home, ".swarmops", "swarm")
 }
 
 func swarmSessionDir(sessionID string) string {
