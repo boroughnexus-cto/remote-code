@@ -35,7 +35,12 @@
 	// VAD instance
 	// eslint-disable-next-line @typescript-eslint/no-explicit-any
 	let vad: any = null;
+	// MediaStream acquired for VAD — must be stopped on destroy to release mic indicator
+	let micStream: MediaStream | null = null;
 	let errorTimer: ReturnType<typeof setTimeout> | null = null;
+	// Monotonically increasing run ID — each pipeline invocation gets its own.
+	// Stale async completions check this before mutating state.
+	let runId = 0;
 
 	// --- Lifecycle ---
 	onMount(async () => {
@@ -45,6 +50,9 @@
 	onDestroy(() => {
 		stopEverything();
 		vad?.destroy?.();
+		// Release mic indicator — stop all MediaStream tracks
+		micStream?.getTracks().forEach((t) => t.stop());
+		micStream = null;
 		if (errorTimer) clearTimeout(errorTimer);
 	});
 
@@ -62,6 +70,10 @@
 	async function initVAD() {
 		try {
 			const { MicVAD } = await import('@ricky0123/vad-web');
+			// Acquire stream first so we can stop tracks on destroy (releases mic indicator)
+			micStream = await navigator.mediaDevices.getUserMedia({
+				audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+			});
 			vad = await MicVAD.new({
 				positiveSpeechThreshold: 0.5,
 				negativeSpeechThreshold: 0.35,
@@ -74,14 +86,13 @@
 					// eslint-disable-next-line @typescript-eslint/no-explicit-any
 					(ort as any).env.wasm.wasmPaths = '/';
 				},
-				stream: await navigator.mediaDevices.getUserMedia({
-					audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
-				}),
+				stream: micStream,
 
 				onSpeechStart: () => {
-					// Barge-in: user started speaking — stop any playing TTS immediately
-					if (pipelineState === 'speaking') {
+					// Barge-in: stop TTS when user starts speaking, even if still thinking
+					if (pipelineState === 'speaking' || pipelineState === 'thinking') {
 						stopTTSPlayback();
+						runId++; // invalidate any in-flight pipeline
 					}
 				},
 
@@ -100,11 +111,11 @@
 	}
 
 	// --- Controls ---
-	function startListening() {
+	async function startListening() {
 		if (!vadReady || pipelineState !== 'idle') return;
-		// Unlock AudioContext on first user gesture (iOS requirement)
+		// Unlock AudioContext on first user gesture (required on iOS)
 		const ctx = ensureAudioCtx();
-		if (ctx.state === 'suspended') ctx.resume();
+		if (ctx.state === 'suspended') await ctx.resume();
 		vad?.start();
 		pipelineState = 'listening';
 		errorMessage = '';
@@ -141,6 +152,9 @@
 
 	// --- Pipeline: Float32 PCM (16kHz from VAD) → WAV blob → STT → LLM/inject → streaming TTS ---
 	async function runPipeline(vadAudio: Float32Array) {
+		// Stamp this run — barge-in increments runId to cancel stale pipelines
+		const myRun = ++runId;
+
 		// 1. Encode VAD audio as WAV (16kHz mono int16) for Speaches
 		const wavBlob = float32ToWav(vadAudio, 16000);
 
@@ -156,10 +170,13 @@
 			}
 			userText = ((await resp.json()).text ?? '').trim();
 		} catch (err) {
+			if (runId !== myRun) return;
 			setError(err instanceof Error ? err.message : 'Transcription failed');
 			maybeLoop();
 			return;
 		}
+
+		if (runId !== myRun) return;
 
 		if (!userText) {
 			pipelineState = 'idle';
@@ -175,7 +192,7 @@
 		let assistantText = '';
 
 		if (mode === 'relay' && sessionId) {
-			// Direct relay to orchestrator — inject and report recent output
+			// Direct relay to orchestrator — inject message and confirm
 			try {
 				const resp = await fetch('/api/swarm/voice/inject', {
 					method: 'POST',
@@ -187,14 +204,10 @@
 					throw new Error(e.error ?? resp.statusText);
 				}
 				const data = await resp.json();
-				const recent = (data.recent_output ?? '').trim();
 				const agentName = data.agent_name ?? 'orchestrator';
-				assistantText = recent
-					? `Sent to ${agentName}. They were last saying: ${recent.slice(-200)}`
-					: `Sent to ${agentName}.`;
-				// Summarise via haiku for TTS-friendly phrasing
-				assistantText = await summariseForVoice(userText, assistantText);
+				assistantText = `Message sent to ${agentName}.`;
 			} catch (err) {
+				if (runId !== myRun) return;
 				setError(err instanceof Error ? err.message : 'Inject failed');
 				maybeLoop();
 				return;
@@ -219,11 +232,14 @@
 				}
 				assistantText = ((await resp.json()).text ?? '').trim();
 			} catch (err) {
+				if (runId !== myRun) return;
 				setError(err instanceof Error ? err.message : 'Assistant error');
 				maybeLoop();
 				return;
 			}
 		}
+
+		if (runId !== myRun) return;
 
 		if (!assistantText) {
 			pipelineState = 'idle';
@@ -245,32 +261,16 @@
 			}
 		}
 
+		if (runId !== myRun) return;
+
 		pipelineState = 'idle';
 		maybeLoop();
-	}
-
-	// Summarise orchestrator relay output into 1-2 voice-friendly sentences
-	async function summariseForVoice(userMsg: string, rawOutput: string): Promise<string> {
-		try {
-			const resp = await fetch('/api/swarm/voice/chat', {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({
-					message: `The user said: "${userMsg}". The orchestrator's recent output: "${rawOutput.slice(-300)}". Summarise in 1-2 spoken sentences what the orchestrator is doing or just confirmed.`,
-					session_id: sessionId,
-					history: []
-				})
-			});
-			if (!resp.ok) return rawOutput.slice(0, 200);
-			return ((await resp.json()).text ?? rawOutput).trim();
-		} catch {
-			return rawOutput.slice(0, 200);
-		}
 	}
 
 	// --- Streaming PCM TTS via Web Audio API ---
 	async function streamTTS(text: string) {
 		ttsAbort = new AbortController();
+		const signal = ttsAbort.signal;
 		const ctx = ensureAudioCtx();
 		if (ctx.state === 'suspended') await ctx.resume();
 
@@ -278,7 +278,7 @@
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify({ text, format: 'pcm' }),
-			signal: ttsAbort.signal
+			signal
 		});
 
 		if (!resp.ok || !resp.body) {
@@ -286,6 +286,9 @@
 		}
 
 		const reader = resp.body.getReader();
+		// Cancel the reader when the abort signal fires
+		signal.addEventListener('abort', () => { reader.cancel(); }, { once: true });
+
 		// Schedule audio chunks back-to-back starting 50ms from now
 		let nextStart = ctx.currentTime + 0.05;
 		// Accumulate partial bytes across chunk boundaries (PCM is 2 bytes/sample)
@@ -306,7 +309,8 @@
 
 			if (usable === 0) continue;
 
-			const view = new DataView(combined.buffer, combined.byteOffset, usable);
+			// Decode Int16 PCM to Float32
+			const view = new DataView(combined.buffer, 0, usable);
 			const sampleCount = usable / 2;
 			const float32 = new Float32Array(sampleCount);
 			for (let i = 0; i < sampleCount; i++) {
@@ -322,20 +326,17 @@
 				activeSources = activeSources.filter((s) => s !== source);
 			};
 			activeSources.push(source);
+			// Clamp to current time to avoid scheduling in the past after a gap
+			nextStart = Math.max(nextStart, ctx.currentTime + 0.01);
 			source.start(nextStart);
 			nextStart += buffer.duration;
 		}
 
-		// Wait for all audio to finish playing
-		if (activeSources.length > 0) {
-			await new Promise<void>((resolve) => {
-				const last = activeSources[activeSources.length - 1];
-				const prevOnEnded = last.onended;
-				last.onended = (e) => {
-					if (typeof prevOnEnded === 'function') prevOnEnded.call(last, e);
-					resolve();
-				};
-			});
+		// Wait until the scheduled audio has played out.
+		// Use time-based wait: nextStart is when the last buffer finishes.
+		const remaining = nextStart - ctx.currentTime;
+		if (remaining > 0.05) {
+			await new Promise<void>((resolve) => setTimeout(resolve, remaining * 1000));
 		}
 	}
 
