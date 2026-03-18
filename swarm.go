@@ -411,12 +411,81 @@ func handleSwarmAPI(w http.ResponseWriter, r *http.Request, ctx context.Context,
 		handleSwarmDashboardAPI(w, r, ctx)
 		return
 	}
+	if len(pathParts) > 0 && pathParts[0] == "role-prompts" {
+		handleSwarmRolePromptsAPI(w, r, ctx, pathParts[1:])
+		return
+	}
 	if len(pathParts) == 0 || pathParts[0] != "sessions" {
 		w.WriteHeader(http.StatusNotFound)
 		json.NewEncoder(w).Encode(map[string]string{"error": "unknown swarm endpoint"})
 		return
 	}
 	handleSwarmSessionsAPI(w, r, ctx, pathParts[1:])
+}
+
+// handleSwarmRolePromptsAPI handles GET /api/swarm/role-prompts
+// and PUT /api/swarm/role-prompts/:role
+func handleSwarmRolePromptsAPI(w http.ResponseWriter, r *http.Request, ctx context.Context, pathParts []string) {
+	w.Header().Set("Content-Type", "application/json")
+	if len(pathParts) == 0 {
+		// GET — list all roles and their prompts + versions
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		rows, err := database.QueryContext(ctx,
+			"SELECT role, prompt, version, updated_at FROM swarm_role_prompts ORDER BY role")
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()}) //nolint:errcheck
+			return
+		}
+		defer rows.Close()
+		type rolePromptRow struct {
+			Role      string `json:"role"`
+			Prompt    string `json:"prompt"`
+			Version   int    `json:"version"`
+			UpdatedAt string `json:"updated_at"`
+		}
+		var result []rolePromptRow
+		for rows.Next() {
+			var rp rolePromptRow
+			rows.Scan(&rp.Role, &rp.Prompt, &rp.Version, &rp.UpdatedAt) //nolint:errcheck
+			result = append(result, rp)
+		}
+		json.NewEncoder(w).Encode(result) //nolint:errcheck
+		return
+	}
+
+	// PUT /api/swarm/role-prompts/:role
+	role := pathParts[0]
+	if r.Method != http.MethodPut {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		Prompt string `json:"prompt"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Prompt == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "prompt required"}) //nolint:errcheck
+		return
+	}
+	_, err := database.ExecContext(ctx,
+		`INSERT INTO swarm_role_prompts (role, prompt, version, updated_at)
+		 VALUES (?, ?, 1, CURRENT_TIMESTAMP)
+		 ON CONFLICT(role) DO UPDATE SET
+		   prompt = excluded.prompt,
+		   version = version + 1,
+		   updated_at = CURRENT_TIMESTAMP`,
+		role, body.Prompt,
+	)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()}) //nolint:errcheck
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok", "role": role}) //nolint:errcheck
 }
 
 func handleSwarmSessionsAPI(w http.ResponseWriter, r *http.Request, ctx context.Context, pathParts []string) {

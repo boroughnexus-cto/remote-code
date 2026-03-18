@@ -17,6 +17,66 @@ import (
 const swarmClaudeCommand = "claude --dangerously-skip-permissions"
 
 // -----------------
+// Role prompts
+// -----------------
+
+// loadRolePrompt fetches the role's system prompt and version from DB.
+// Falls back to a minimal inline default so spawn never fails on a missing row.
+func loadRolePrompt(ctx context.Context, role string) (prompt string, version int) {
+	err := database.QueryRowContext(ctx,
+		"SELECT prompt, version FROM swarm_role_prompts WHERE role = ?", role,
+	).Scan(&prompt, &version)
+	if err != nil || prompt == "" {
+		log.Printf("swarm: role prompt for %q not found (%v) — using minimal default", role, err)
+		prompt = fmt.Sprintf("# %s Agent\n\nYou are a %s agent. Complete your assigned mission.\n", role, role)
+		version = 0
+	}
+	return
+}
+
+// writeAgentCLAUDE writes the agent's role prompt + spawn context to CLAUDE.md
+// in the given workdir so Claude Code picks it up automatically on startup.
+func writeAgentCLAUDE(workDir, sessionID, agentID, role, mission, prompt string) error {
+	apiBase := "http://localhost:8080"
+	spawnType := "worktree"
+	if strings.Contains(workDir, "/.swarmops/agents/") {
+		spawnType = "scratch (no git)"
+	} else if strings.Contains(workDir, "/.swarmops/sibot/") {
+		spawnType = "sibot (orchestrator scratch)"
+	}
+
+	var sb strings.Builder
+	sb.WriteString(prompt)
+	sb.WriteString("\n\n---\n\n")
+	sb.WriteString("## Agent Instance Context\n\n")
+	fmt.Fprintf(&sb, "- Spawn type: %s\n", spawnType)
+	fmt.Fprintf(&sb, "- Session ID: `%s`\n", sessionID)
+	fmt.Fprintf(&sb, "- Agent ID: `%s`\n", agentID)
+	fmt.Fprintf(&sb, "- API base: `%s`\n", apiBase)
+	if mission != "" {
+		fmt.Fprintf(&sb, "- Mission: %s\n", mission)
+	}
+
+	return os.WriteFile(filepath.Join(workDir, "CLAUDE.md"), []byte(sb.String()), 0644)
+}
+
+// waitForClaudeReady polls the tmux pane until Claude Code's prompt is visible
+// (indicated by the ╭ box-drawing character of the welcome UI) or timeout.
+func waitForClaudeReady(tmuxName string, timeout time.Duration) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		out, err := exec.Command("tmux", "capture-pane", "-t", tmuxName, "-p", "-S", "-10").Output()
+		if err == nil {
+			s := string(out)
+			if strings.Contains(s, "╭") || strings.Contains(s, "> ") || strings.Contains(s, "Welcome to Claude") {
+				return
+			}
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+}
+
+// -----------------
 // ID helpers
 // -----------------
 
@@ -121,25 +181,38 @@ func spawnSwarmAgent(ctx context.Context, sessionID, agentID string) error {
 		log.Printf("swarm: warning — could not write .claude/settings.json: %v", err)
 	}
 
-	// Add .claude/settings.json to .gitignore (alongside SWARM_CONTEXT.md)
+	// Add agent-written files to .gitignore so they are never committed.
 	gitignorePath := filepath.Join(worktreePath, ".gitignore")
 	gitignoreExisting, _ := os.ReadFile(gitignorePath)
 	if !strings.Contains(string(gitignoreExisting), ".claude/settings.json") {
 		f, err := os.OpenFile(gitignorePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 		if err == nil {
-			fmt.Fprintln(f, "\n# Claude Code local settings (swarm hook config)")
+			fmt.Fprintln(f, "\n# SwarmOps agent files (do not commit)")
 			fmt.Fprintln(f, ".claude/settings.json")
+			fmt.Fprintln(f, "CLAUDE.md")
+			fmt.Fprintln(f, "SWARM_CONTEXT.md")
+			fmt.Fprintln(f, "RESUME_CONTEXT.md")
+			fmt.Fprintln(f, "AGENT_ERROR.md")
+			fmt.Fprintln(f, "AGENT_BLOCKER.md")
 			f.Close()
 		}
 	}
 
-	// For orchestrator role: write context file before launching claude
+	// Write role prompt as CLAUDE.md so Claude auto-reads it on startup.
+	var agentMission string
+	database.QueryRowContext(ctx, "SELECT COALESCE(mission,'') FROM swarm_agents WHERE id = ?", agentID).Scan(&agentMission) //nolint:errcheck
+	rolePrompt, promptVersion := loadRolePrompt(ctx, agentRole)
+	if err := writeAgentCLAUDE(worktreePath, sessionID, agentID, agentRole, agentMission, rolePrompt); err != nil {
+		log.Printf("swarm: warning — could not write CLAUDE.md: %v", err)
+	}
+
+	// For orchestrator role: also write the full API reference doc.
 	if agentRole == "orchestrator" {
 		if err := writeOrchestratorContext(worktreePath, sessionID); err != nil {
 			log.Printf("swarm: warning — could not write orchestrator context: %v", err)
 		}
 	} else if worktreeExists {
-		// Re-spawned worker agent: write resume context so claude can pick up where it left off
+		// Re-spawned worker: write resume context alongside CLAUDE.md.
 		if err := writeResumeContext(ctx, agentID, sessionID, worktreePath); err != nil {
 			log.Printf("swarm: warning — could not write resume context: %v", err)
 		}
@@ -150,31 +223,26 @@ func spawnSwarmAgent(ctx context.Context, sessionID, agentID string) error {
 		log.Printf("swarm: warning — could not send claude command: %v: %s", err, out)
 	}
 
-	// Inject orientation message after claude starts
-	if agentRole == "orchestrator" {
-		go func() {
-			time.Sleep(8 * time.Second)
+	// Wait for Claude to be ready, then send a targeted orientation inject.
+	go func() {
+		waitForClaudeReady(tmuxName, 60*time.Second)
+		switch {
+		case agentRole == "orchestrator":
 			injectToSwarmAgent(context.Background(), agentID,
-				"You are the swarm orchestrator. Please read SWARM_CONTEXT.md in this directory to understand your role and the available API. Then confirm you are ready.")
-		}()
-	} else if worktreeExists {
-		go func() {
-			time.Sleep(8 * time.Second)
+				"Please read CLAUDE.md and SWARM_CONTEXT.md to understand your role and the API. Then confirm you are ready and give a brief state summary.")
+		case worktreeExists:
 			injectToSwarmAgent(context.Background(), agentID,
-				"Welcome back. Please read RESUME_CONTEXT.md for context on what you were working on, then continue where you left off.")
-		}()
-	} else {
-		// New worker agent — after Claude starts, auto-dispatch any queued tasks.
-		go func() {
-			time.Sleep(12 * time.Second) // wait for Claude to be ready
+				"Welcome back. Your role context is in CLAUDE.md. Read RESUME_CONTEXT.md for what you were working on, then continue where you left off.")
+		default:
+			// New worktree agent — auto-dispatch any queued tasks.
 			autoDispatchQueuedTasks(context.Background(), sessionID)
-		}()
-	}
+		}
+	}()
 
 	// Persist to DB
 	_, err = database.ExecContext(ctx,
-		"UPDATE swarm_agents SET worktree_path = ?, tmux_session = ?, status = 'thinking' WHERE id = ?",
-		worktreePath, tmuxName, agentID,
+		"UPDATE swarm_agents SET worktree_path = ?, tmux_session = ?, status = 'thinking', role_prompt_version = ? WHERE id = ?",
+		worktreePath, tmuxName, promptVersion, agentID,
 	)
 	if err == nil {
 		writeSwarmEvent(ctx, sessionID, agentID, "", "agent_spawned", tmuxName)
@@ -626,13 +694,26 @@ func spawnScratchAgent(ctx context.Context, sessionID, agentID string) error {
 		log.Printf("swarm: warning — could not write .claude/settings.json: %v", err)
 	}
 
+	// Write role prompt as CLAUDE.md.
+	var agentRole, agentMission string
+	database.QueryRowContext(ctx, "SELECT COALESCE(role,'worker'), COALESCE(mission,'') FROM swarm_agents WHERE id = ?", agentID).Scan(&agentRole, &agentMission) //nolint:errcheck
+	rolePrompt, promptVersion := loadRolePrompt(ctx, agentRole)
+	if err := writeAgentCLAUDE(workDir, sessionID, agentID, agentRole, agentMission, rolePrompt); err != nil {
+		log.Printf("swarm: warning — could not write CLAUDE.md: %v", err)
+	}
+
 	if out, err := exec.Command("tmux", "send-keys", "-t", tmuxName, swarmClaudeCommand, "Enter").CombinedOutput(); err != nil {
 		log.Printf("swarm: warning — could not send claude command: %v: %s", err, out)
 	}
 
+	go func() {
+		waitForClaudeReady(tmuxName, 60*time.Second)
+		autoDispatchQueuedTasks(context.Background(), sessionID)
+	}()
+
 	_, err = database.ExecContext(ctx,
-		"UPDATE swarm_agents SET worktree_path = ?, tmux_session = ?, status = 'thinking' WHERE id = ?",
-		workDir, tmuxName, agentID,
+		"UPDATE swarm_agents SET worktree_path = ?, tmux_session = ?, status = 'thinking', role_prompt_version = ? WHERE id = ?",
+		workDir, tmuxName, promptVersion, agentID,
 	)
 	if err == nil {
 		writeSwarmEvent(ctx, sessionID, agentID, "", "agent_spawned", tmuxName)
@@ -657,9 +738,13 @@ func spawnSiBotAgent(ctx context.Context, sessionID, agentID string) error {
 	tmuxName := swarmTmuxName(agentID)
 	log.Printf("swarm: spawning SiBot %s — tmux=%s workdir=%s", agentID[:8], tmuxName, workDir)
 
-	// Write orchestrator context
+	// Write role prompt as CLAUDE.md so Claude auto-reads it, then the API reference doc.
+	rolePrompt, promptVersion := loadRolePrompt(ctx, "orchestrator")
+	if err := writeAgentCLAUDE(workDir, sessionID, agentID, "orchestrator", "", rolePrompt); err != nil {
+		log.Printf("swarm: warning — could not write CLAUDE.md for SiBot: %v", err)
+	}
 	if err := writeOrchestratorContext(workDir, sessionID); err != nil {
-		log.Printf("swarm: warning — could not write SiBot context: %v", err)
+		log.Printf("swarm: warning — could not write SiBot API context: %v", err)
 	}
 
 	// Init blackboard + agent IPC dirs
@@ -675,31 +760,26 @@ func spawnSiBotAgent(ctx context.Context, sessionID, agentID string) error {
 		return fmt.Errorf("tmux new-session: %v: %s", err, out)
 	}
 
-	// Inject SWARM_AGENT_ID and SWARM_SESSION_ID into the tmux session environment
 	exec.Command("tmux", "setenv", "-t", tmuxName, "SWARM_AGENT_ID", agentID).Run()   //nolint:errcheck
 	exec.Command("tmux", "setenv", "-t", tmuxName, "SWARM_SESSION_ID", sessionID).Run() //nolint:errcheck
 
-	// Write .claude/settings.json to register the Stop hook
 	if err := writeAgentClaudeSettings(workDir); err != nil {
 		log.Printf("swarm: warning — could not write .claude/settings.json for SiBot: %v", err)
 	}
 
-	// Launch claude
 	if out, err := exec.Command("tmux", "send-keys", "-t", tmuxName, swarmClaudeCommand, "Enter").CombinedOutput(); err != nil {
 		log.Printf("swarm: warning — could not send claude command: %v: %s", err, out)
 	}
 
-	// Inject orientation message after claude starts
 	go func() {
-		time.Sleep(8 * time.Second)
+		waitForClaudeReady(tmuxName, 60*time.Second)
 		injectToSwarmAgent(context.Background(), agentID,
-			"You are SiBot, the swarm orchestrator. Please read SWARM_CONTEXT.md in this directory to understand your role and the available API. Then confirm you are ready and give a brief summary of the current swarm state.")
+			"Please read CLAUDE.md (your role) and SWARM_CONTEXT.md (API reference) in this directory. Then confirm you are ready and give a brief summary of the current swarm state.")
 	}()
 
-	// Persist to DB
 	_, err = database.ExecContext(ctx,
-		"UPDATE swarm_agents SET worktree_path = ?, tmux_session = ?, status = 'thinking' WHERE id = ?",
-		workDir, tmuxName, agentID,
+		"UPDATE swarm_agents SET worktree_path = ?, tmux_session = ?, status = 'thinking', role_prompt_version = ? WHERE id = ?",
+		workDir, tmuxName, promptVersion, agentID,
 	)
 	if err == nil {
 		writeSwarmEvent(ctx, sessionID, agentID, "", "agent_spawned", tmuxName)

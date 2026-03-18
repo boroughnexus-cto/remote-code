@@ -134,6 +134,12 @@ type tuiState struct {
 // ─── Messages ─────────────────────────────────────────────────────────────────
 
 type tuiAnimTickMsg struct{}
+type tuiRolePromptSavedMsg struct{ role string }
+type tuiRolePromptEditMsg struct {
+	role    string
+	tmpPath string
+	editor  string
+}
 type tuiTermMsg struct {
 	agentID string
 	content string
@@ -198,6 +204,31 @@ func (c *swarmClient) do(method, path string, body interface{}) ([]byte, int, er
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(resp.Body)
 	return b, resp.StatusCode, nil
+}
+
+// getSync performs a synchronous GET and returns the body bytes.
+func (c *swarmClient) getSync(path string) ([]byte, error) {
+	b, _, err := c.do("GET", path, nil)
+	return b, err
+}
+
+// putSync performs a synchronous PUT with a raw JSON body.
+func (c *swarmClient) putSync(path string, body []byte) error {
+	req, err := http.NewRequest("PUT", c.baseURL+path, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("PUT %s: %d %s", path, resp.StatusCode, string(b))
+	}
+	return nil
 }
 
 func (c *swarmClient) fetchAll() tea.Cmd {
@@ -898,6 +929,31 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.setFlash("Returned from tmux session", false)
 		cmds = append(cmds, m.client.fetchAll())
 
+	case tuiRolePromptEditMsg:
+		// Phase 2: open $EDITOR (suspends TUI), then PUT result on close.
+		role := msg.role
+		tmpPath := msg.tmpPath
+		client := m.client
+		cmd := exec.Command(msg.editor, tmpPath)
+		cmds = append(cmds, tea.ExecProcess(cmd, func(err error) tea.Msg {
+			defer os.Remove(tmpPath) //nolint:errcheck
+			if err != nil {
+				return tuiErrMsg{op: "role-prompts", text: err.Error()}
+			}
+			newPrompt, err := os.ReadFile(tmpPath)
+			if err != nil || len(newPrompt) == 0 {
+				return tuiErrMsg{op: "role-prompts", text: "empty prompt — not saved"}
+			}
+			body, _ := json.Marshal(map[string]string{"prompt": string(newPrompt)})
+			if putErr := client.putSync("/api/swarm/role-prompts/"+role, body); putErr != nil {
+				return tuiErrMsg{op: "role-prompts", text: putErr.Error()}
+			}
+			return tuiRolePromptSavedMsg{role: role}
+		}))
+
+	case tuiRolePromptSavedMsg:
+		m.setFlash("Role prompt updated: "+msg.role, false)
+
 	case tea.KeyMsg:
 		// ? shows hold-to-view help from anywhere; each press resets the hide timer.
 		if msg.String() == "?" {
@@ -1194,6 +1250,51 @@ func (m tuiModel) updateSidebar(msg tea.KeyMsg) (tuiModel, []tea.Cmd) {
 			path := "/api/swarm/sessions/" + sid + "/plane/issues?state_group=backlog,unstarted"
 			cmds = append(cmds, m.client.get("workqueue", path))
 		}
+
+	case "P":
+		// Edit role prompts in $EDITOR.
+		// Phase 1: fetch current prompt, write to temp file → tuiRolePromptEditMsg.
+		// Phase 2: handled below — opens $EDITOR via tea.ExecProcess.
+		role := "worker"
+		if it := m.selItem(); it != nil && it.kind == tuiItemAgent {
+			if ag := m.lookupAgent(it.sid, it.eid); ag != nil {
+				role = ag.Role
+			}
+		}
+		roleCapture := role
+		cmds = append(cmds, func() tea.Msg {
+			resp, err := m.client.getSync("/api/swarm/role-prompts")
+			if err != nil {
+				return tuiErrMsg{op: "role-prompts", text: err.Error()}
+			}
+			type rp struct {
+				Role   string `json:"role"`
+				Prompt string `json:"prompt"`
+			}
+			var all []rp
+			if err := json.Unmarshal(resp, &all); err != nil {
+				return tuiErrMsg{op: "role-prompts", text: err.Error()}
+			}
+			currentPrompt := ""
+			for _, r := range all {
+				if r.Role == roleCapture {
+					currentPrompt = r.Prompt
+					break
+				}
+			}
+			f, err := os.CreateTemp("", "swarmops-prompt-*.md")
+			if err != nil {
+				return tuiErrMsg{op: "role-prompts", text: err.Error()}
+			}
+			tmpPath := f.Name()
+			f.WriteString(currentPrompt) //nolint:errcheck
+			f.Close()
+			editor := os.Getenv("EDITOR")
+			if editor == "" {
+				editor = "vi"
+			}
+			return tuiRolePromptEditMsg{role: roleCapture, tmpPath: tmpPath, editor: editor}
+		})
 
 	case "I":
 		m.icingaView = true
@@ -2117,7 +2218,7 @@ func (m tuiModel) viewStatusBar() string {
 }
 
 func (m tuiModel) viewHelp() string {
-	keys := "  ↑↓/jk nav  ·  Enter attach  ·  Tab// input  ·  s spawn  ·  d stop  ·  + quick-agent  ·  n agent  ·  t task  ·  c session  ·  E edit  ·  I icinga  ·  L event-log  ·  e escalations  ·  g goals  ·  A autopilot  ·  W queue  ·  R refresh  ·  q quit"
+	keys := "  ↑↓/jk nav  ·  Enter attach  ·  Tab// input  ·  s spawn  ·  d stop  ·  + quick-agent  ·  n agent  ·  t task  ·  c session  ·  E edit  ·  P role-prompt  ·  I icinga  ·  L event-log  ·  e escalations  ·  g goals  ·  A autopilot  ·  W queue  ·  R refresh  ·  q quit"
 	return dimStyle.Width(m.w).Render(keys)
 }
 
@@ -2601,6 +2702,7 @@ func (m tuiModel) viewHelpScreen() string {
 	sb.WriteString(key("t", "New task") + "\n")
 	sb.WriteString(key("c", "New session") + "\n")
 	sb.WriteString(key("E", "Edit selected session / agent / task") + "\n")
+	sb.WriteString(key("P", "Edit role prompt for selected agent's role in $EDITOR") + "\n")
 	sb.WriteString(key("A", "Toggle autopilot (Plane sync)") + "\n\n")
 
 	sb.WriteString(h("VIEWS") + "\n")
@@ -2768,6 +2870,8 @@ func tuiRoleConfig(role string) (string, lipgloss.Color) {
 		return "⚙", colorBlue
 	case "researcher":
 		return "📚", colorPurple
+	case "reviewer":
+		return "🔍", colorOrange
 	default:
 		return "👷", colorDim
 	}
