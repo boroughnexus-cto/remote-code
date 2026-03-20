@@ -1,4 +1,6 @@
 <script lang="ts">
+	import AgentTerminal from './AgentTerminal.svelte';
+
 	interface Agent {
 		id: string;
 		name: string;
@@ -12,6 +14,10 @@
 		project?: string | null;
 		latest_note?: string | null;
 		model_name?: string | null;
+		allowed_tools?: string | null;
+		disallowed_tools?: string | null;
+		context_pct?: number | null;
+		context_state?: string | null;
 	}
 
 	interface Task {
@@ -38,24 +44,34 @@
 	let showConfigForm = $state(false);
 	let repoPathInput = $state(agent.repo_path ?? '');
 	let modelNameInput = $state(agent.model_name ?? '');
+	let allowedToolsInput = $state(agent.allowed_tools ?? '');
+	let disallowedToolsInput = $state(agent.disallowed_tools ?? '');
 	let savingConfig = $state(false);
 	// Local display copies — updated optimistically on save; parent polling will sync later
 	let localRepoPath = $state<string | null>(agent.repo_path ?? null);
 	let localModelName = $state<string | null>(agent.model_name ?? null);
+	let localAllowedTools = $state<string | null>(agent.allowed_tools ?? null);
+	let localDisallowedTools = $state<string | null>(agent.disallowed_tools ?? null);
+
+	let showTerminal = $state(false);
 
 	async function saveConfig() {
 		savingConfig = true;
 		const newPath = repoPathInput.trim() || null;
 		const newModel = modelNameInput.trim() || null;
+		const newAllowed = allowedToolsInput.trim() || null;
+		const newDisallowed = disallowedToolsInput.trim() || null;
 		try {
 			const res = await fetch(`/api/swarm/sessions/${sessionId}/agents/${agent.id}`, {
 				method: 'PATCH',
 				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ repo_path: newPath, model_name: newModel })
+				body: JSON.stringify({ repo_path: newPath, model_name: newModel, allowed_tools: newAllowed, disallowed_tools: newDisallowed })
 			});
 			if (res.ok) {
 				localRepoPath = newPath;
 				localModelName = newModel;
+				localAllowedTools = newAllowed;
+				localDisallowedTools = newDisallowed;
 				showConfigForm = false;
 			}
 		} finally {
@@ -111,9 +127,20 @@
 	let isLive = $derived(!!agent.tmux_session);
 	let canSpawn = $derived(!isLive && !!localRepoPath);
 	let terminalHref = $derived(isLive ? `/terminal/${agent.tmux_session}` : null);
+	let contextPct = $derived(Math.min(1, Math.max(0, agent.context_pct ?? 0)));
+	let contextState = $derived(agent.context_state ?? '');
+	let showContextBar = $derived(isLive && contextPct > 0.5);
 
 	function initials(name: string) {
 		return name.split(' ').map((w) => w[0]).join('').slice(0, 2).toUpperCase();
+	}
+
+	async function sendCompact() {
+		await fetch(`/api/swarm/sessions/${sessionId}/agents/${agent.id}/inject`, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ text: '/compact' })
+		});
 	}
 </script>
 
@@ -155,7 +182,29 @@
 	<!-- Status -->
 	<div class="text-xs font-medium mb-2 {isLive ? 'text-vanna-teal' : 'text-slate-400'}">
 		{statusInfo.label}
+		{#if contextState === 'overflow'}
+			<span class="ml-1 text-red-500 font-semibold">· Context full</span>
+		{:else if contextState === 'critical'}
+			<span class="ml-1 text-orange-500 font-semibold">· Context critical</span>
+		{:else if contextState === 'high'}
+			<span class="ml-1 text-yellow-600">· Context high</span>
+		{/if}
 	</div>
+
+	<!-- Context overflow bar -->
+	{#if showContextBar}
+		{@const pct = Math.round(contextPct * 100)}
+		{@const barColor = contextPct >= 0.95 ? 'bg-red-500' : contextPct >= 0.85 ? 'bg-orange-400' : 'bg-yellow-400'}
+		<div class="mb-2">
+			<div class="flex items-center justify-between mb-0.5">
+				<span class="text-xs text-slate-400">Context</span>
+				<span class="text-xs font-medium {contextPct >= 0.95 ? 'text-red-500' : contextPct >= 0.85 ? 'text-orange-500' : 'text-yellow-600'}">{pct}%</span>
+			</div>
+			<div class="h-1.5 bg-slate-100 rounded-full overflow-hidden">
+				<div class="h-full {barColor} rounded-full transition-all duration-500" style="width:{pct}%"></div>
+			</div>
+		</div>
+	{/if}
 
 	<!-- Latest note -->
 	{#if agent.latest_note}
@@ -191,6 +240,20 @@
 					placeholder="Model (e.g. claude-sonnet-4-5)"
 					class="w-full px-2 py-1 text-xs border border-slate-200 rounded-lg font-mono focus:outline-none focus:ring-1 focus:ring-vanna-teal"
 				/>
+				<input
+					type="text"
+					bind:value={allowedToolsInput}
+					placeholder="Allowed tools (e.g. Read,Write,Bash)"
+					class="w-full px-2 py-1 text-xs border border-slate-200 rounded-lg font-mono focus:outline-none focus:ring-1 focus:ring-vanna-teal"
+					title="Comma-separated tool names to allow. Leave blank for no restriction."
+				/>
+				<input
+					type="text"
+					bind:value={disallowedToolsInput}
+					placeholder="Disallowed tools (e.g. Bash)"
+					class="w-full px-2 py-1 text-xs border border-slate-200 rounded-lg font-mono focus:outline-none focus:ring-1 focus:ring-vanna-teal"
+					title="Comma-separated tool names to disallow. Leave blank for no restriction."
+				/>
 				<div class="flex gap-1">
 					<button
 						type="button"
@@ -202,7 +265,7 @@
 					</button>
 					<button
 						type="button"
-						onclick={() => { showConfigForm = false; repoPathInput = localRepoPath ?? ''; modelNameInput = localModelName ?? ''; }}
+						onclick={() => { showConfigForm = false; repoPathInput = localRepoPath ?? ''; modelNameInput = localModelName ?? ''; allowedToolsInput = localAllowedTools ?? ''; disallowedToolsInput = localDisallowedTools ?? ''; }}
 						class="text-xs px-2 py-1 rounded-lg border border-slate-200 text-slate-400 hover:bg-slate-50 transition-colors"
 					>
 						Cancel
@@ -212,7 +275,7 @@
 		{:else if localRepoPath}
 			<button
 				type="button"
-				onclick={() => { repoPathInput = localRepoPath ?? ''; modelNameInput = localModelName ?? ''; showConfigForm = true; }}
+				onclick={() => { repoPathInput = localRepoPath ?? ''; modelNameInput = localModelName ?? ''; allowedToolsInput = localAllowedTools ?? ''; disallowedToolsInput = localDisallowedTools ?? ''; showConfigForm = true; }}
 				class="text-xs text-slate-300 font-mono truncate mb-2 w-full text-left hover:text-vanna-teal transition-colors"
 				title="Click to configure"
 			>
@@ -221,7 +284,7 @@
 		{:else}
 			<button
 				type="button"
-				onclick={() => { repoPathInput = ''; modelNameInput = localModelName ?? ''; showConfigForm = true; }}
+				onclick={() => { repoPathInput = ''; modelNameInput = localModelName ?? ''; allowedToolsInput = localAllowedTools ?? ''; disallowedToolsInput = localDisallowedTools ?? ''; showConfigForm = true; }}
 				class="flex items-center gap-1 text-xs text-slate-400 italic mb-2 hover:text-vanna-teal transition-colors"
 				title="Configure agent"
 			>
@@ -236,17 +299,30 @@
 	<!-- Action buttons -->
 	<div class="flex items-center gap-1.5 mt-2">
 		{#if isLive}
-			<!-- Terminal link -->
+			<!-- Inline terminal toggle -->
+			<button
+				type="button"
+				aria-label="{showTerminal ? 'Hide terminal' : 'Show inline terminal'}"
+				onclick={() => (showTerminal = !showTerminal)}
+				class="flex items-center justify-center gap-1 px-2 py-1.5 rounded-lg text-xs transition-colors
+					{showTerminal ? 'bg-vanna-teal text-white' : 'bg-vanna-teal/10 text-vanna-teal hover:bg-vanna-teal/20'}"
+				title="{showTerminal ? 'Hide terminal' : 'Show inline terminal'}"
+			>
+				<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/>
+				</svg>
+			</button>
+			<!-- Full terminal link -->
 			{#if terminalHref}
 				<a
 					href={terminalHref}
-					class="flex-1 flex items-center justify-center gap-1 py-1.5 rounded-lg bg-vanna-teal/10 text-vanna-teal text-xs font-medium hover:bg-vanna-teal/20 transition-colors"
-					title="Open terminal"
+					aria-label="Open full terminal"
+					class="flex items-center justify-center gap-1 px-2 py-1.5 rounded-lg bg-vanna-teal/10 text-vanna-teal text-xs font-medium hover:bg-vanna-teal/20 transition-colors"
+					title="Open full terminal"
 				>
 					<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/>
+						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"/>
 					</svg>
-					Terminal
 				</a>
 			{/if}
 			<!-- Despawn -->
@@ -289,6 +365,29 @@
 	{#if agent.project}
 		<div class="mt-2">
 			<span class="text-xs text-slate-400 bg-slate-100 rounded-full px-2 py-0.5">{agent.project}</span>
+		</div>
+	{/if}
+
+	<!-- Context compact button -->
+	{#if showContextBar && contextState !== 'normal'}
+		<div class="mt-2">
+			<button
+				type="button"
+				onclick={sendCompact}
+				class="w-full text-xs py-1 rounded-lg border border-dashed
+					{contextPct >= 0.95 ? 'border-red-300 text-red-500 hover:bg-red-50' : 'border-orange-200 text-orange-500 hover:bg-orange-50'}
+					transition-colors"
+				title="Send /compact to reduce context usage"
+			>
+				Compact context
+			</button>
+		</div>
+	{/if}
+
+	<!-- Inline terminal -->
+	{#if showTerminal && isLive && agent.tmux_session}
+		<div class="mt-3">
+			<AgentTerminal tmuxSession={agent.tmux_session} />
 		</div>
 	{/if}
 

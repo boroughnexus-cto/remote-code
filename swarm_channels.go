@@ -328,10 +328,12 @@ func generateRunToken() (runID, runToken string) {
 // AgentLaunchConfig bundles the parameters needed to build a Claude launch command.
 // Using a struct avoids parameter creep as new options are added (e.g. model selection).
 type AgentLaunchConfig struct {
-	AgentID   string
-	RunID     string
-	RunToken  string
-	ModelName string // optional; empty means use Claude's default
+	AgentID         string
+	RunID           string
+	RunToken        string
+	ModelName       string // optional; empty means use Claude's default
+	AllowedTools    string // comma-separated tool names; empty = no restriction
+	DisallowedTools string // comma-separated tool names; empty = no restriction
 }
 
 // -----------------
@@ -346,6 +348,12 @@ func agentLaunchArgs(cfg AgentLaunchConfig) []string {
 	args := []string{"claude", "--dangerously-skip-permissions"}
 	if cfg.ModelName != "" {
 		args = append(args, "--model", cfg.ModelName)
+	}
+	if cfg.AllowedTools != "" {
+		args = append(args, "--allowedTools", cfg.AllowedTools)
+	}
+	if cfg.DisallowedTools != "" {
+		args = append(args, "--disallowedTools", cfg.DisallowedTools)
 	}
 	switch TransportMode(getEnvOrDefault("SWARMOPS_TRANSPORT", string(TransportTmux))) {
 	case TransportChannels, TransportShadow, TransportCanary:

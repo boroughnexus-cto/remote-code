@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -56,6 +57,8 @@ type SwarmAgent struct {
 	ContextPct    float64 `json:"context_pct"`
 	ContextState  string  `json:"context_state"`
 	ModelName       string  `json:"model_name,omitempty"`
+	AllowedTools    string  `json:"allowed_tools,omitempty"`
+	DisallowedTools string  `json:"disallowed_tools,omitempty"`
 	TokensUsed      int64   `json:"tokens_used,omitempty"`
 	StatusChangedAt int64   `json:"status_changed_at,omitempty"`
 	CreatedAt       int64   `json:"created_at"`
@@ -257,6 +260,22 @@ func isValidModelName(s string) bool {
 	return true
 }
 
+// isValidToolList returns true if s is a safe comma-separated list of Claude tool names.
+// Allows alphanumeric, underscore, hyphen, dot, parens, asterisk, slash, space; max 2048 chars.
+// Examples of valid entries: "Bash", "Bash(*)", "mcp__server__tool", "Read,Write"
+func isValidToolList(s string) bool {
+	if len(s) > 2048 {
+		return false
+	}
+	for _, c := range s {
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+			c == '-' || c == '.' || c == '_' || c == ',' || c == '(' || c == ')' || c == '*' || c == '/' || c == ' ') {
+			return false
+		}
+	}
+	return true
+}
+
 func scanNullString(ns sql.NullString) *string {
 	if !ns.Valid {
 		return nil
@@ -290,7 +309,8 @@ func getSwarmState(ctx context.Context, sessionID string) (*SwarmState, error) {
 		        a.repo_path, a.status, a.current_file, a.current_task_id, a.mission,
 		        COALESCE(a.context_pct,0), COALESCE(a.context_state,'normal'), a.created_at,
 		        (SELECT content FROM swarm_agent_notes WHERE agent_id = a.id ORDER BY created_at DESC LIMIT 1),
-		        COALESCE(a.model_name,''), a.tokens_used, a.status_changed_at
+		        COALESCE(a.model_name,''), COALESCE(a.allowed_tools,''), COALESCE(a.disallowed_tools,''),
+		        a.tokens_used, a.status_changed_at
 		 FROM swarm_agents a WHERE a.session_id = ?
 		 ORDER BY CASE WHEN a.role = 'orchestrator' THEN 0 ELSE 1 END, a.created_at ASC`,
 		sessionID,
@@ -310,7 +330,8 @@ func getSwarmState(ctx context.Context, sessionID string) (*SwarmState, error) {
 			&repoPath, &a.Status,
 			&currentFile, &currentTaskID, &mission,
 			&a.ContextPct, &a.ContextState, &a.CreatedAt, &latestNote,
-			&a.ModelName, &tokensUsed, &statusChangedAt); err != nil {
+			&a.ModelName, &a.AllowedTools, &a.DisallowedTools,
+			&tokensUsed, &statusChangedAt); err != nil {
 			return nil, err
 		}
 		a.WorktreePath = scanNullString(worktreePath)
@@ -727,6 +748,7 @@ func handleSwarmSessionsAPI(w http.ResponseWriter, r *http.Request, ctx context.
 			database.ExecContext(ctx, "DELETE FROM swarm_goals WHERE session_id = ?", sessionID)       //nolint:errcheck
 			// Delete session — FK ON DELETE CASCADE handles swarm_agents and swarm_tasks
 			database.ExecContext(ctx, "DELETE FROM swarm_sessions WHERE id = ?", sessionID) //nolint:errcheck
+			evictSessionLimiters(sessionID)
 			w.WriteHeader(http.StatusNoContent)
 
 		default:
@@ -1176,10 +1198,15 @@ func handleSwarmAgentsAPI(w http.ResponseWriter, r *http.Request, ctx context.Co
 			swarmBroadcaster.schedule(sessionID)
 			w.WriteHeader(http.StatusNoContent)
 		case "inject":
+			if !getInjectLimiter(sessionID).allow() {
+				w.WriteHeader(http.StatusTooManyRequests)
+				json.NewEncoder(w).Encode(map[string]string{"error": "inject rate limit exceeded"})
+				return
+			}
 			var req struct {
 				Text string `json:"text"`
 			}
-			if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Text == "" {
+			if err := json.NewDecoder(io.LimitReader(r.Body, 64*1024)).Decode(&req); err != nil || req.Text == "" {
 				w.WriteHeader(http.StatusBadRequest)
 				json.NewEncoder(w).Encode(map[string]string{"error": "text required"})
 				return
@@ -1255,6 +1282,44 @@ func handleSwarmAgentsAPI(w http.ResponseWriter, r *http.Request, ctx context.Co
 				}
 				database.ExecContext(ctx, "UPDATE swarm_agents SET model_name = ? WHERE id = ? AND session_id = ?", swarmNullStr(s), agentID, sessionID)
 			}
+		}
+		_, hasAllowed := req["allowed_tools"]
+		_, hasDisallowed := req["disallowed_tools"]
+		if hasAllowed || hasDisallowed {
+			allowedVal := req["allowed_tools"]
+			disallowedVal := req["disallowed_tools"]
+			allowedStr, disallowedStr := "", ""
+			if hasAllowed {
+				if allowedVal != nil {
+					s, ok := allowedVal.(string)
+					if !ok || !isValidToolList(s) {
+						w.WriteHeader(http.StatusBadRequest)
+						json.NewEncoder(w).Encode(map[string]string{"error": "invalid allowed_tools"})
+						return
+					}
+					allowedStr = s
+				}
+			}
+			if hasDisallowed {
+				if disallowedVal != nil {
+					s, ok := disallowedVal.(string)
+					if !ok || !isValidToolList(s) {
+						w.WriteHeader(http.StatusBadRequest)
+						json.NewEncoder(w).Encode(map[string]string{"error": "invalid disallowed_tools"})
+						return
+					}
+					disallowedStr = s
+				}
+			}
+			// Read current values for fields not being updated
+			if !hasAllowed {
+				database.QueryRowContext(ctx, "SELECT COALESCE(allowed_tools,'') FROM swarm_agents WHERE id = ?", agentID).Scan(&allowedStr) //nolint:errcheck
+			}
+			if !hasDisallowed {
+				database.QueryRowContext(ctx, "SELECT COALESCE(disallowed_tools,'') FROM swarm_agents WHERE id = ?", agentID).Scan(&disallowedStr) //nolint:errcheck
+			}
+			database.ExecContext(ctx, "UPDATE swarm_agents SET allowed_tools = ?, disallowed_tools = ? WHERE id = ? AND session_id = ?", //nolint:errcheck
+				swarmNullStr(allowedStr), swarmNullStr(disallowedStr), agentID, sessionID)
 		}
 		swarmBroadcaster.schedule(sessionID)
 		w.WriteHeader(http.StatusNoContent)

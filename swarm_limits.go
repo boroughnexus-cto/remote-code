@@ -146,3 +146,133 @@ func checkAllSpawnLimits(ctx context.Context, sessionID string) error {
 	}
 	return nil
 }
+
+// ─── Rate limiting ────────────────────────────────────────────────────────────
+//
+// Two independent per-session token-bucket limiters:
+//   - spawn:  controls how often agents may be spawned.
+//   - inject: controls how often messages may be injected into an agent.
+//
+// Rates are loaded from environment variables:
+//   SWARM_SPAWN_RATE_INTERVAL  – nanoseconds between spawn tokens (default 10s)
+//   SWARM_SPAWN_RATE_BURST     – spawn burst capacity (default 3)
+//   SWARM_INJECT_RATE_INTERVAL – nanoseconds between inject tokens (default 2s)
+//   SWARM_INJECT_RATE_BURST    – inject burst capacity (default 5)
+
+type swarmRateLimiter struct {
+	mu       sync.Mutex
+	tokens   float64
+	maxTokens float64
+	rate     float64   // tokens per nanosecond
+	lastTick time.Time
+}
+
+func newRateLimiter(burst int, intervalNs int64) *swarmRateLimiter {
+	r := &swarmRateLimiter{
+		tokens:    float64(burst),
+		maxTokens: float64(burst),
+		lastTick:  time.Now(),
+	}
+	if intervalNs > 0 {
+		r.rate = 1.0 / float64(intervalNs)
+	}
+	return r
+}
+
+// allow returns true if a token is available, consuming it if so.
+func (r *swarmRateLimiter) allow() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	now := time.Now()
+	elapsed := float64(now.Sub(r.lastTick).Nanoseconds())
+	r.tokens = minFloat64(r.maxTokens, r.tokens+elapsed*r.rate)
+	r.lastTick = now
+	if r.tokens >= 1.0 {
+		r.tokens--
+		return true
+	}
+	return false
+}
+
+func minFloat64(a, b float64) float64 {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+var (
+	rateLimitersMu  sync.RWMutex
+	spawnLimiters   = map[string]*swarmRateLimiter{}
+	injectLimiters  = map[string]*swarmRateLimiter{}
+)
+
+func loadRateLimiterConfig() (spawnIntervalNs, spawnBurst, injectIntervalNs, injectBurst int64) {
+	spawnIntervalNs = int64(10 * time.Second)
+	spawnBurst = 3
+	injectIntervalNs = int64(2 * time.Second)
+	injectBurst = 5
+	if v := os.Getenv("SWARM_SPAWN_RATE_INTERVAL"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			spawnIntervalNs = n
+		}
+	}
+	if v := os.Getenv("SWARM_SPAWN_RATE_BURST"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			spawnBurst = n
+		}
+	}
+	if v := os.Getenv("SWARM_INJECT_RATE_INTERVAL"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			injectIntervalNs = n
+		}
+	}
+	if v := os.Getenv("SWARM_INJECT_RATE_BURST"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			injectBurst = n
+		}
+	}
+	return
+}
+
+func getSpawnLimiter(sessionID string) *swarmRateLimiter {
+	rateLimitersMu.RLock()
+	l := spawnLimiters[sessionID]
+	rateLimitersMu.RUnlock()
+	if l != nil {
+		return l
+	}
+	spawnIntervalNs, spawnBurst, _, _ := loadRateLimiterConfig()
+	rateLimitersMu.Lock()
+	defer rateLimitersMu.Unlock()
+	if l = spawnLimiters[sessionID]; l == nil {
+		l = newRateLimiter(int(spawnBurst), spawnIntervalNs)
+		spawnLimiters[sessionID] = l
+	}
+	return l
+}
+
+func getInjectLimiter(sessionID string) *swarmRateLimiter {
+	rateLimitersMu.RLock()
+	l := injectLimiters[sessionID]
+	rateLimitersMu.RUnlock()
+	if l != nil {
+		return l
+	}
+	_, _, injectIntervalNs, injectBurst := loadRateLimiterConfig()
+	rateLimitersMu.Lock()
+	defer rateLimitersMu.Unlock()
+	if l = injectLimiters[sessionID]; l == nil {
+		l = newRateLimiter(int(injectBurst), injectIntervalNs)
+		injectLimiters[sessionID] = l
+	}
+	return l
+}
+
+// evictSessionLimiters removes rate limiter state for a deleted session.
+func evictSessionLimiters(sessionID string) {
+	rateLimitersMu.Lock()
+	delete(spawnLimiters, sessionID)
+	delete(injectLimiters, sessionID)
+	rateLimitersMu.Unlock()
+}
