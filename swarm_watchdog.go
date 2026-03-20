@@ -48,6 +48,7 @@ type watchdogTask struct {
 	tmuxSession string
 	startedAt   int64
 	heartbeatAt int64 // 0 if no heartbeat yet
+	timeoutAt   int64 // per-task deadline (Unix seconds); 0 = none
 }
 
 func watchdogTick() {
@@ -60,7 +61,8 @@ func watchdogTick() {
 		        COALESCE(t.agent_id,''),
 		        COALESCE(a.tmux_session,''),
 		        COALESCE(t.started_at, t.created_at),
-		        COALESCE(t.last_heartbeat_at, 0)
+		        COALESCE(t.last_heartbeat_at, 0),
+		        COALESCE(t.timeout_at, 0)
 		 FROM swarm_tasks t
 		 LEFT JOIN swarm_agents a ON a.id = t.agent_id
 		 WHERE t.stage IN ('running','accepted')`,
@@ -74,7 +76,7 @@ func watchdogTick() {
 	var tasks []watchdogTask
 	for rows.Next() {
 		var wt watchdogTask
-		rows.Scan(&wt.id, &wt.sessionID, &wt.agentID, &wt.tmuxSession, &wt.startedAt, &wt.heartbeatAt)
+		rows.Scan(&wt.id, &wt.sessionID, &wt.agentID, &wt.tmuxSession, &wt.startedAt, &wt.heartbeatAt, &wt.timeoutAt) //nolint:errcheck
 		tasks = append(tasks, wt)
 	}
 
@@ -120,6 +122,12 @@ func watchdogCheckTaskWithAlive(t watchdogTask, now, heartbeatCutoff, absoluteCu
 			return isTmuxSessionAlive(session) // fallback if listing failed
 		}
 		return alive[session]
+	}
+
+	// Per-task deadline: highest priority — checked before system-wide timeouts.
+	if t.timeoutAt > 0 && t.timeoutAt < now {
+		return fmt.Sprintf("per-task deadline exceeded (deadline was %s ago)",
+			time.Duration(now-t.timeoutAt)*time.Second)
 	}
 
 	if t.startedAt > 0 && t.startedAt < absoluteCutoff {

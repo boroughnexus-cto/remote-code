@@ -328,12 +328,13 @@ func generateRunToken() (runID, runToken string) {
 // AgentLaunchConfig bundles the parameters needed to build a Claude launch command.
 // Using a struct avoids parameter creep as new options are added (e.g. model selection).
 type AgentLaunchConfig struct {
-	AgentID         string
-	RunID           string
-	RunToken        string
-	ModelName       string // optional; empty means use Claude's default
-	AllowedTools    string // comma-separated tool names; empty = no restriction
-	DisallowedTools string // comma-separated tool names; empty = no restriction
+	AgentID                    string
+	RunID                      string
+	RunToken                   string
+	ModelName                  string // optional; empty means use Claude's default
+	AllowedTools               string // comma-separated tool names; empty = no restriction
+	DisallowedTools            string // comma-separated tool names; empty = no restriction
+	DangerouslySkipPermissions bool   // when false, agent runs without --dangerously-skip-permissions
 }
 
 // -----------------
@@ -345,7 +346,10 @@ type AgentLaunchConfig struct {
 // -----------------
 
 func agentLaunchArgs(cfg AgentLaunchConfig) []string {
-	args := []string{"claude", "--dangerously-skip-permissions"}
+	args := []string{"claude"}
+	if cfg.DangerouslySkipPermissions {
+		args = append(args, "--dangerously-skip-permissions")
+	}
 	if cfg.ModelName != "" {
 		args = append(args, "--model", cfg.ModelName)
 	}

@@ -16,6 +16,7 @@
 		model_name?: string | null;
 		allowed_tools?: string | null;
 		disallowed_tools?: string | null;
+		dangerously_skip_permissions?: boolean;
 		context_pct?: number | null;
 		context_state?: string | null;
 	}
@@ -46,12 +47,14 @@
 	let modelNameInput = $state(agent.model_name ?? '');
 	let allowedToolsInput = $state(agent.allowed_tools ?? '');
 	let disallowedToolsInput = $state(agent.disallowed_tools ?? '');
+	let dangerouslySkipInput = $state(agent.dangerously_skip_permissions ?? true);
 	let savingConfig = $state(false);
 	// Local display copies — updated optimistically on save; parent polling will sync later
 	let localRepoPath = $state<string | null>(agent.repo_path ?? null);
 	let localModelName = $state<string | null>(agent.model_name ?? null);
 	let localAllowedTools = $state<string | null>(agent.allowed_tools ?? null);
 	let localDisallowedTools = $state<string | null>(agent.disallowed_tools ?? null);
+	let localDangerouslySkip = $state(agent.dangerously_skip_permissions ?? true);
 
 	let showTerminal = $state(false);
 
@@ -65,13 +68,14 @@
 			const res = await fetch(`/api/swarm/sessions/${sessionId}/agents/${agent.id}`, {
 				method: 'PATCH',
 				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ repo_path: newPath, model_name: newModel, allowed_tools: newAllowed, disallowed_tools: newDisallowed })
+				body: JSON.stringify({ repo_path: newPath, model_name: newModel, allowed_tools: newAllowed, disallowed_tools: newDisallowed, dangerously_skip_permissions: dangerouslySkipInput })
 			});
 			if (res.ok) {
 				localRepoPath = newPath;
 				localModelName = newModel;
 				localAllowedTools = newAllowed;
 				localDisallowedTools = newDisallowed;
+				localDangerouslySkip = dangerouslySkipInput;
 				showConfigForm = false;
 			}
 		} finally {
@@ -254,6 +258,16 @@
 					class="w-full px-2 py-1 text-xs border border-slate-200 rounded-lg font-mono focus:outline-none focus:ring-1 focus:ring-vanna-teal"
 					title="Comma-separated tool names to disallow. Leave blank for no restriction."
 				/>
+				<label class="flex items-center gap-2 px-1 py-0.5 rounded-lg border {dangerouslySkipInput ? 'border-red-200 bg-red-50/50' : 'border-slate-200'} cursor-pointer select-none">
+					<input
+						type="checkbox"
+						bind:checked={dangerouslySkipInput}
+						class="rounded text-red-500 focus:ring-red-300"
+					/>
+					<span class="text-xs {dangerouslySkipInput ? 'text-red-600 font-medium' : 'text-slate-500'}">
+						{dangerouslySkipInput ? '⚠ Skip permission checks' : 'Enforce permission checks'}
+					</span>
+				</label>
 				<div class="flex gap-1">
 					<button
 						type="button"
@@ -265,7 +279,7 @@
 					</button>
 					<button
 						type="button"
-						onclick={() => { showConfigForm = false; repoPathInput = localRepoPath ?? ''; modelNameInput = localModelName ?? ''; allowedToolsInput = localAllowedTools ?? ''; disallowedToolsInput = localDisallowedTools ?? ''; }}
+						onclick={() => { showConfigForm = false; repoPathInput = localRepoPath ?? ''; modelNameInput = localModelName ?? ''; allowedToolsInput = localAllowedTools ?? ''; disallowedToolsInput = localDisallowedTools ?? ''; dangerouslySkipInput = localDangerouslySkip; }}
 						class="text-xs px-2 py-1 rounded-lg border border-slate-200 text-slate-400 hover:bg-slate-50 transition-colors"
 					>
 						Cancel
@@ -275,7 +289,7 @@
 		{:else if localRepoPath}
 			<button
 				type="button"
-				onclick={() => { repoPathInput = localRepoPath ?? ''; modelNameInput = localModelName ?? ''; allowedToolsInput = localAllowedTools ?? ''; disallowedToolsInput = localDisallowedTools ?? ''; showConfigForm = true; }}
+				onclick={() => { repoPathInput = localRepoPath ?? ''; modelNameInput = localModelName ?? ''; allowedToolsInput = localAllowedTools ?? ''; disallowedToolsInput = localDisallowedTools ?? ''; dangerouslySkipInput = localDangerouslySkip; showConfigForm = true; }}
 				class="text-xs text-slate-300 font-mono truncate mb-2 w-full text-left hover:text-vanna-teal transition-colors"
 				title="Click to configure"
 			>
@@ -284,7 +298,7 @@
 		{:else}
 			<button
 				type="button"
-				onclick={() => { repoPathInput = ''; modelNameInput = localModelName ?? ''; allowedToolsInput = localAllowedTools ?? ''; disallowedToolsInput = localDisallowedTools ?? ''; showConfigForm = true; }}
+				onclick={() => { repoPathInput = ''; modelNameInput = localModelName ?? ''; allowedToolsInput = localAllowedTools ?? ''; disallowedToolsInput = localDisallowedTools ?? ''; dangerouslySkipInput = localDangerouslySkip; showConfigForm = true; }}
 				class="flex items-center gap-1 text-xs text-slate-400 italic mb-2 hover:text-vanna-teal transition-colors"
 				title="Configure agent"
 			>

@@ -262,6 +262,46 @@ func planeAutoCloseGoal(ctx context.Context, goalID string) {
 	log.Printf("swarm/plane: closed Plane issue %s for goal %s", planeIssueID[:8], goalID[:8])
 }
 
+// planeAutoCloseTask closes a Plane issue linked to a completed task.
+// Accepts the Plane issue UUID directly — DB idempotency and plane_synced_at
+// updates are handled by the caller (swarm.go done-stage handler).
+// Returns nil on success, non-nil on failure (caller may retry or log).
+func planeAutoCloseTask(ctx context.Context, planeIssueID string) error {
+	cfg, ok := loadPlaneConfig()
+	if !ok {
+		return fmt.Errorf("plane config not set")
+	}
+
+	doneStateID := cfg.doneStateID
+	if doneStateID == "" {
+		doneStateID = planeFetchDoneStateID(ctx, cfg)
+		if doneStateID == "" {
+			return fmt.Errorf("swarm/plane: no done state found for task issue %s", safePrefix(planeIssueID, 8))
+		}
+	}
+
+	path := fmt.Sprintf("/api/v1/workspaces/%s/projects/%s/issues/%s/",
+		cfg.workspace, cfg.projectID, planeIssueID)
+	_, status, err := planeReq(ctx, cfg, "PATCH", path, map[string]string{"state": doneStateID})
+	if err != nil {
+		return fmt.Errorf("swarm/plane: close task issue %s: %w", safePrefix(planeIssueID, 8), err)
+	}
+	if status != 200 && status != 204 {
+		return fmt.Errorf("swarm/plane: close task issue %s: unexpected status %d", safePrefix(planeIssueID, 8), status)
+	}
+
+	log.Printf("swarm/plane: closed Plane issue %s for task", safePrefix(planeIssueID, 8))
+	return nil
+}
+
+// safePrefix returns the first n characters of s, or the full string if shorter.
+func safePrefix(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
+}
+
 // planeSyncSession syncs a single autopilot session: creates goals for any
 // Plane "started" issues in the given project that don't yet have a goal.
 // Uses the shared planeConfig (API URL/key/workspace) with a session-specific project.
