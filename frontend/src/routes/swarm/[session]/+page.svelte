@@ -275,10 +275,8 @@
 		}
 	}
 
-	// Derived: live orchestrator agent (if any)
-	let liveOrchestrator = $derived(
-		agents.find((a) => a.role === 'orchestrator' && !!a.tmux_session) ?? null
-	);
+	// Derived: live workers (any agent with an active tmux session)
+	let liveWorkers = $derived(agents.filter((a) => !!a.tmux_session));
 
 	// Derived: agents that can be resumed (have repo_path but no active session)
 	let resumableCount = $derived(
@@ -299,11 +297,13 @@
 		}
 	}
 
-	async function sendToOrchestrator(text: string) {
-		const res = await fetch(`/api/swarm/sessions/${sessionId}/orchestrator/message`, {
+	async function sendToWorkers(text: string, agentId?: string) {
+		const body: Record<string, unknown> = { text };
+		if (agentId) body.agent_id = agentId;
+		const res = await fetch(`/api/swarm/sessions/${sessionId}/message`, {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({ text })
+			body: JSON.stringify(body)
 		});
 		if (!res.ok) {
 			const e = await res.json().catch(() => ({ error: 'send failed' }));
@@ -484,14 +484,14 @@
 		</div>
 	{/if}
 
-	<!-- Orchestrator panel (shown when a live orchestrator exists) -->
-	{#if liveOrchestrator}
+	<!-- Message panel (shown when any live workers exist) -->
+	{#if liveWorkers.length > 0}
 		<div class="mb-6">
-			<h2 class="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">Orchestrator</h2>
+			<h2 class="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">Workers</h2>
 			<OrchestratorPanel
 				{sessionId}
-				orchestrator={liveOrchestrator}
-				onMessage={sendToOrchestrator}
+				agents={agents}
+				onMessage={sendToWorkers}
 			/>
 		</div>
 	{/if}

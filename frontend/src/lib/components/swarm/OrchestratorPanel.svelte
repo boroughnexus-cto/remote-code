@@ -11,29 +11,19 @@
 
 	interface Props {
 		sessionId: string;
-		orchestrator: Agent;
-		onMessage: (text: string) => Promise<void>;
+		agents: Agent[];
+		onMessage: (text: string, agentId?: string) => Promise<void>;
 	}
 
-	let { sessionId, orchestrator, onMessage }: Props = $props();
+	let { sessionId, agents, onMessage }: Props = $props();
 
 	let inputText = $state('');
+	let targetAgentId = $state('');  // '' = broadcast to all
 	let sending = $state(false);
 	let lastError = $state('');
 	let autoSend = $state(false);
 
-	const terminalHref = $derived(
-		orchestrator.tmux_session ? `/terminal/${orchestrator.tmux_session}` : null
-	);
-
-	const statusColors: Record<string, string> = {
-		idle: 'text-slate-400',
-		thinking: 'text-blue-500',
-		coding: 'text-vanna-teal',
-		waiting: 'text-orange-500',
-		stuck: 'text-red-500',
-		done: 'text-green-500'
-	};
+	const liveAgents = $derived(agents.filter((a) => !!a.tmux_session));
 
 	async function send() {
 		const text = inputText.trim();
@@ -41,7 +31,7 @@
 		sending = true;
 		lastError = '';
 		try {
-			await onMessage(text);
+			await onMessage(text, targetAgentId || undefined);
 			inputText = '';
 		} catch (e: any) {
 			lastError = e?.message ?? 'Failed to send';
@@ -59,11 +49,9 @@
 
 	function handleTranscript(text: string) {
 		if (autoSend) {
-			// Auto-send: fire directly without review
 			inputText = text;
 			send();
 		} else {
-			// Manual: fill textarea so user can review/edit before sending
 			inputText = text;
 		}
 	}
@@ -75,13 +63,13 @@
 		<div class="flex items-center gap-3">
 			<div class="w-9 h-9 rounded-xl bg-vanna-magenta/20 flex items-center justify-center">
 				<svg class="w-5 h-5 text-vanna-magenta" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
+					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
 				</svg>
 			</div>
 			<div>
-				<p class="font-semibold text-sm text-vanna-navy">{orchestrator.name}</p>
-				<p class="text-xs {statusColors[orchestrator.status] ?? 'text-slate-400'}">
-					{orchestrator.status} · Orchestrator
+				<p class="font-semibold text-sm text-vanna-navy">Message Workers</p>
+				<p class="text-xs text-slate-400">
+					{liveAgents.length} live agent{liveAgents.length !== 1 ? 's' : ''}
 				</p>
 			</div>
 		</div>
@@ -101,21 +89,23 @@
 				</svg>
 				Auto
 			</button>
-			<span class="w-2 h-2 rounded-full bg-vanna-magenta animate-pulse"></span>
-			<span class="text-xs text-vanna-magenta font-medium">Live</span>
-			{#if terminalHref}
-				<a
-					href={terminalHref}
-					class="flex items-center gap-1 text-xs px-2.5 py-1.5 rounded-lg bg-vanna-magenta/10 text-vanna-magenta hover:bg-vanna-magenta/20 transition-colors font-medium"
-				>
-					<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/>
-					</svg>
-					View terminal
-				</a>
-			{/if}
 		</div>
 	</div>
+
+	<!-- Target selector (shown when >1 live agent) -->
+	{#if liveAgents.length > 1}
+		<div class="mb-3">
+			<select
+				bind:value={targetAgentId}
+				class="w-full text-xs px-3 py-1.5 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-vanna-magenta/40 text-slate-600 bg-white"
+			>
+				<option value="">All live agents (broadcast)</option>
+				{#each liveAgents as agent}
+					<option value={agent.id}>{agent.name} ({agent.role})</option>
+				{/each}
+			</select>
+		</div>
+	{/if}
 
 	<!-- Input area -->
 	<div class="flex gap-2 items-end">
@@ -128,7 +118,9 @@
 			<textarea
 				bind:value={inputText}
 				onkeydown={handleKeydown}
-				placeholder="Tell the orchestrator what you need… (Enter to send, Shift+Enter for newline)"
+				placeholder={targetAgentId
+					? `Message ${liveAgents.find((a) => a.id === targetAgentId)?.name ?? 'agent'}… (Enter to send)`
+					: 'Broadcast to all workers… (Enter to send, Shift+Enter for newline)'}
 				rows={2}
 				class="w-full px-3 py-2.5 text-sm border border-slate-200 rounded-xl resize-none focus:outline-none focus:ring-2 focus:ring-vanna-magenta/40 focus:border-vanna-magenta transition-all placeholder:text-slate-300"
 				disabled={sending}
@@ -160,6 +152,6 @@
 	{/if}
 
 	<p class="text-xs text-slate-300 mt-2">
-		{autoSend ? '⚡ Auto-send active — voice goes straight to the orchestrator.' : 'Mic fills the box for review. Toggle ⚡ Auto to send instantly.'}
+		{autoSend ? '⚡ Auto-send active — voice goes straight to workers.' : 'Mic fills the box for review. Toggle ⚡ Auto to send instantly.'}
 	</p>
 </div>

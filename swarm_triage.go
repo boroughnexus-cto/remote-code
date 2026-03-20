@@ -278,32 +278,31 @@ func triageTick(ctx context.Context, cfg triageConfig) {
 // If no eligible session is found, returns an error (caller should record findings only).
 func triageTargetSession(ctx context.Context, cfg triageConfig) (string, error) {
 	if cfg.sessionID != "" {
-		// Validate configured session has a live orchestrator
+		// Validate configured session exists and has at least one live agent
 		var id string
 		err := database.QueryRowContext(ctx,
 			`SELECT s.id FROM swarm_sessions s
 			 JOIN swarm_agents a ON a.session_id = s.id
-			 WHERE s.id=? AND a.role='orchestrator' AND a.tmux_session IS NOT NULL
+			 WHERE s.id=? AND a.tmux_session IS NOT NULL
 			 LIMIT 1`,
 			cfg.sessionID,
 		).Scan(&id)
 		if err != nil {
-			return "", fmt.Errorf("configured session %s has no live orchestrator: %w", cfg.sessionID[:min(8, len(cfg.sessionID))], err)
+			return "", fmt.Errorf("configured session %s has no live agents: %w", cfg.sessionID[:min(8, len(cfg.sessionID))], err)
 		}
 		return id, nil
 	}
 
-	// Auto-detect: sessions explicitly opted in via triage_enabled=1
+	// Auto-detect: sessions explicitly opted in via triage_enabled=1 with any live agent
 	var id string
 	err := database.QueryRowContext(ctx,
 		`SELECT s.id FROM swarm_sessions s
 		 JOIN swarm_agents a ON a.session_id = s.id
-		 WHERE s.triage_enabled=1
-		   AND a.role='orchestrator' AND a.tmux_session IS NOT NULL AND a.status='working'
+		 WHERE s.triage_enabled=1 AND a.tmux_session IS NOT NULL
 		 ORDER BY a.last_event_ts DESC LIMIT 1`,
 	).Scan(&id)
 	if err != nil {
-		return "", fmt.Errorf("no session with triage_enabled=1 and a live orchestrator")
+		return "", fmt.Errorf("no session with triage_enabled=1 and a live agent")
 	}
 	return id, nil
 }
@@ -398,7 +397,7 @@ func createTriageGoal(ctx context.Context, sessionID, title, detail string) (str
 		Status: "active", CreatedAt: now, UpdatedAt: now,
 	}
 	writeSwarmEvent(ctx, sessionID, "", "", "goal_created", truncate(title, 80))
-	go injectGoalToSiBot(context.Background(), sessionID, goal)
+	go kickOffGoalSpecTask(context.Background(), sessionID, goal)
 	swarmBroadcaster.schedule(sessionID)
 	return id, nil
 }

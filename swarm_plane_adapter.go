@@ -211,7 +211,7 @@ func planeSyncStartedIssues(ctx context.Context, cfg *planeConfig) {
 
 		// Trigger Talos phases + orchestrator injection
 		goal := SwarmGoal{ID: id, SessionID: cfg.sessionID, Description: desc, Status: "active"}
-		go injectGoalToSiBot(context.Background(), cfg.sessionID, goal)
+		go kickOffGoalSpecTask(context.Background(), cfg.sessionID, goal)
 
 		log.Printf("swarm/plane: created goal %s for Plane issue %s", id[:8], issue.ID[:8])
 	}

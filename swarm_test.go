@@ -134,20 +134,20 @@ func TestSwarmSession_Create(t *testing.T) {
 	}
 }
 
-func TestSwarmSession_Create_AutoSpawnsSiBot(t *testing.T) {
+func TestSwarmSession_Create_NoSiBotSpawned(t *testing.T) {
 	setupSwarmDB(t)
 
 	sessionID := createSwarmSession(t, "sibot-test")
 
-	// Verify SiBot orchestrator was auto-created
+	// SiBot is no longer auto-created; orchestration is server-side.
 	var count int
 	database.QueryRowContext(context.Background(),
 		"SELECT COUNT(*) FROM swarm_agents WHERE session_id=? AND role='orchestrator' AND name='SiBot'",
 		sessionID,
 	).Scan(&count)
 
-	if count != 1 {
-		t.Errorf("expected 1 SiBot orchestrator, got %d", count)
+	if count != 0 {
+		t.Errorf("expected 0 SiBot orchestrators, got %d", count)
 	}
 }
 
@@ -885,11 +885,11 @@ func TestSession_Template_Blank(t *testing.T) {
 	var sess struct{ ID string `json:"id"` }
 	json.Unmarshal(w.Body.Bytes(), &sess)
 
-	// Only SiBot should exist
+	// No template agents for blank — session starts empty
 	var count int
 	database.QueryRow("SELECT COUNT(*) FROM swarm_agents WHERE session_id=?", sess.ID).Scan(&count)
-	if count != 1 {
-		t.Errorf("blank template: expected 1 agent (SiBot), got %d", count)
+	if count != 0 {
+		t.Errorf("blank template: expected 0 agents, got %d", count)
 	}
 }
 
@@ -903,11 +903,11 @@ func TestSession_Template_Dev(t *testing.T) {
 	var sess struct{ ID string `json:"id"` }
 	json.Unmarshal(w.Body.Bytes(), &sess)
 
-	// SiBot + Dev-1 + QA-1 = 3 agents
+	// Dev-1 + QA-1 = 2 agents (no SiBot since orchestrator is now server-side)
 	var count int
 	database.QueryRow("SELECT COUNT(*) FROM swarm_agents WHERE session_id=?", sess.ID).Scan(&count)
-	if count != 3 {
-		t.Errorf("dev template: expected 3 agents, got %d", count)
+	if count != 2 {
+		t.Errorf("dev template: expected 2 agents, got %d", count)
 	}
 	var roles []string
 	rows, _ := database.Query("SELECT role FROM swarm_agents WHERE session_id=? ORDER BY created_at", sess.ID)
@@ -917,7 +917,7 @@ func TestSession_Template_Dev(t *testing.T) {
 		rows.Scan(&r)
 		roles = append(roles, r)
 	}
-	if len(roles) < 3 || roles[0] != "orchestrator" {
+	if len(roles) != 2 {
 		t.Errorf("dev template: unexpected roles: %v", roles)
 	}
 }
@@ -932,18 +932,18 @@ func TestSession_Template_Fullstack(t *testing.T) {
 	var sess struct{ ID string `json:"id"` }
 	json.Unmarshal(w.Body.Bytes(), &sess)
 
-	// SiBot + Frontend + Backend + QA-1 = 4 agents
+	// Frontend + Backend + QA-1 = 3 agents (no SiBot)
 	var count int
 	database.QueryRow("SELECT COUNT(*) FROM swarm_agents WHERE session_id=?", sess.ID).Scan(&count)
-	if count != 4 {
-		t.Errorf("fullstack template: expected 4 agents, got %d", count)
+	if count != 3 {
+		t.Errorf("fullstack template: expected 3 agents, got %d", count)
 	}
 }
 
 func TestSession_Template_Unknown(t *testing.T) {
 	setupSwarmDB(t)
 
-	// Unknown template should be silently ignored — only SiBot created
+	// Unknown template should be silently ignored — session starts empty
 	w := swarmReq(t, "POST", "/api/swarm/sessions", map[string]string{"name": "bogus-session", "template": "bogus"})
 	if w.Code != http.StatusCreated {
 		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
@@ -953,8 +953,8 @@ func TestSession_Template_Unknown(t *testing.T) {
 
 	var count int
 	database.QueryRow("SELECT COUNT(*) FROM swarm_agents WHERE session_id=?", sess.ID).Scan(&count)
-	if count != 1 {
-		t.Errorf("unknown template: expected 1 agent (SiBot), got %d", count)
+	if count != 0 {
+		t.Errorf("unknown template: expected 0 agents, got %d", count)
 	}
 }
 

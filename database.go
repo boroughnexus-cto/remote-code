@@ -21,12 +21,12 @@ func initDatabase() (*sql.DB, *db.Queries) {
 
 func initTestDatabase() (*sql.DB, *db.Queries, string) {
 	// Use a unique filename for each test run to avoid conflicts.
-	testDbPath := fmt.Sprintf("swarmops-test-%d.db", time.Now().UnixNano())
+	// Bake WAL mode + busy_timeout into the DSN so they apply to every connection
+	// in the pool, not just the one that happens to run PRAGMA after open.
+	// This prevents SQLITE_BUSY when background goroutines (broadcaster timers,
+	// kickOffGoalSpecTask) write concurrently with test assertions.
+	testDbPath := fmt.Sprintf("swarmops-test-%d.db?_pragma=journal_mode%%3DWAL&_pragma=busy_timeout%%3D5000", time.Now().UnixNano())
 	db, queries, path := initDatabaseWithPathAndReturn(testDbPath)
-	// WAL mode + busy_timeout prevents SQLITE_BUSY from background goroutines
-	// (broadcaster timers, goal injection goroutines) running concurrently with tests.
-	db.Exec("PRAGMA journal_mode=WAL")
-	db.Exec("PRAGMA busy_timeout=5000")
 	return db, queries, path
 }
 

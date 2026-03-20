@@ -687,15 +687,6 @@ func handleSwarmSessionsAPI(w http.ResponseWriter, r *http.Request, ctx context.
 				json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 				return
 			}
-			sibotID := generateSwarmID()
-			sibotMission := "Orchestrate and coordinate the swarm to achieve the user's goals"
-			if _, err := tx.ExecContext(ctx,
-				"INSERT INTO swarm_agents (id, session_id, name, role, mission, status, created_at) VALUES (?, ?, 'SiBot', 'orchestrator', ?, 'idle', ?)",
-				sibotID, id, sibotMission, now); err != nil {
-				w.WriteHeader(http.StatusInternalServerError)
-				json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
-				return
-			}
 			// Optionally seed template agents (unknown/empty template = blank).
 			type tmplAgent struct{ name, role, mission string }
 			sessionTemplates := map[string][]tmplAgent{
@@ -792,11 +783,13 @@ func handleSwarmSessionsAPI(w http.ResponseWriter, r *http.Request, ctx context.
 					despawnSwarmAgent(ctx, sessionID, aid) //nolint:errcheck
 				}
 			}
-			// Delete tables without FK to swarm_sessions (application-level cascade)
+			// Delete tables without FK to swarm_sessions (application-level cascade).
+			// Tasks must be deleted before goals to avoid FK violations on goal_id.
 			database.ExecContext(ctx, "DELETE FROM swarm_agent_notes WHERE session_id = ?", sessionID) //nolint:errcheck
 			database.ExecContext(ctx, "DELETE FROM swarm_events WHERE session_id = ?", sessionID)      //nolint:errcheck
+			database.ExecContext(ctx, "DELETE FROM swarm_tasks WHERE session_id = ?", sessionID)       //nolint:errcheck
 			database.ExecContext(ctx, "DELETE FROM swarm_goals WHERE session_id = ?", sessionID)       //nolint:errcheck
-			// Delete session — FK ON DELETE CASCADE handles swarm_agents and swarm_tasks
+			// Delete session — FK ON DELETE CASCADE handles swarm_agents
 			database.ExecContext(ctx, "DELETE FROM swarm_sessions WHERE id = ?", sessionID) //nolint:errcheck
 			evictSessionLimiters(sessionID)
 			w.WriteHeader(http.StatusNoContent)
@@ -829,8 +822,12 @@ func handleSwarmSessionsAPI(w http.ResponseWriter, r *http.Request, ctx context.
 		handleSwarmTriageAPI(w, r, ctx, sessionID, subPath[1:])
 	case "escalations":
 		handleSwarmEscalationsAPI(w, r, ctx, sessionID, subPath[1:])
+	case "message":
+		handleSwarmMessageAPI(w, r, ctx, sessionID)
 	case "orchestrator":
-		handleSwarmOrchestratorAPI(w, r, ctx, sessionID, subPath[1:])
+		// Backward-compat alias: old clients POST to /orchestrator/message.
+		// Route to the new message handler with broadcast semantics.
+		handleSwarmMessageAPI(w, r, ctx, sessionID)
 	case "resume":
 		handleSwarmResumeAPI(w, r, ctx, sessionID)
 	case "autopilot":
@@ -893,40 +890,109 @@ func handleSwarmResumeAPI(w http.ResponseWriter, r *http.Request, ctx context.Co
 	})
 }
 
-// handleSwarmOrchestratorAPI handles POST /sessions/:id/orchestrator/message
-// It finds the live orchestrator agent and injects the message into its tmux session.
-func handleSwarmOrchestratorAPI(w http.ResponseWriter, r *http.Request, ctx context.Context, sessionID string, pathParts []string) {
-	if len(pathParts) == 0 || pathParts[0] != "message" || r.Method != http.MethodPost {
-		w.WriteHeader(http.StatusNotFound)
+// handleSwarmMessageAPI handles POST /sessions/:id/message (and the legacy
+// /sessions/:id/orchestrator alias). Injects a text message to one or more
+// live agents in the session.
+//
+// Request body:
+//
+//	{"text": "...", "agent_id": "..."}   — direct to a specific agent
+//	{"text": "...", "goal_id": "..."}    — to agents working on tasks in this goal
+//	{"text": "...", "broadcast": true}   — all live non-orchestrator agents
+//	{"text": "..."}                      — same as broadcast (default)
+func handleSwarmMessageAPI(w http.ResponseWriter, r *http.Request, ctx context.Context, sessionID string) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
 	var req struct {
-		Text string `json:"text"`
+		Text      string `json:"text"`
+		AgentID   string `json:"agent_id"`
+		GoalID    string `json:"goal_id"`
+		Broadcast bool   `json:"broadcast"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Text == "" {
+	if err := json.NewDecoder(io.LimitReader(r.Body, 64*1024)).Decode(&req); err != nil || req.Text == "" {
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]string{"error": "text required"})
 		return
 	}
 
-	// Find the live orchestrator agent for this session
-	var agentID string
-	err := database.QueryRowContext(ctx,
-		"SELECT id FROM swarm_agents WHERE session_id = ? AND role = 'orchestrator' AND tmux_session IS NOT NULL LIMIT 1",
-		sessionID,
-	).Scan(&agentID)
-	if err != nil {
-		w.WriteHeader(http.StatusConflict)
-		json.NewEncoder(w).Encode(map[string]string{"error": "no live orchestrator agent in this session — spawn one first"})
-		return
+	var targets []string
+
+	switch {
+	case req.AgentID != "":
+		// Direct: verify agent is in this session
+		var id string
+		if err := database.QueryRowContext(ctx,
+			"SELECT id FROM swarm_agents WHERE id=? AND session_id=? AND tmux_session IS NOT NULL",
+			req.AgentID, sessionID,
+		).Scan(&id); err != nil {
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]string{"error": "agent not found or not live"})
+			return
+		}
+		targets = []string{id}
+
+	case req.GoalID != "":
+		// Route to agents with an active task in this goal
+		rows, err := database.QueryContext(ctx,
+			`SELECT DISTINCT a.id FROM swarm_agents a
+			 JOIN swarm_tasks t ON t.agent_id = a.id
+			 WHERE a.session_id=? AND t.goal_id=?
+			   AND t.stage IN ('assigned','accepted','running')
+			   AND a.tmux_session IS NOT NULL`,
+			sessionID, req.GoalID,
+		)
+		if err == nil {
+			for rows.Next() {
+				var id string
+				rows.Scan(&id) //nolint:errcheck
+				targets = append(targets, id)
+			}
+			rows.Close()
+		}
+		if len(targets) == 0 {
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]string{"error": "no agents actively working on this goal"})
+			return
+		}
+
+	default:
+		// Broadcast to all live agents (excludes orchestrator role for compat — but
+		// if someone manually created an orchestrator, include it too since it's all
+		// workers now).
+		rows, err := database.QueryContext(ctx,
+			"SELECT id FROM swarm_agents WHERE session_id=? AND tmux_session IS NOT NULL ORDER BY created_at ASC",
+			sessionID,
+		)
+		if err == nil {
+			for rows.Next() {
+				var id string
+				rows.Scan(&id) //nolint:errcheck
+				targets = append(targets, id)
+			}
+			rows.Close()
+		}
+		if len(targets) == 0 {
+			w.WriteHeader(http.StatusConflict)
+			json.NewEncoder(w).Encode(map[string]string{"error": "no live agents in this session"})
+			return
+		}
 	}
 
-	if err := injectToSwarmAgent(ctx, agentID, req.Text); err != nil {
+	var injErr error
+	for _, agentID := range targets {
+		if err := injectToSwarmAgent(ctx, agentID, req.Text); err != nil {
+			injErr = err
+		} else {
+			writeSwarmEvent(ctx, sessionID, agentID, "", "orchestrator_message", req.Text)
+		}
+	}
+	if injErr != nil {
 		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		json.NewEncoder(w).Encode(map[string]string{"error": injErr.Error()})
 		return
 	}
-	writeSwarmEvent(ctx, sessionID, agentID, "", "orchestrator_message", req.Text)
 	w.WriteHeader(http.StatusNoContent)
 }
 
