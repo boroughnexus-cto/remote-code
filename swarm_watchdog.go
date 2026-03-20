@@ -253,7 +253,4 @@ func timeoutTask(ctx context.Context, t watchdogTask, reason string) {
 	writeSwarmEvent(ctx, t.sessionID, t.agentID, t.id, "task_timed_out", reason)
 	swarmBroadcaster.schedule(t.sessionID)
 	log.Printf("swarm/watchdog: timed out task=%s reason=%q", shortID(t.id), reason)
-
-	// Brief the orchestrator so it can reassign
-	go briefSiBotImmediate(t.sessionID)
 }

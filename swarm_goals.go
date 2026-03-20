@@ -585,7 +585,6 @@ func reconcileGoal(ctx context.Context, sessionID, goalID string) {
 			writeSwarmEvent(ctx, sessionID, "", "", "goal_complete", goalID[:8])
 			swarmBroadcaster.schedule(sessionID)
 			log.Printf("swarm: goal %s complete — all %d tasks terminal", goalID[:8], total)
-			go briefSiBotImmediate(sessionID)
 			go planeAutoCloseGoal(context.Background(), goalID)
 			go maybeWriteObsidianNote(context.Background(), sessionID, goalID)
 		}

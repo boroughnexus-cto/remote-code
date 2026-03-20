@@ -40,8 +40,6 @@ func writeAgentCLAUDE(workDir, sessionID, agentID, role, mission, prompt string)
 	spawnType := "worktree"
 	if strings.Contains(workDir, "/.swarmops/agents/") {
 		spawnType = "scratch (no git)"
-	} else if strings.Contains(workDir, "/.swarmops/sibot/") {
-		spawnType = "sibot (orchestrator scratch)"
 	}
 
 	var sb strings.Builder
@@ -189,10 +187,6 @@ func spawnSwarmAgent(ctx context.Context, sessionID, agentID string) error {
 		return fmt.Errorf("spawn rate limit exceeded — wait a moment before spawning another agent")
 	}
 
-	// Orchestrators get SiBot spawn; any other agent without a repo gets a scratch workdir.
-	if repoPath == "" && agentRole == "orchestrator" {
-		return spawnSiBotAgent(ctx, sessionID, agentID)
-	}
 	if repoPath == "" {
 		return spawnScratchAgent(ctx, sessionID, agentID)
 	}
@@ -280,12 +274,7 @@ func spawnSwarmAgent(ctx context.Context, sessionID, agentID string) error {
 		log.Printf("swarm: warning — could not write CLAUDE.md: %v", err)
 	}
 
-	// For orchestrator role: also write the full API reference doc.
-	if agentRole == "orchestrator" {
-		if err := writeOrchestratorContext(worktreePath, sessionID); err != nil {
-			log.Printf("swarm: warning — could not write orchestrator context: %v", err)
-		}
-	} else if worktreeExists {
+	if worktreeExists {
 		// Re-spawned worker: write resume context alongside CLAUDE.md.
 		if err := writeResumeContext(ctx, agentID, sessionID, worktreePath); err != nil {
 			log.Printf("swarm: warning — could not write resume context: %v", err)
@@ -307,14 +296,10 @@ func spawnSwarmAgent(ctx context.Context, sessionID, agentID string) error {
 	// Wait for Claude to be ready, then send a targeted orientation inject.
 	go func() {
 		waitForClaudeReady(tmuxName, 60*time.Second)
-		switch {
-		case agentRole == "orchestrator":
-			injectToSwarmAgent(context.Background(), agentID,
-				"Please read CLAUDE.md and SWARM_CONTEXT.md to understand your role and the API. Then confirm you are ready and give a brief state summary.")
-		case worktreeExists:
+		if worktreeExists {
 			injectToSwarmAgent(context.Background(), agentID,
 				"Welcome back. Your role context is in CLAUDE.md. Read RESUME_CONTEXT.md for what you were working on, then continue where you left off.")
-		default:
+		} else {
 			// New worktree agent — auto-dispatch any queued tasks.
 			autoDispatchQueuedTasks(context.Background(), sessionID)
 		}
@@ -859,337 +844,6 @@ func spawnScratchAgent(ctx context.Context, sessionID, agentID string) error {
 	return err
 }
 
-// -----------------
-// SiBot (orchestrator without worktree)
-// -----------------
-
-func spawnSiBotAgent(ctx context.Context, sessionID, agentID string) error {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return fmt.Errorf("could not determine home dir: %v", err)
-	}
-	workDir := filepath.Join(homeDir, ".swarmops", "sibot", agentID)
-	if err := os.MkdirAll(workDir, 0755); err != nil {
-		return fmt.Errorf("mkdir sibot workdir: %v", err)
-	}
-
-	tmuxName := swarmTmuxName(agentID)
-	log.Printf("swarm: spawning SiBot %s — tmux=%s workdir=%s", agentID[:8], tmuxName, workDir)
-
-	var agentModelName, agentAllowedTools, agentDisallowedTools string
-	var agentDangerouslySkipSibot int
-	database.QueryRowContext(ctx, "SELECT COALESCE(model_name,''), COALESCE(allowed_tools,''), COALESCE(disallowed_tools,''), COALESCE(dangerously_skip_permissions,1) FROM swarm_agents WHERE id = ?", agentID).Scan(&agentModelName, &agentAllowedTools, &agentDisallowedTools, &agentDangerouslySkipSibot) //nolint:errcheck
-
-	// Write role prompt as CLAUDE.md so Claude auto-reads it, then the API reference doc.
-	rolePrompt, promptVersion := loadRolePrompt(ctx, "orchestrator")
-	if err := writeAgentCLAUDE(workDir, sessionID, agentID, "orchestrator", "", rolePrompt); err != nil {
-		log.Printf("swarm: warning — could not write CLAUDE.md for SiBot: %v", err)
-	}
-	if err := writeOrchestratorContext(workDir, sessionID); err != nil {
-		log.Printf("swarm: warning — could not write SiBot API context: %v", err)
-	}
-
-	// Init blackboard + agent IPC dirs
-	if err := initBlackboard(sessionID); err != nil {
-		log.Printf("swarm: warning — initBlackboard: %v", err)
-	}
-	if _, _, err := initAgentDirs(sessionID, agentID); err != nil {
-		log.Printf("swarm: warning — initAgentDirs: %v", err)
-	}
-
-	// Start tmux session
-	if out, err := exec.Command("tmux", "new-session", "-d", "-s", tmuxName, "-c", workDir).CombinedOutput(); err != nil {
-		return fmt.Errorf("tmux new-session: %v: %s", err, out)
-	}
-
-	exec.Command("tmux", "setenv", "-t", tmuxName, "SWARM_AGENT_ID", agentID).Run()   //nolint:errcheck
-	exec.Command("tmux", "setenv", "-t", tmuxName, "SWARM_SESSION_ID", sessionID).Run() //nolint:errcheck
-
-	if err := writeAgentClaudeSettings(workDir); err != nil {
-		log.Printf("swarm: warning — could not write .claude/settings.json for SiBot: %v", err)
-	}
-
-	// Create per-run token and record the run.
-	runID, runToken := generateRunToken()
-	recordAgentRun(ctx, agentID, runID, runToken)
-	if ct := getChannelsTransport(); ct != nil {
-		ct.CreateQueue(agentID, runID)
-	}
-
-	if out, err := exec.Command("tmux", "send-keys", "-t", tmuxName, agentLaunchCmd(AgentLaunchConfig{AgentID: agentID, RunID: runID, RunToken: runToken, ModelName: agentModelName, AllowedTools: agentAllowedTools, DisallowedTools: agentDisallowedTools, DangerouslySkipPermissions: agentDangerouslySkipSibot != 0}), "Enter").CombinedOutput(); err != nil {
-		log.Printf("swarm: warning — could not send claude command: %v: %s", err, out)
-	}
-
-	go func() {
-		waitForClaudeReady(tmuxName, 60*time.Second)
-		injectToSwarmAgent(context.Background(), agentID,
-			"Please read CLAUDE.md (your role) and SWARM_CONTEXT.md (API reference) in this directory. Then confirm you are ready and give a brief summary of the current swarm state.")
-	}()
-
-	_, err = database.ExecContext(ctx,
-		"UPDATE swarm_agents SET worktree_path = ?, tmux_session = ?, status = 'thinking', role_prompt_version = ? WHERE id = ?",
-		workDir, tmuxName, promptVersion, agentID,
-	)
-	if err == nil {
-		writeSwarmEvent(ctx, sessionID, agentID, "", "agent_spawned", tmuxName)
-	}
-	return err
-}
-
-// -----------------
-// SiBot heartbeat
-// -----------------
-
-func startSiBotHeartbeat() {
-	go func() {
-		ticker := time.NewTicker(5 * time.Minute)
-		defer ticker.Stop()
-		for range ticker.C {
-			runSiBotHeartbeat()
-		}
-	}()
-}
-
-func runSiBotHeartbeat() {
-	ctx := context.Background()
-
-	// Find all active SiBot / orchestrator agents
-	rows, err := database.QueryContext(ctx,
-		`SELECT a.id, a.session_id, a.tmux_session
-		 FROM swarm_agents a
-		 WHERE a.role = 'orchestrator'
-		   AND a.tmux_session IS NOT NULL
-		   AND a.status NOT IN ('idle','done')`,
-	)
-	if err != nil {
-		return
-	}
-	defer rows.Close()
-
-	type sibotRow struct{ id, sessionID, tmuxSession string }
-	var sibots []sibotRow
-	for rows.Next() {
-		var s sibotRow
-		rows.Scan(&s.id, &s.sessionID, &s.tmuxSession)
-		sibots = append(sibots, s)
-	}
-
-	for _, sibot := range sibots {
-		if !isTmuxSessionAlive(sibot.tmuxSession) {
-			continue
-		}
-		briefing := buildSiBotBriefing(ctx, sibot.sessionID)
-		if err := injectToSwarmAgent(ctx, sibot.id, briefing); err != nil {
-			log.Printf("swarm: heartbeat inject failed for SiBot %s: %v", sibot.id[:8], err)
-		}
-	}
-}
-
-func buildSiBotBriefing(ctx context.Context, sessionID string) string {
-	now := time.Now().Format("2006-01-02 15:04:05")
-
-	// Collect all non-orchestrator agents
-	agentRows, err := database.QueryContext(ctx,
-		`SELECT a.id, a.name, a.role, a.status, COALESCE(a.mission,'')
-		 FROM swarm_agents a
-		 WHERE a.session_id = ? AND a.role != 'orchestrator'
-		 ORDER BY a.created_at ASC`,
-		sessionID,
-	)
-	if err != nil {
-		return fmt.Sprintf("## Heartbeat %s\n\nCould not read agent state: %v", now, err)
-	}
-	defer agentRows.Close()
-
-	type agentInfo struct {
-		id, name, role, status, mission string
-	}
-	var agents []agentInfo
-	for agentRows.Next() {
-		var a agentInfo
-		agentRows.Scan(&a.id, &a.name, &a.role, &a.status, &a.mission) //nolint:errcheck
-		agents = append(agents, a)
-	}
-
-	// Collect recent tasks
-	taskRows, err := database.QueryContext(ctx,
-		`SELECT t.title, t.stage, COALESCE(a.name,'unassigned')
-		 FROM swarm_tasks t
-		 LEFT JOIN swarm_agents a ON a.id = t.agent_id
-		 WHERE t.session_id = ? AND t.stage != 'done'
-		 ORDER BY t.updated_at DESC LIMIT 10`,
-		sessionID,
-	)
-	type taskInfo struct{ title, stage, agentName string }
-	var tasks []taskInfo
-	if err == nil {
-		defer taskRows.Close()
-		for taskRows.Next() {
-			var t taskInfo
-			taskRows.Scan(&t.title, &t.stage, &t.agentName) //nolint:errcheck
-			tasks = append(tasks, t)
-		}
-	}
-
-	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("## Heartbeat — %s\n\n", now))
-	sb.WriteString("This is your periodic swarm status briefing. Review and take action.\n\n")
-
-	sb.WriteString("### Agent Status\n\n")
-	if len(agents) == 0 {
-		sb.WriteString("No worker agents in this session.\n\n")
-	} else {
-		for _, a := range agents {
-			statusIcon := "●"
-			switch a.status {
-			case "coding":
-				statusIcon = "⚡"
-			case "thinking":
-				statusIcon = "💭"
-			case "stuck":
-				statusIcon = "🚨"
-			case "waiting":
-				statusIcon = "⏳"
-			case "idle":
-				statusIcon = "○"
-			}
-			sb.WriteString(fmt.Sprintf("- %s **%s** (%s) — %s\n", statusIcon, a.name, a.role, a.status))
-			if a.mission != "" {
-				sb.WriteString(fmt.Sprintf("  Mission: %s\n", a.mission))
-			}
-		}
-		sb.WriteString("\n")
-	}
-
-	sb.WriteString("### Active Tasks\n\n")
-	if len(tasks) == 0 {
-		sb.WriteString("No active tasks.\n\n")
-	} else {
-		for _, t := range tasks {
-			sb.WriteString(fmt.Sprintf("- [%s] **%s** → %s\n", t.stage, t.title, t.agentName))
-		}
-		sb.WriteString("\n")
-	}
-
-	sb.WriteString("### Your Action\n\n")
-	sb.WriteString("1. GET /api/swarm/sessions/" + sessionID + " for full state\n")
-	sb.WriteString("2. Identify any stuck/idle agents that need direction\n")
-	sb.WriteString("3. Inject briefs, update task stages, create new tasks as needed\n")
-	sb.WriteString("4. Reply with a brief summary of actions taken\n")
-
-	return sb.String()
-}
-
-// -----------------
-// Orchestrator context
-// -----------------
-
-func writeOrchestratorContext(worktreePath, sessionID string) error {
-	apiBase := swarmAPIBase()
-
-	content := fmt.Sprintf(`# SiBot — Swarm Orchestrator
-
-You are **SiBot**, the orchestrator for this AI agent swarm. You run as a Claude Code instance
-with full tool access. Your peers are other Claude Code instances, each in their own tmux session,
-working on tasks you assign them.
-
-The server runs on localhost — no auth token needed for API calls.
-
-## Session
-
-- Session ID: %s
-- API base: %s
-
----
-
-## API Reference
-
-### Read swarm state
-`+"`GET %s/api/swarm/sessions/%s`"+`
-Returns: agents (id, name, role, status, mission, tmux_session, current_task_id, latest_note), tasks, events.
-
-### Create task
-`+"`POST %s/api/swarm/sessions/%s/tasks`"+`
-Body: `+"`{\"title\":\"...\",\"description\":\"...\",\"stage\":\"spec\",\"project\":\"...\"}`"+`
-Stages: spec → implement → test → deploy → done
-
-### Update task (stage or assignment)
-`+"`PATCH %s/api/swarm/sessions/%s/tasks/{taskID}`"+`
-Body: `+"`{\"stage\":\"implement\"}`"+` or `+"`{\"agent_id\":\"...\"}`"+`
-
-### Inject instruction into agent's Claude Code terminal
-`+"`POST %s/api/swarm/sessions/%s/agents/{agentID}/inject`"+`
-Body: `+"`{\"text\":\"Your detailed brief here\"}`"+`
-This sends the text directly into their Claude Code session — they will read and act on it.
-
----
-
-## Your Operating Pattern
-
-Each time you receive a heartbeat or user message, follow this cycle:
-
-1. **GET** the session state — see who is online, what they're working on, what's stuck
-2. **Decide** what needs doing — new tasks, reassignments, unblocking stuck agents
-3. **Act** — inject briefs to agents, update task stages, create new tasks
-4. **Report** — brief summary of what you've done and what to watch
-
-## Injecting to Agents
-
-When you inject a brief to a Claude Code agent, be specific and self-contained:
-- What task they should work on
-- Which files/directories to look at
-- What success looks like (tests pass, endpoint returns X, etc.)
-- Any constraints (don't break Y, use pattern Z)
-
-Agents won't remember previous conversations — each inject is a fresh prompt.
-
-## Agent Roles
-
-- `+"`orchestrator`"+` — You (SiBot). Coordinates. Does not write code directly.
-- `+"`senior-dev`"+` — Implements features, refactors, code reviews
-- `+"`qa-agent`"+` — Writes tests, runs test suites, reports failures
-- `+"`devops-agent`"+` — CI/CD, Docker, deployments, infrastructure
-- `+"`researcher`"+` — Specs, investigation, documentation
-- `+"`worker`"+` — General purpose
-
-## HITL / Escalation
-
-The system sends Telegram notifications when agents go stuck or waiting.
-You will also receive a heartbeat every few minutes with the current state.
-If an agent needs human decision-making, inject a message telling them to wait and note the blocker.
-
-## Style
-
-- Action-oriented: do first, explain briefly after
-- When you've injected to agents, list who got what brief
-- Keep task board current — move stages as work progresses
-`,
-		sessionID, apiBase,
-		apiBase, sessionID,
-		apiBase, sessionID,
-		apiBase, sessionID,
-		apiBase, sessionID,
-	)
-
-	filePath := filepath.Join(worktreePath, "SWARM_CONTEXT.md")
-	if err := os.WriteFile(filePath, []byte(content), 0644); err != nil {
-		return err
-	}
-
-	// Append SWARM_CONTEXT.md to .gitignore to prevent accidental token commit.
-	// Only add if not already present to avoid duplicates on re-spawn.
-	gitignorePath := filepath.Join(worktreePath, ".gitignore")
-	existing, _ := os.ReadFile(gitignorePath)
-	if !strings.Contains(string(existing), "SWARM_CONTEXT.md") {
-		f, err := os.OpenFile(gitignorePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-		if err == nil {
-			fmt.Fprintln(f, "\n# Swarm orchestrator context (contains API token)")
-			fmt.Fprintln(f, "SWARM_CONTEXT.md")
-			f.Close()
-		}
-	}
-	return nil
-}
 
 // -----------------
 // Hook script

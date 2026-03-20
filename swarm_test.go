@@ -549,26 +549,15 @@ func TestGoal_Reconciliation_AutoComplete(t *testing.T) {
 	goalID := createSwarmGoal(t, sessionID, "reconcile me")
 
 	ctx := context.Background()
-	now := time.Now().Unix()
 
-	// Create two tasks under this goal
-	taskIDs := make([]string, 2)
-	for i := 0; i < 2; i++ {
-		id := generateSwarmID()
-		database.ExecContext(ctx,
-			"INSERT INTO swarm_tasks (id,session_id,title,stage,goal_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?)",
-			id, sessionID, fmt.Sprintf("sub-task %d", i), "queued", goalID, now, now,
-		)
-		taskIDs[i] = id
-	}
-
-	// Mark both tasks complete
-	for _, id := range taskIDs {
-		database.ExecContext(ctx,
-			"UPDATE swarm_tasks SET stage='complete', updated_at=? WHERE id=?",
-			time.Now().Unix(), id,
-		)
-	}
+	// kickOffGoalSpecTask runs in a background goroutine and creates phase tasks.
+	// Give it a moment, then mark ALL tasks for this goal complete so
+	// reconcileGoal sees no active tasks.
+	time.Sleep(200 * time.Millisecond)
+	database.ExecContext(ctx,
+		"UPDATE swarm_tasks SET stage='complete', updated_at=? WHERE goal_id=?",
+		time.Now().Unix(), goalID,
+	)
 
 	// Run reconciler
 	reconcileGoal(ctx, sessionID, goalID)

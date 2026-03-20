@@ -436,7 +436,6 @@ func emergencyRotateAgent(ctx context.Context, sessionID, agentID, capturedTmux 
 
 	writeSwarmEvent(ctx, sessionID, agentID, taskID, "agent_emergency_rotated", "context limit exceeded")
 	swarmBroadcaster.schedule(sessionID)
-	go briefSiBotImmediate(sessionID)
 }
 
 // ─── Inbox writer ─────────────────────────────────────────────────────────────

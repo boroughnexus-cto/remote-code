@@ -228,9 +228,6 @@ func CompleteTask(ctx context.Context, sessionID, agentID, taskID string, h IPCH
 		writeEscalation(sessionID, agentID, taskID, fmt.Sprintf("Open questions: %v", h.OpenQuestions))
 	}
 
-	// Immediately brief SiBot so it can react
-	go briefSiBotImmediate(sessionID)
-
 	// Trigger goal reconciliation
 	go reconcileGoalsForTask(context.Background(), sessionID, taskID)
 	// Fire broadcast
@@ -256,7 +253,6 @@ func BlockTask(ctx context.Context, sessionID, agentID, taskID, reason string) e
 				}
 			}()
 		}
-		go briefSiBotImmediate(sessionID)
 	}
 	return err
 }
@@ -278,39 +274,3 @@ func writeEscalation(sessionID, agentID, taskID, reason string) {
 	log.Printf("swarm: escalation written: %s", path)
 }
 
-// ─── SiBot immediate briefing ─────────────────────────────────────────────────
-
-// sibotDebouncer coalesces rapid briefSiBotImmediate calls (e.g. task_complete
-// + watchdog + IPC all firing within seconds) into a single inject per session.
-var sibotDebouncer = &broadcastDebouncer{
-	pending: make(map[string]*time.Timer),
-}
-
-// briefSiBotImmediate schedules a SiBot briefing with debouncing so that a
-// burst of simultaneous events (handoff + watchdog + block) produces one inject.
-func briefSiBotImmediate(sessionID string) {
-	sibotDebouncer.scheduleWithDelay(sessionID, 5*time.Second, func() {
-		doBriefSiBotImmediate(sessionID)
-	})
-}
-
-func doBriefSiBotImmediate(sessionID string) {
-	ctx := context.Background()
-	var agentID, tmuxSession string
-	err := database.QueryRowContext(ctx,
-		`SELECT id, COALESCE(tmux_session,'') FROM swarm_agents
-		 WHERE session_id=? AND role='orchestrator' AND tmux_session IS NOT NULL
-		 LIMIT 1`,
-		sessionID,
-	).Scan(&agentID, &tmuxSession)
-	if err != nil || tmuxSession == "" {
-		return
-	}
-	if !isTmuxSessionAlive(tmuxSession) {
-		return
-	}
-	briefing := buildSiBotBriefing(ctx, sessionID)
-	if err := injectToSwarmAgent(ctx, agentID, "## Immediate Update\n\n"+briefing); err != nil {
-		log.Printf("swarm: briefSiBotImmediate inject failed: %v", err)
-	}
-}

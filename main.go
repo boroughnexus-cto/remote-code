@@ -78,7 +78,6 @@ func main() {
 
 	// Start swarm agent status monitor
 	startSwarmMonitor()
-	startSiBotHeartbeat()
 	startIPCPoller()
 	startTaskWatchdog()
 	startOrphanSweeper()
