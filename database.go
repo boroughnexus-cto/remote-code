@@ -160,6 +160,9 @@ func applyMigrations(database *sql.DB) error {
 		"db/migrations/029_event_log.sql",
 		"db/migrations/030_role_prompts.sql",
 		"db/migrations/031_fix_tasks_fk.sql",
+		"db/migrations/032_status_timestamps.sql",
+		"db/migrations/033_agent_runs.sql",
+		"db/migrations/034_agent_escalations.sql",
 	}
 
 	for _, migrationPath := range migrations {

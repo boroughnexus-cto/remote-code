@@ -55,9 +55,10 @@ type SwarmAgent struct {
 	Mission       *string `json:"mission"`
 	ContextPct    float64 `json:"context_pct"`
 	ContextState  string  `json:"context_state"`
-	ModelName     string  `json:"model_name,omitempty"`
-	TokensUsed    int64   `json:"tokens_used,omitempty"`
-	CreatedAt     int64   `json:"created_at"`
+	ModelName       string  `json:"model_name,omitempty"`
+	TokensUsed      int64   `json:"tokens_used,omitempty"`
+	StatusChangedAt int64   `json:"status_changed_at,omitempty"`
+	CreatedAt       int64   `json:"created_at"`
 }
 
 type SwarmTask struct {
@@ -79,6 +80,7 @@ type SwarmTask struct {
 	PhaseOrder    *int64   `json:"phase_order,omitempty"`
 	CIStatus      *string  `json:"ci_status,omitempty"`
 	CIRunUrl      *string  `json:"ci_run_url,omitempty"`
+	StageChangedAt int64   `json:"stage_changed_at,omitempty"`
 	CreatedAt     int64    `json:"created_at"`
 	UpdatedAt     int64    `json:"updated_at"`
 }
@@ -273,7 +275,7 @@ func getSwarmState(ctx context.Context, sessionID string) (*SwarmState, error) {
 		        a.repo_path, a.status, a.current_file, a.current_task_id, a.mission,
 		        COALESCE(a.context_pct,0), COALESCE(a.context_state,'normal'), a.created_at,
 		        (SELECT content FROM swarm_agent_notes WHERE agent_id = a.id ORDER BY created_at DESC LIMIT 1),
-		        COALESCE(a.model_name,''), a.tokens_used
+		        COALESCE(a.model_name,''), a.tokens_used, a.status_changed_at
 		 FROM swarm_agents a WHERE a.session_id = ?
 		 ORDER BY CASE WHEN a.role = 'orchestrator' THEN 0 ELSE 1 END, a.created_at ASC`,
 		sessionID,
@@ -287,13 +289,13 @@ func getSwarmState(ctx context.Context, sessionID string) (*SwarmState, error) {
 	for agentRows.Next() {
 		var a SwarmAgent
 		var worktreePath, tmuxSession, project, repoPath, currentFile, currentTaskID, mission, latestNote sql.NullString
-		var tokensUsed sql.NullInt64
+		var tokensUsed, statusChangedAt sql.NullInt64
 		if err := agentRows.Scan(&a.ID, &a.SessionID, &a.Name, &a.Role,
 			&worktreePath, &tmuxSession, &project,
 			&repoPath, &a.Status,
 			&currentFile, &currentTaskID, &mission,
 			&a.ContextPct, &a.ContextState, &a.CreatedAt, &latestNote,
-			&a.ModelName, &tokensUsed); err != nil {
+			&a.ModelName, &tokensUsed, &statusChangedAt); err != nil {
 			return nil, err
 		}
 		a.WorktreePath = scanNullString(worktreePath)
@@ -307,6 +309,9 @@ func getSwarmState(ctx context.Context, sessionID string) (*SwarmState, error) {
 		if tokensUsed.Valid {
 			a.TokensUsed = tokensUsed.Int64
 		}
+		if statusChangedAt.Valid {
+			a.StatusChangedAt = statusChangedAt.Int64
+		}
 		agents = append(agents, a)
 	}
 
@@ -314,7 +319,7 @@ func getSwarmState(ctx context.Context, sessionID string) (*SwarmState, error) {
 		`SELECT id, session_id, title, description, stage, agent_id, project,
 		        branch, worktree_path, pr_url, goal_id, confidence, tokens_used, blocked_reason,
 		        phase, phase_order, ci_status, ci_run_url,
-		        created_at, updated_at
+		        created_at, updated_at, stage_changed_at
 		 FROM swarm_tasks WHERE session_id = ?
 		 ORDER BY COALESCE(phase_order, 9999), created_at ASC`,
 		sessionID,
@@ -330,12 +335,12 @@ func getSwarmState(ctx context.Context, sessionID string) (*SwarmState, error) {
 		var description, agentID, project, branch, worktreePath, prUrl, goalID, blockedReason sql.NullString
 		var phase, ciStatus, ciRunUrl sql.NullString
 		var confidence sql.NullFloat64
-		var tokensUsed, phaseOrder sql.NullInt64
+		var tokensUsed, phaseOrder, stageChangedAt sql.NullInt64
 		if err := taskRows.Scan(&t.ID, &t.SessionID, &t.Title, &description,
 			&t.Stage, &agentID, &project, &branch, &worktreePath, &prUrl,
 			&goalID, &confidence, &tokensUsed, &blockedReason,
 			&phase, &phaseOrder, &ciStatus, &ciRunUrl,
-			&t.CreatedAt, &t.UpdatedAt); err != nil {
+			&t.CreatedAt, &t.UpdatedAt, &stageChangedAt); err != nil {
 			return nil, err
 		}
 		t.Description = scanNullString(description)
@@ -357,6 +362,9 @@ func getSwarmState(ctx context.Context, sessionID string) (*SwarmState, error) {
 		}
 		if phaseOrder.Valid {
 			t.PhaseOrder = &phaseOrder.Int64
+		}
+		if stageChangedAt.Valid {
+			t.StageChangedAt = stageChangedAt.Int64
 		}
 		tasks = append(tasks, t)
 	}
@@ -568,7 +576,8 @@ func handleSwarmSessionsAPI(w http.ResponseWriter, r *http.Request, ctx context.
 
 		case http.MethodPost:
 			var req struct {
-				Name string `json:"name"`
+				Name     string `json:"name"`
+				Template string `json:"template"` // optional: blank/dev/research/fullstack/devops
 			}
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
 				w.WriteHeader(http.StatusBadRequest)
@@ -577,8 +586,7 @@ func handleSwarmSessionsAPI(w http.ResponseWriter, r *http.Request, ctx context.
 			}
 			id := generateSwarmID()
 			now := time.Now().Unix()
-			// Wrap session + SiBot creation in a transaction so we never have a
-			// session without its orchestrator agent.
+			// Wrap session + SiBot + template agents in a transaction.
 			tx, err := database.BeginTx(ctx, nil)
 			if err != nil {
 				w.WriteHeader(http.StatusInternalServerError)
@@ -601,6 +609,37 @@ func handleSwarmSessionsAPI(w http.ResponseWriter, r *http.Request, ctx context.
 				w.WriteHeader(http.StatusInternalServerError)
 				json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 				return
+			}
+			// Optionally seed template agents (unknown/empty template = blank).
+			type tmplAgent struct{ name, role, mission string }
+			sessionTemplates := map[string][]tmplAgent{
+				"dev": {
+					{"Dev-1", "senior-dev", "Implement features and fix bugs"},
+					{"QA-1", "qa-agent", "Write and run tests, review code quality"},
+				},
+				"research": {
+					{"Researcher", "researcher", "Gather and synthesise information"},
+					{"Writer", "worker", "Write reports and summaries"},
+				},
+				"fullstack": {
+					{"Frontend", "senior-dev", "Build and maintain the frontend"},
+					{"Backend", "senior-dev", "Build and maintain the backend"},
+					{"QA-1", "qa-agent", "Test both layers"},
+				},
+				"devops": {
+					{"DevOps", "devops-agent", "CI/CD, infra, and deployments"},
+					{"Dev-1", "senior-dev", "Feature development"},
+				},
+			}
+			for _, ta := range sessionTemplates[req.Template] {
+				aid := generateSwarmID()
+				if _, err := tx.ExecContext(ctx,
+					"INSERT INTO swarm_agents (id, session_id, name, role, mission, status, created_at) VALUES (?, ?, ?, ?, ?, 'idle', ?)",
+					aid, id, ta.name, ta.role, ta.mission, now); err != nil {
+					w.WriteHeader(http.StatusInternalServerError)
+					json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+					return
+				}
 			}
 			if err := tx.Commit(); err != nil {
 				w.WriteHeader(http.StatusInternalServerError)
@@ -687,10 +726,14 @@ func handleSwarmSessionsAPI(w http.ResponseWriter, r *http.Request, ctx context.
 	case "tasks":
 		handleSwarmTasksAPI(w, r, ctx, sessionID, subPath[1:])
 	case "goals":
-		// Route: /goals, /goals/:gid/budget
-		if len(subPath) >= 3 && subPath[2] == "budget" {
+		// subPath is derived from strings.Split which never produces empty segments
+		// for clean URLs, so subPath[1] != "" reliably identifies a single-goal route.
+		switch {
+		case len(subPath) >= 3 && subPath[1] != "" && subPath[2] == "budget":
 			handleSwarmGoalBudgetAPI(w, r, ctx, sessionID, subPath[1])
-		} else {
+		case len(subPath) >= 2 && subPath[1] != "":
+			handleSwarmGoalAPI(w, r, ctx, sessionID, subPath[1])
+		default:
 			handleSwarmGoalsAPI(w, r, ctx, sessionID)
 		}
 	case "triage":
@@ -959,11 +1002,21 @@ func handleSwarmPlaneIssuesAPI(w http.ResponseWriter, r *http.Request, ctx conte
 		}
 	}
 
-	items, err := planeFetchWorkQueueItems(ctx, projectID, groups)
-	if err != nil {
-		w.WriteHeader(http.StatusBadGateway)
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
-		return
+	// Serve from background cache when available (populated by startPlaneAdapter).
+	// Fall back to a live fetch only if the cache hasn't been primed yet.
+	key := cacheKey(projectID, groups)
+	items, cached := globalPlaneCache.get(key)
+	if !cached {
+		var err error
+		items, err = planeFetchWorkQueueItems(ctx, projectID, groups)
+		if err != nil {
+			w.WriteHeader(http.StatusBadGateway)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+		if items != nil {
+			globalPlaneCache.set(key, items)
+		}
 	}
 	if items == nil {
 		items = []WorkQueueItem{}
@@ -1021,10 +1074,43 @@ func handleSwarmAgentsAPI(w http.ResponseWriter, r *http.Request, ctx context.Co
 	agentID := pathParts[0]
 	subPath := pathParts[1:]
 
-	// Sub-actions: spawn / despawn / inject / terminal
+	// Sub-actions: spawn / despawn / inject / terminal / git
 	if len(subPath) > 0 {
 		if subPath[0] == "terminal" {
 			handleSwarmTerminalAPI(w, r, ctx, sessionID, agentID)
+			return
+		}
+		if subPath[0] == "git" {
+			handleSwarmAgentGitAPI(w, r, ctx, sessionID, agentID)
+			return
+		}
+		// GET notes is allowed without the POST-only guard below.
+		if subPath[0] == "note" && r.Method == http.MethodGet {
+			type agentNoteResp struct {
+				ID        int64  `json:"id"`
+				Content   string `json:"content"`
+				CreatedBy string `json:"created_by"`
+				CreatedAt int64  `json:"created_at"`
+			}
+			noteRows, err := database.QueryContext(ctx,
+				`SELECT id, content, created_by, created_at
+				 FROM swarm_agent_notes
+				 WHERE agent_id = ? AND session_id = ?
+				 ORDER BY created_at DESC LIMIT 50`,
+				agentID, sessionID)
+			if err != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+				json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+				return
+			}
+			defer noteRows.Close()
+			notes := []agentNoteResp{}
+			for noteRows.Next() {
+				var n agentNoteResp
+				noteRows.Scan(&n.ID, &n.Content, &n.CreatedBy, &n.CreatedAt) //nolint:errcheck
+				notes = append(notes, n)
+			}
+			json.NewEncoder(w).Encode(notes)
 			return
 		}
 		if r.Method != http.MethodPost {
@@ -1033,10 +1119,6 @@ func handleSwarmAgentsAPI(w http.ResponseWriter, r *http.Request, ctx context.Co
 		}
 		switch subPath[0] {
 		case "note":
-			if r.Method != http.MethodPost {
-				w.WriteHeader(http.StatusMethodNotAllowed)
-				return
-			}
 			var req struct {
 				Content   string `json:"content"`
 				CreatedBy string `json:"created_by"`
@@ -1109,9 +1191,7 @@ func handleSwarmAgentsAPI(w http.ResponseWriter, r *http.Request, ctx context.Co
 			return
 		}
 		if status, ok := req["status"].(string); ok {
-			database.ExecContext(ctx,
-				"UPDATE swarm_agents SET status = ? WHERE id = ? AND session_id = ?",
-				status, agentID, sessionID)
+			setAgentStatus(ctx, agentID, status)
 		}
 		if f, ok := req["current_file"].(string); ok {
 			database.ExecContext(ctx,
@@ -1246,8 +1326,8 @@ func handleSwarmTasksAPI(w http.ResponseWriter, r *http.Request, ctx context.Con
 		now := time.Now().Unix()
 		if stage, ok := req["stage"].(string); ok {
 			database.ExecContext(ctx,
-				"UPDATE swarm_tasks SET stage = ?, updated_at = ? WHERE id = ? AND session_id = ?",
-				stage, now, taskID, sessionID)
+				"UPDATE swarm_tasks SET stage = ?, updated_at = ?, stage_changed_at = ? WHERE id = ? AND session_id = ?",
+				stage, now, now, taskID, sessionID)
 			writeSwarmEvent(ctx, sessionID, "", taskID, "task_moved", stage)
 			// Auto-create PR when task moves to deploy
 			if stage == "deploy" {
@@ -1256,6 +1336,13 @@ func handleSwarmTasksAPI(w http.ResponseWriter, r *http.Request, ctx context.Con
 			// Auto-dispatch if moved back to queued (e.g. blocked recovery)
 			if stage == "queued" {
 				go autoDispatchQueuedTasks(context.Background(), sessionID)
+			}
+			// Local + Telegram notification when task completes
+			if stage == "done" {
+				var taskTitle, sessionName string
+				database.QueryRowContext(ctx, "SELECT title FROM swarm_tasks WHERE id = ?", taskID).Scan(&taskTitle)           //nolint:errcheck
+				database.QueryRowContext(ctx, "SELECT name FROM swarm_sessions WHERE id = ?", sessionID).Scan(&sessionName) //nolint:errcheck
+				notifyTaskDone(sessionName, taskTitle, taskID)
 			}
 		}
 		if agentID, ok := req["agent_id"].(string); ok {

@@ -54,10 +54,21 @@ func main() {
 		RunSwarmTUI()
 		return
 	}
+	// CLI subcommands: status / task / inject
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "status", "task", "inject":
+			runCLI(os.Args[1:])
+			return
+		}
+	}
 
 	// Initialize database
 	database, queries = initDatabase()
 	defer database.Close()
+
+	// Initialize agent transport (tmux for now; channels in Phase 3)
+	swarmTransport = initTransport()
 
 	// Ensure the Claude Code Stop hook script is written to disk
 	ensureSwarmHookScript()
@@ -80,6 +91,14 @@ func main() {
 	http.HandleFunc("/ws", authMiddleware(handleWebSocket))
 	http.HandleFunc("/ws/swarm", authMiddleware(handleSwarmWebSocket))
 	http.HandleFunc("/api/", handleAPIWithAuth)
+
+	// Channels SSE endpoint: Claude Code connects here when launched with --channels.
+	// Auth is enforced inside ServeSSE via run_token; active only when a
+	// ChannelsTransport is reachable through swarmTransport.
+	if ct := getChannelsTransport(); ct != nil {
+		http.HandleFunc("GET /mcp/channels/{agentID}/{runID}", ct.ServeSSE)
+		log.Printf("transport: channels SSE endpoint registered at /mcp/channels/{agentID}/{runID}")
+	}
 
 	port := os.Getenv("PORT")
 	if port == "" {

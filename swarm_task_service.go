@@ -11,6 +11,17 @@ import (
 	"time"
 )
 
+// ─── Status/stage helpers ─────────────────────────────────────────────────────
+
+// setAgentStatus updates an agent's status and records the timestamp.
+// Used wherever agent status changes to keep status_changed_at in sync.
+func setAgentStatus(ctx context.Context, agentID, status string) {
+	now := time.Now().Unix()
+	database.ExecContext(ctx, //nolint:errcheck
+		"UPDATE swarm_agents SET status = ?, status_changed_at = ? WHERE id = ?",
+		status, now, agentID)
+}
+
 // ─── Valid state transitions ──────────────────────────────────────────────────
 
 var validTransitions = map[string][]string{
@@ -53,9 +64,10 @@ func transitionTask(ctx context.Context, taskID, newStage string) error {
 	if !isValidTransition(cur, newStage) {
 		return fmt.Errorf("invalid transition %s→%s for task %s", cur, newStage, taskID[:8])
 	}
+	now := time.Now().Unix()
 	_, err = database.ExecContext(ctx,
-		"UPDATE swarm_tasks SET stage=?, updated_at=? WHERE id=?",
-		newStage, time.Now().Unix(), taskID,
+		"UPDATE swarm_tasks SET stage=?, updated_at=?, stage_changed_at=? WHERE id=?",
+		newStage, now, now, taskID,
 	)
 	return err
 }

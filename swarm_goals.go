@@ -82,6 +82,59 @@ func handleSwarmGoalsAPI(w http.ResponseWriter, r *http.Request, ctx context.Con
 	}
 }
 
+// handleSwarmGoalAPI handles single-goal operations:
+//
+//	PATCH /api/swarm/sessions/:id/goals/:gid
+func handleSwarmGoalAPI(w http.ResponseWriter, r *http.Request, ctx context.Context, sessionID, goalID string) {
+	w.Header().Set("Content-Type", "application/json")
+	switch r.Method {
+	case http.MethodPatch:
+		var req struct {
+			Status string `json:"status"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "invalid body"})
+			return
+		}
+		// Only allow operator-initiated transitions; complete is server-driven via reconcileGoal.
+		allowed := map[string]bool{"cancelled": true, "active": true}
+		if !allowed[req.Status] {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "status must be 'cancelled' or 'active'"})
+			return
+		}
+		now := time.Now().Unix()
+		res, err := database.ExecContext(ctx,
+			"UPDATE swarm_goals SET status=?, updated_at=? WHERE id=? AND session_id=?",
+			req.Status, now, goalID, sessionID,
+		)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+		affected, _ := res.RowsAffected()
+		if affected == 0 {
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]string{"error": "goal not found"})
+			return
+		}
+		// Safe truncation for event payload — goal IDs are UUIDs (36 chars) but guard defensively.
+		shortID := goalID
+		if len(shortID) > 8 {
+			shortID = shortID[:8]
+		}
+		writeSwarmEvent(ctx, sessionID, "", "", "goal_status_changed",
+			fmt.Sprintf("%s → %s", shortID, req.Status))
+		swarmBroadcaster.schedule(sessionID)
+		w.WriteHeader(http.StatusNoContent)
+
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
 func listGoals(ctx context.Context, sessionID string) []SwarmGoal {
 	rows, err := database.QueryContext(ctx,
 		`SELECT id, session_id, description, status,

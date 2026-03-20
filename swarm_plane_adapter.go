@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -29,6 +30,39 @@ import (
 //   PLANE_DONE_STATE_ID    UUID of the "Done" state; auto-detected if absent
 
 const planePollInterval = 60 * time.Second
+
+// ─── Work queue cache ──────────────────────────────────────────────────────────
+//
+// A background goroutine refreshes Plane work queue items for all configured
+// projects every planePollInterval. The TUI work queue panel reads from this
+// cache, so the W key is instant and never blocks on the Plane API.
+
+type planeWorkQueueCache struct {
+	mu    sync.RWMutex
+	items map[string][]WorkQueueItem // key: "projectID:stateGroup,stateGroup2,..."
+}
+
+var globalPlaneCache = &planeWorkQueueCache{
+	items: make(map[string][]WorkQueueItem),
+}
+
+func (c *planeWorkQueueCache) set(key string, items []WorkQueueItem) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.items[key] = items
+}
+
+func (c *planeWorkQueueCache) get(key string) ([]WorkQueueItem, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	v, ok := c.items[key]
+	return v, ok
+}
+
+// cacheKey returns the cache map key for a project + state groups combination.
+func cacheKey(projectID string, groups []string) string {
+	return projectID + ":" + strings.Join(groups, ",")
+}
 
 type planeConfig struct {
 	apiURL      string
@@ -253,6 +287,7 @@ func planeSyncSession(ctx context.Context, projectID, sessionID string) {
 
 // startPlaneAdapter is the background poller goroutine.
 // It syncs the env-var-configured session AND any DB autopilot sessions.
+// Runs immediately at startup, then every planePollInterval.
 func startPlaneAdapter(ctx context.Context) {
 	baseCfg, envOK := loadPlaneConfig()
 	if envOK {
@@ -266,6 +301,17 @@ func startPlaneAdapter(ctx context.Context) {
 		log.Printf("swarm/plane: env-var session not configured; will poll DB autopilot sessions only")
 	}
 
+	poll := func() {
+		if envOK {
+			planeSyncStartedIssues(ctx, baseCfg)
+		}
+		syncAllAutopilotSessions(ctx, baseCfg)
+		refreshWorkQueueCache(ctx, baseCfg)
+	}
+
+	// Run immediately at startup so issues are available without waiting for first tick.
+	poll()
+
 	ticker := time.NewTicker(planePollInterval)
 	defer ticker.Stop()
 	for {
@@ -273,13 +319,57 @@ func startPlaneAdapter(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			// Sync env-var session (backward compat)
-			if envOK {
-				planeSyncStartedIssues(ctx, baseCfg)
-			}
-			// Sync all DB autopilot sessions
-			syncAllAutopilotSessions(ctx, baseCfg)
+			poll()
 		}
+	}
+}
+
+// refreshWorkQueueCache pre-populates the in-memory work queue cache for all
+// configured projects (env-var PLANE_PROJECT_ID + all DB autopilot sessions).
+// Requires only PLANE_API_URL, PLANE_API_KEY, PLANE_WORKSPACE — does not need
+// the full adapter config, so it works even when PLANE_TARGET_SESSION_ID is unset.
+func refreshWorkQueueCache(ctx context.Context, baseCfg *planeConfig) {
+	// Need at minimum the three base vars (checked inside planeFetchWorkQueueItems)
+	if os.Getenv("PLANE_API_URL") == "" || os.Getenv("PLANE_API_KEY") == "" || os.Getenv("PLANE_WORKSPACE") == "" {
+		return
+	}
+	defaultGroups := []string{"backlog", "unstarted"}
+
+	// Collect all project IDs to cache
+	projectIDs := make(map[string]struct{})
+	if baseCfg != nil && baseCfg.projectID != "" {
+		projectIDs[baseCfg.projectID] = struct{}{}
+	}
+	// Also pick up PLANE_PROJECT_ID even when full adapter config is incomplete
+	if pid := os.Getenv("PLANE_PROJECT_ID"); pid != "" {
+		projectIDs[pid] = struct{}{}
+	}
+
+	rows, err := database.QueryContext(ctx,
+		`SELECT COALESCE(autopilot_plane_project_id,'') FROM swarm_sessions
+		 WHERE autopilot_enabled=1 AND autopilot_plane_project_id IS NOT NULL AND autopilot_plane_project_id != ''`)
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var pid string
+			rows.Scan(&pid) //nolint:errcheck
+			if pid != "" {
+				projectIDs[pid] = struct{}{}
+			}
+		}
+	}
+
+	if len(projectIDs) == 0 {
+		return
+	}
+	for pid := range projectIDs {
+		items, err := planeFetchWorkQueueItems(ctx, pid, defaultGroups)
+		if err != nil {
+			log.Printf("swarm/plane: cache refresh for project %s: %v", shortID(pid), err)
+			continue
+		}
+		globalPlaneCache.set(cacheKey(pid, defaultGroups), items)
+		log.Printf("swarm/plane: cached %d work queue items for project %s", len(items), shortID(pid))
 	}
 }
 

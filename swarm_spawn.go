@@ -14,7 +14,6 @@ import (
 	"time"
 )
 
-const swarmClaudeCommand = "claude --dangerously-skip-permissions"
 
 // -----------------
 // Role prompts
@@ -289,8 +288,15 @@ func spawnSwarmAgent(ctx context.Context, sessionID, agentID string) error {
 		}
 	}
 
+	// Create per-run token and record the run (supports channels transport + audit).
+	runID, runToken := generateRunToken()
+	recordAgentRun(ctx, agentID, runID, runToken)
+	if ct := getChannelsTransport(); ct != nil {
+		ct.CreateQueue(agentID, runID)
+	}
+
 	// Launch claude
-	if out, err := exec.Command("tmux", "send-keys", "-t", tmuxName, swarmClaudeCommand, "Enter").CombinedOutput(); err != nil {
+	if out, err := exec.Command("tmux", "send-keys", "-t", tmuxName, agentLaunchCmd(agentID, runID, runToken), "Enter").CombinedOutput(); err != nil {
 		log.Printf("swarm: warning — could not send claude command: %v: %s", err, out)
 	}
 
@@ -343,6 +349,9 @@ func despawnSwarmAgent(ctx context.Context, sessionID, agentID string) error {
 		cleanupWorktree(repoPath, worktreePath, swarmBranchName(agentID))
 	}
 
+	// Close SSE queue and mark run as ended.
+	closeAgentRun(ctx, agentID)
+
 	// Clear DB fields
 	_, err = database.ExecContext(ctx,
 		"UPDATE swarm_agents SET worktree_path = NULL, tmux_session = NULL, status = 'idle' WHERE id = ?",
@@ -368,29 +377,7 @@ func cleanupWorktree(repoPath, worktreePath, branchName string) {
 // -----------------
 
 func injectToSwarmAgent(ctx context.Context, agentID, text string) error {
-	var tmuxSession string
-	err := database.QueryRowContext(ctx,
-		"SELECT COALESCE(tmux_session, '') FROM swarm_agents WHERE id = ?",
-		agentID,
-	).Scan(&tmuxSession)
-	if err != nil {
-		return fmt.Errorf("agent not found: %v", err)
-	}
-	if tmuxSession == "" {
-		return fmt.Errorf("agent is not spawned — spawn it first")
-	}
-
-	// -l sends text as literal input so tmux does not interpret tokens as key names
-	// (e.g. "Up", "Enter", "C-c"). -- ends option parsing so text starting with
-	// "-" is not treated as a tmux flag.
-	if out, err := exec.Command("tmux", "send-keys", "-t", tmuxSession, "-l", "--", text).CombinedOutput(); err != nil {
-		return fmt.Errorf("tmux send-keys: %v: %s", err, out)
-	}
-	// Enter must be sent as a named key (not literal) to press the actual Return key.
-	if out, err := exec.Command("tmux", "send-keys", "-t", tmuxSession, "Enter").CombinedOutput(); err != nil {
-		return fmt.Errorf("tmux enter: %v: %s", err, out)
-	}
-	return nil
+	return swarmTransport.Send(ctx, agentID, ControlMessage{Content: text})
 }
 
 // -----------------
@@ -532,11 +519,15 @@ func checkSwarmAgentStatuses() {
 		if !isTmuxSessionAlive(a.tmuxSession) {
 			// Session exited — mark idle and clear tmux_session but preserve worktree_path
 			// (worktree may have uncommitted work; user can re-spawn into it)
-			database.ExecContext(ctx,
-				"UPDATE swarm_agents SET status = 'idle', tmux_session = NULL WHERE id = ?",
+			setAgentStatus(ctx, a.id, "idle")
+			database.ExecContext(ctx, //nolint:errcheck
+				"UPDATE swarm_agents SET tmux_session = NULL WHERE id = ?",
 				a.id)
 			writeSwarmEvent(ctx, a.sessionID, a.id, "", "agent_offline", "tmux session exited")
 			changed[a.sessionID] = true
+			// Immediately timeout tasks orphaned by this agent's death instead of
+			// waiting up to 45 minutes for the heartbeat watchdog to catch them.
+			reconcileZombieTasks(ctx, a.id, a.sessionID)
 			continue
 		}
 
@@ -568,7 +559,7 @@ func checkSwarmAgentStatuses() {
 		var curStatus string
 		database.QueryRowContext(ctx, "SELECT status FROM swarm_agents WHERE id = ?", a.id).Scan(&curStatus)
 		if newStatus != curStatus {
-			database.ExecContext(ctx, "UPDATE swarm_agents SET status = ? WHERE id = ?", newStatus, a.id)
+			setAgentStatus(ctx, a.id, newStatus)
 			changed[a.sessionID] = true
 
 			// HITL notifications on significant transitions
@@ -775,7 +766,14 @@ func spawnScratchAgent(ctx context.Context, sessionID, agentID string) error {
 		log.Printf("swarm: warning — could not write CLAUDE.md: %v", err)
 	}
 
-	if out, err := exec.Command("tmux", "send-keys", "-t", tmuxName, swarmClaudeCommand, "Enter").CombinedOutput(); err != nil {
+	// Create per-run token and record the run.
+	runID, runToken := generateRunToken()
+	recordAgentRun(ctx, agentID, runID, runToken)
+	if ct := getChannelsTransport(); ct != nil {
+		ct.CreateQueue(agentID, runID)
+	}
+
+	if out, err := exec.Command("tmux", "send-keys", "-t", tmuxName, agentLaunchCmd(agentID, runID, runToken), "Enter").CombinedOutput(); err != nil {
 		log.Printf("swarm: warning — could not send claude command: %v: %s", err, out)
 	}
 
@@ -840,7 +838,14 @@ func spawnSiBotAgent(ctx context.Context, sessionID, agentID string) error {
 		log.Printf("swarm: warning — could not write .claude/settings.json for SiBot: %v", err)
 	}
 
-	if out, err := exec.Command("tmux", "send-keys", "-t", tmuxName, swarmClaudeCommand, "Enter").CombinedOutput(); err != nil {
+	// Create per-run token and record the run.
+	runID, runToken := generateRunToken()
+	recordAgentRun(ctx, agentID, runID, runToken)
+	if ct := getChannelsTransport(); ct != nil {
+		ct.CreateQueue(agentID, runID)
+	}
+
+	if out, err := exec.Command("tmux", "send-keys", "-t", tmuxName, agentLaunchCmd(agentID, runID, runToken), "Enter").CombinedOutput(); err != nil {
 		log.Printf("swarm: warning — could not send claude command: %v: %s", err, out)
 	}
 

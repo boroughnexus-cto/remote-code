@@ -429,8 +429,8 @@ func emergencyRotateAgent(ctx context.Context, sessionID, agentID, capturedTmux 
 	// Mark any running task as needs_review
 	if taskID != "" {
 		database.ExecContext(ctx, //nolint:errcheck
-			"UPDATE swarm_tasks SET stage='needs_review', blocked_reason='emergency context rotation', updated_at=? WHERE id=? AND stage='running'",
-			time.Now().Unix(), taskID,
+			"UPDATE swarm_tasks SET stage='needs_review', blocked_reason='emergency context rotation', updated_at=?, stage_changed_at=? WHERE id=? AND stage='running'",
+			time.Now().Unix(), time.Now().Unix(), taskID,
 		)
 	}
 

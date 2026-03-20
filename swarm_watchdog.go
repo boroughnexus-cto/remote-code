@@ -91,6 +91,9 @@ func watchdogTick() {
 		}
 		timeoutTask(ctx, t, reason)
 	}
+
+	// Belt-and-suspenders: catch any zombies the per-agent reconcile missed.
+	zombieSweep(ctx)
 }
 
 // listAliveTmuxSessions runs tmux once and returns a set of live session names.
@@ -165,6 +168,71 @@ func watchdogCheckTask(t watchdogTask, now, heartbeatCutoff, absoluteCutoff int6
 	return ""
 }
 
+// reconcileZombieTasks immediately times out any running/accepted tasks
+// assigned to an agent whose tmux session just died. Called from
+// checkSwarmAgentStatuses when an agent goes offline, cutting the 45-minute
+// heartbeat wait down to seconds.
+func reconcileZombieTasks(ctx context.Context, agentID, sessionID string) {
+	rows, err := database.QueryContext(ctx,
+		`SELECT id FROM swarm_tasks WHERE agent_id = ? AND stage IN ('running','accepted')`,
+		agentID)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+
+	var taskIDs []string
+	for rows.Next() {
+		var id string
+		rows.Scan(&id) //nolint:errcheck
+		taskIDs = append(taskIDs, id)
+	}
+
+	for _, taskID := range taskIDs {
+		wt := watchdogTask{id: taskID, sessionID: sessionID, agentID: agentID}
+		timeoutTask(ctx, wt, "agent tmux session exited")
+		log.Printf("swarm/watchdog: zombie task=%s timed out (agent=%s offline)", shortID(taskID), shortID(agentID))
+	}
+}
+
+// zombieSweep finds tasks still in active stages whose assigned agent has no
+// tmux session — catching any zombies missed by the per-agent reconcile (e.g.
+// server restart between agent death and task start).
+func zombieSweep(ctx context.Context) {
+	rows, err := database.QueryContext(ctx,
+		`SELECT t.id, t.session_id, COALESCE(t.agent_id,'')
+		 FROM swarm_tasks t
+		 LEFT JOIN swarm_agents a ON a.id = t.agent_id
+		 WHERE t.stage IN ('running','accepted')
+		   AND (a.id IS NULL OR a.tmux_session IS NULL)`)
+	if err != nil {
+		return
+	}
+
+	// Collect into a slice before closing the cursor so timeoutTask (which
+	// writes to the DB) does not run while rows are still open.
+	var zombies []watchdogTask
+	for rows.Next() {
+		var wt watchdogTask
+		rows.Scan(&wt.id, &wt.sessionID, &wt.agentID) //nolint:errcheck
+		zombies = append(zombies, wt)
+	}
+	rows.Close()
+
+	for _, wt := range zombies {
+		timeoutTask(ctx, wt, "zombie: assigned to offline agent")
+		log.Printf("swarm/watchdog: zombie sweep timed out task=%s", shortID(wt.id))
+	}
+}
+
+// shortID returns the first 8 characters of an ID, or the full string if shorter.
+func shortID(id string) string {
+	if len(id) <= 8 {
+		return id
+	}
+	return id[:8]
+}
+
 func timeoutTask(ctx context.Context, t watchdogTask, reason string) {
 	if err := transitionTask(ctx, t.id, "timed_out"); err != nil {
 		// Task likely already in terminal state — not an error
@@ -176,7 +244,7 @@ func timeoutTask(ctx context.Context, t watchdogTask, reason string) {
 	)
 	writeSwarmEvent(ctx, t.sessionID, t.agentID, t.id, "task_timed_out", reason)
 	swarmBroadcaster.schedule(t.sessionID)
-	log.Printf("swarm/watchdog: timed out task=%s reason=%q", t.id[:8], reason)
+	log.Printf("swarm/watchdog: timed out task=%s reason=%q", shortID(t.id), reason)
 
 	// Brief the orchestrator so it can reassign
 	go briefSiBotImmediate(t.sessionID)

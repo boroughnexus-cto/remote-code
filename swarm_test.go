@@ -872,3 +872,177 @@ func TestSwarmSession_Delete_Nonexistent(t *testing.T) {
 		t.Errorf("deleting nonexistent session returned 500: %s", w.Body.String())
 	}
 }
+
+// ─── Session Templates ────────────────────────────────────────────────────────
+
+func TestSession_Template_Blank(t *testing.T) {
+	setupSwarmDB(t)
+
+	w := swarmReq(t, "POST", "/api/swarm/sessions", map[string]string{"name": "blank-session"})
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var sess struct{ ID string `json:"id"` }
+	json.Unmarshal(w.Body.Bytes(), &sess)
+
+	// Only SiBot should exist
+	var count int
+	database.QueryRow("SELECT COUNT(*) FROM swarm_agents WHERE session_id=?", sess.ID).Scan(&count)
+	if count != 1 {
+		t.Errorf("blank template: expected 1 agent (SiBot), got %d", count)
+	}
+}
+
+func TestSession_Template_Dev(t *testing.T) {
+	setupSwarmDB(t)
+
+	w := swarmReq(t, "POST", "/api/swarm/sessions", map[string]string{"name": "dev-session", "template": "dev"})
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var sess struct{ ID string `json:"id"` }
+	json.Unmarshal(w.Body.Bytes(), &sess)
+
+	// SiBot + Dev-1 + QA-1 = 3 agents
+	var count int
+	database.QueryRow("SELECT COUNT(*) FROM swarm_agents WHERE session_id=?", sess.ID).Scan(&count)
+	if count != 3 {
+		t.Errorf("dev template: expected 3 agents, got %d", count)
+	}
+	var roles []string
+	rows, _ := database.Query("SELECT role FROM swarm_agents WHERE session_id=? ORDER BY created_at", sess.ID)
+	defer rows.Close()
+	for rows.Next() {
+		var r string
+		rows.Scan(&r)
+		roles = append(roles, r)
+	}
+	if len(roles) < 3 || roles[0] != "orchestrator" {
+		t.Errorf("dev template: unexpected roles: %v", roles)
+	}
+}
+
+func TestSession_Template_Fullstack(t *testing.T) {
+	setupSwarmDB(t)
+
+	w := swarmReq(t, "POST", "/api/swarm/sessions", map[string]string{"name": "full-session", "template": "fullstack"})
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var sess struct{ ID string `json:"id"` }
+	json.Unmarshal(w.Body.Bytes(), &sess)
+
+	// SiBot + Frontend + Backend + QA-1 = 4 agents
+	var count int
+	database.QueryRow("SELECT COUNT(*) FROM swarm_agents WHERE session_id=?", sess.ID).Scan(&count)
+	if count != 4 {
+		t.Errorf("fullstack template: expected 4 agents, got %d", count)
+	}
+}
+
+func TestSession_Template_Unknown(t *testing.T) {
+	setupSwarmDB(t)
+
+	// Unknown template should be silently ignored — only SiBot created
+	w := swarmReq(t, "POST", "/api/swarm/sessions", map[string]string{"name": "bogus-session", "template": "bogus"})
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var sess struct{ ID string `json:"id"` }
+	json.Unmarshal(w.Body.Bytes(), &sess)
+
+	var count int
+	database.QueryRow("SELECT COUNT(*) FROM swarm_agents WHERE session_id=?", sess.ID).Scan(&count)
+	if count != 1 {
+		t.Errorf("unknown template: expected 1 agent (SiBot), got %d", count)
+	}
+}
+
+// ─── Agent Notes ──────────────────────────────────────────────────────────────
+
+func TestAgentNotes_GetEmpty(t *testing.T) {
+	setupSwarmDB(t)
+	sessionID := createSwarmSession(t, "notes-empty-test")
+	agentID := createSwarmAgent(t, sessionID, "Worker-1")
+
+	w := swarmReq(t, "GET", "/api/swarm/sessions/"+sessionID+"/agents/"+agentID+"/note", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var notes []map[string]interface{}
+	json.Unmarshal(w.Body.Bytes(), &notes)
+	if len(notes) != 0 {
+		t.Errorf("expected empty notes, got %d", len(notes))
+	}
+}
+
+func TestAgentNotes_PostAndGet(t *testing.T) {
+	setupSwarmDB(t)
+	sessionID := createSwarmSession(t, "notes-post-test")
+	agentID := createSwarmAgent(t, sessionID, "Worker-1")
+
+	// POST a note
+	w := swarmReq(t, "POST", "/api/swarm/sessions/"+sessionID+"/agents/"+agentID+"/note",
+		map[string]string{"content": "Hello from test", "created_by": "user"})
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("POST note: expected 204, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// GET notes
+	w = swarmReq(t, "GET", "/api/swarm/sessions/"+sessionID+"/agents/"+agentID+"/note", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET notes: expected 200, got %d", w.Code)
+	}
+	var notes []map[string]interface{}
+	json.Unmarshal(w.Body.Bytes(), &notes)
+	if len(notes) != 1 {
+		t.Fatalf("expected 1 note, got %d", len(notes))
+	}
+	if notes[0]["content"] != "Hello from test" {
+		t.Errorf("unexpected content: %v", notes[0]["content"])
+	}
+	if notes[0]["created_by"] != "user" {
+		t.Errorf("unexpected created_by: %v", notes[0]["created_by"])
+	}
+}
+
+func TestAgentNotes_CreatedByDefault(t *testing.T) {
+	setupSwarmDB(t)
+	sessionID := createSwarmSession(t, "notes-default-test")
+	agentID := createSwarmAgent(t, sessionID, "Worker-1")
+
+	swarmReq(t, "POST", "/api/swarm/sessions/"+sessionID+"/agents/"+agentID+"/note",
+		map[string]string{"content": "note without created_by"})
+
+	w := swarmReq(t, "GET", "/api/swarm/sessions/"+sessionID+"/agents/"+agentID+"/note", nil)
+	var notes []map[string]interface{}
+	json.Unmarshal(w.Body.Bytes(), &notes)
+	if len(notes) == 0 {
+		t.Fatal("expected 1 note")
+	}
+	if notes[0]["created_by"] != "user" {
+		t.Errorf("expected default created_by=user, got %v", notes[0]["created_by"])
+	}
+}
+
+func TestAgentNotes_Limit(t *testing.T) {
+	setupSwarmDB(t)
+	sessionID := createSwarmSession(t, "notes-limit-test")
+	agentID := createSwarmAgent(t, sessionID, "Worker-1")
+
+	// Insert 60 notes directly
+	now := time.Now().Unix()
+	for i := 0; i < 60; i++ {
+		database.Exec(
+			"INSERT INTO swarm_agent_notes (agent_id, session_id, content, created_by, created_at) VALUES (?,?,?,?,?)",
+			agentID, sessionID, fmt.Sprintf("note %d", i), "agent", now+int64(i),
+		)
+	}
+
+	w := swarmReq(t, "GET", "/api/swarm/sessions/"+sessionID+"/agents/"+agentID+"/note", nil)
+	var notes []map[string]interface{}
+	json.Unmarshal(w.Body.Bytes(), &notes)
+	if len(notes) != 50 {
+		t.Errorf("expected max 50 notes, got %d", len(notes))
+	}
+}
