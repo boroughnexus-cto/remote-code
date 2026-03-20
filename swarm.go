@@ -242,6 +242,21 @@ func swarmNullStr(s string) interface{} {
 	return s
 }
 
+// isValidModelName returns true if s is safe to pass as a --model flag value.
+// Allows alphanumeric, hyphen, dot, colon, underscore; max 128 chars.
+func isValidModelName(s string) bool {
+	if len(s) > 128 {
+		return false
+	}
+	for _, c := range s {
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+			c == '-' || c == '.' || c == ':' || c == '_') {
+			return false
+		}
+	}
+	return true
+}
+
 func scanNullString(ns sql.NullString) *string {
 	if !ns.Valid {
 		return nil
@@ -1227,6 +1242,18 @@ func handleSwarmAgentsAPI(w http.ResponseWriter, r *http.Request, ctx context.Co
 				database.ExecContext(ctx, "UPDATE swarm_agents SET repo_path = NULL WHERE id = ? AND session_id = ?", agentID, sessionID)
 			} else if s, ok := repoPath.(string); ok {
 				database.ExecContext(ctx, "UPDATE swarm_agents SET repo_path = ? WHERE id = ? AND session_id = ?", swarmNullStr(s), agentID, sessionID)
+			}
+		}
+		if modelName, ok := req["model_name"]; ok {
+			if modelName == nil {
+				database.ExecContext(ctx, "UPDATE swarm_agents SET model_name = NULL WHERE id = ? AND session_id = ?", agentID, sessionID)
+			} else if s, ok := modelName.(string); ok {
+				if s != "" && !isValidModelName(s) {
+					w.WriteHeader(http.StatusBadRequest)
+					json.NewEncoder(w).Encode(map[string]string{"error": "invalid model_name: only alphanumeric, hyphens, dots, colons, underscores allowed"})
+					return
+				}
+				database.ExecContext(ctx, "UPDATE swarm_agents SET model_name = ? WHERE id = ? AND session_id = ?", swarmNullStr(s), agentID, sessionID)
 			}
 		}
 		swarmBroadcaster.schedule(sessionID)

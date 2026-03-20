@@ -1,25 +1,9 @@
 <script lang="ts">
+	import { STAGES, STAGE_LABELS, STAGE_DOT_COLORS } from '$lib/workflowStages';
+
 	interface Props {
 		tasksByStage: Record<string, number>;
 	}
-
-	const STAGES = ['spec', 'implement', 'test', 'deploy', 'done'] as const;
-
-	const stageColors: Record<string, string> = {
-		spec:      'bg-blue-400',
-		implement: 'bg-vanna-teal',
-		test:      'bg-yellow-400',
-		deploy:    'bg-orange-400',
-		done:      'bg-green-500'
-	};
-
-	const stageTip: Record<string, string> = {
-		spec:      'Spec',
-		implement: 'Implement',
-		test:      'Test',
-		deploy:    'Deploy',
-		done:      'Done'
-	};
 
 	let { tasksByStage }: Props = $props();
 
@@ -31,9 +15,9 @@
 		{#each STAGES as stage}
 			{#if (tasksByStage[stage] ?? 0) > 0}
 				<div
-					class="{stageColors[stage]} transition-all"
+					class="{STAGE_DOT_COLORS[stage]} transition-all"
 					style="width: {((tasksByStage[stage] ?? 0) / total) * 100}%"
-					title="{tasksByStage[stage]} {stageTip[stage]}"
+					title="{tasksByStage[stage]} {STAGE_LABELS[stage] ?? stage}"
 				></div>
 			{/if}
 		{/each}
@@ -42,8 +26,8 @@
 		{#each STAGES as stage}
 			{#if (tasksByStage[stage] ?? 0) > 0}
 				<span class="text-xs text-slate-400">
-					<span class="inline-block w-2 h-2 rounded-sm {stageColors[stage]} mr-0.5 translate-y-px"></span>
-					{tasksByStage[stage]} {stageTip[stage]}
+					<span class="inline-block w-2 h-2 rounded-sm {STAGE_DOT_COLORS[stage]} mr-0.5 translate-y-px"></span>
+					{tasksByStage[stage]} {STAGE_LABELS[stage] ?? stage}
 				</span>
 			{/if}
 		{/each}

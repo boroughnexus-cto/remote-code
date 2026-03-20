@@ -325,19 +325,33 @@ func generateRunToken() (runID, runToken string) {
 	return
 }
 
+// AgentLaunchConfig bundles the parameters needed to build a Claude launch command.
+// Using a struct avoids parameter creep as new options are added (e.g. model selection).
+type AgentLaunchConfig struct {
+	AgentID   string
+	RunID     string
+	RunToken  string
+	ModelName string // optional; empty means use Claude's default
+}
+
 // -----------------
 // agentLaunchArgs returns the Claude launch command as a string slice.
 // When channels transport is active, appends --channels <url>.
 // Using a slice (not string concat) prevents shell injection from runID/token.
+// ModelName is validated before storage (see isValidModelName) so it is safe to
+// pass directly as a flag value here.
 // -----------------
 
-func agentLaunchArgs(agentID, runID, runToken string) []string {
+func agentLaunchArgs(cfg AgentLaunchConfig) []string {
 	args := []string{"claude", "--dangerously-skip-permissions"}
+	if cfg.ModelName != "" {
+		args = append(args, "--model", cfg.ModelName)
+	}
 	switch TransportMode(getEnvOrDefault("SWARMOPS_TRANSPORT", string(TransportTmux))) {
 	case TransportChannels, TransportShadow, TransportCanary:
 		// Write a per-agent MCP config so Claude can find the swarmops SSE endpoint.
 		// --channels server:swarmops then activates this server as a message channel.
-		if cfgPath := writeMCPConfig(agentID, runID, runToken); cfgPath != "" {
+		if cfgPath := writeMCPConfig(cfg.AgentID, cfg.RunID, cfg.RunToken); cfgPath != "" {
 			args = append(args, "--mcp-config", cfgPath, "--channels", "server:swarmops")
 		}
 	}
@@ -374,8 +388,8 @@ func jsonStringLiteral(s string) string {
 // agentLaunchCmd joins agentLaunchArgs for tmux send-keys (single string arg).
 // tmux takes the command as a single string; we join with spaces.
 // All components are generated internally (no user-controlled shell input).
-func agentLaunchCmd(agentID, runID, runToken string) string {
-	args := agentLaunchArgs(agentID, runID, runToken)
+func agentLaunchCmd(cfg AgentLaunchConfig) string {
+	args := agentLaunchArgs(cfg)
 	cmd := ""
 	for i, a := range args {
 		if i > 0 {

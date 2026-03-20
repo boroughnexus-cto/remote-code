@@ -160,11 +160,11 @@ func swarmBranchName(agentID string) string {
 
 func spawnSwarmAgent(ctx context.Context, sessionID, agentID string) error {
 	// Fetch agent from DB
-	var repoPath, tmuxSession, existingWorktreePath, agentRole string
+	var repoPath, tmuxSession, existingWorktreePath, agentRole, agentModelName string
 	err := database.QueryRowContext(ctx,
-		"SELECT COALESCE(repo_path,''), COALESCE(tmux_session,''), COALESCE(worktree_path,''), role FROM swarm_agents WHERE id = ? AND session_id = ?",
+		"SELECT COALESCE(repo_path,''), COALESCE(tmux_session,''), COALESCE(worktree_path,''), role, COALESCE(model_name,'') FROM swarm_agents WHERE id = ? AND session_id = ?",
 		agentID, sessionID,
-	).Scan(&repoPath, &tmuxSession, &existingWorktreePath, &agentRole)
+	).Scan(&repoPath, &tmuxSession, &existingWorktreePath, &agentRole, &agentModelName)
 	if err != nil {
 		return fmt.Errorf("agent not found: %v", err)
 	}
@@ -296,7 +296,7 @@ func spawnSwarmAgent(ctx context.Context, sessionID, agentID string) error {
 	}
 
 	// Launch claude
-	if out, err := exec.Command("tmux", "send-keys", "-t", tmuxName, agentLaunchCmd(agentID, runID, runToken), "Enter").CombinedOutput(); err != nil {
+	if out, err := exec.Command("tmux", "send-keys", "-t", tmuxName, agentLaunchCmd(AgentLaunchConfig{AgentID: agentID, RunID: runID, RunToken: runToken, ModelName: agentModelName}), "Enter").CombinedOutput(); err != nil {
 		log.Printf("swarm: warning — could not send claude command: %v: %s", err, out)
 	}
 
@@ -471,9 +471,13 @@ func swarmStuckTimeout() time.Duration {
 }
 
 func startSwarmMonitor() {
-	// Immediate reconciliation on startup — clears stale tmux references from DB
-	go checkSwarmAgentStatuses()
+	// Synchronous startup reconciliation: clear any stale tmux references left by a
+	// prior crash or unclean shutdown, covering ALL agents (not just active-status ones).
+	// Must complete before periodic monitors start to avoid concurrent writes on the
+	// same rows.
+	reconcileAgentsOnStartup(context.Background())
 
+	// Steady-state periodic monitor.
 	go func() {
 		ticker := time.NewTicker(15 * time.Second)
 		defer ticker.Stop()
@@ -481,6 +485,64 @@ func startSwarmMonitor() {
 			checkSwarmAgentStatuses()
 		}
 	}()
+}
+
+// reconcileAgentsOnStartup runs once at server startup to reconcile DB state against
+// actual running tmux sessions. Unlike checkSwarmAgentStatuses (which only checks
+// non-idle/non-done agents), this covers every agent that has a tmux_session recorded,
+// catching edge cases such as a crash mid-despawn leaving status='idle' with
+// tmux_session still set.
+func reconcileAgentsOnStartup(ctx context.Context) {
+	alive := listAliveTmuxSessions() // nil if tmux unavailable or no sessions
+
+	if alive == nil {
+		// tmux is not running or returned an error. Any recorded session is gone.
+		// Log the situation; the update loop below will mark all stale agents idle.
+		log.Printf("swarm: startup reconcile — tmux unavailable, marking all live agents idle")
+	}
+
+	rows, err := database.QueryContext(ctx,
+		"SELECT id, session_id, tmux_session, status FROM swarm_agents WHERE tmux_session IS NOT NULL")
+	if err != nil {
+		log.Printf("swarm: startup reconcile query failed: %v", err)
+		return
+	}
+	defer rows.Close()
+
+	type agentRow struct{ id, sessionID, tmuxSession, status string }
+	var agents []agentRow
+	for rows.Next() {
+		var a agentRow
+		if err := rows.Scan(&a.id, &a.sessionID, &a.tmuxSession, &a.status); err != nil {
+			log.Printf("swarm: startup reconcile scan error: %v", err)
+			continue
+		}
+		agents = append(agents, a)
+	}
+	if err := rows.Err(); err != nil {
+		log.Printf("swarm: startup reconcile iteration error: %v", err)
+	}
+
+	for _, a := range agents {
+		if alive == nil || !alive[a.tmuxSession] {
+			// Session is gone — clean up DB state.
+			if _, err := database.ExecContext(ctx,
+				"UPDATE swarm_agents SET tmux_session = NULL, status = 'idle' WHERE id = ?", a.id); err != nil {
+				log.Printf("swarm: startup reconcile update failed for agent %s: %v", a.id[:8], err)
+				continue
+			}
+			writeSwarmEvent(ctx, a.sessionID, a.id, "", "agent_offline", "startup: tmux session gone")
+			reconcileZombieTasks(ctx, a.id, a.sessionID)
+			log.Printf("swarm: startup reconcile — agent %s marked idle (session %s gone)", a.id[:8], a.tmuxSession)
+		} else {
+			// Session is still alive — re-sync status from tmux pane content.
+			newStatus := detectSwarmAgentStatus(a.tmuxSession)
+			if newStatus != a.status {
+				setAgentStatus(ctx, a.id, newStatus)
+				log.Printf("swarm: startup reconcile — agent %s status %s → %s", a.id[:8], a.status, newStatus)
+			}
+		}
+	}
 }
 
 func checkSwarmAgentStatuses() {
@@ -759,8 +821,8 @@ func spawnScratchAgent(ctx context.Context, sessionID, agentID string) error {
 	}
 
 	// Write role prompt as CLAUDE.md.
-	var agentRole, agentMission string
-	database.QueryRowContext(ctx, "SELECT COALESCE(role,'worker'), COALESCE(mission,'') FROM swarm_agents WHERE id = ?", agentID).Scan(&agentRole, &agentMission) //nolint:errcheck
+	var agentRole, agentMission, agentModelName string
+	database.QueryRowContext(ctx, "SELECT COALESCE(role,'worker'), COALESCE(mission,''), COALESCE(model_name,'') FROM swarm_agents WHERE id = ?", agentID).Scan(&agentRole, &agentMission, &agentModelName) //nolint:errcheck
 	rolePrompt, promptVersion := loadRolePrompt(ctx, agentRole)
 	if err := writeAgentCLAUDE(workDir, sessionID, agentID, agentRole, agentMission, rolePrompt); err != nil {
 		log.Printf("swarm: warning — could not write CLAUDE.md: %v", err)
@@ -773,7 +835,7 @@ func spawnScratchAgent(ctx context.Context, sessionID, agentID string) error {
 		ct.CreateQueue(agentID, runID)
 	}
 
-	if out, err := exec.Command("tmux", "send-keys", "-t", tmuxName, agentLaunchCmd(agentID, runID, runToken), "Enter").CombinedOutput(); err != nil {
+	if out, err := exec.Command("tmux", "send-keys", "-t", tmuxName, agentLaunchCmd(AgentLaunchConfig{AgentID: agentID, RunID: runID, RunToken: runToken, ModelName: agentModelName}), "Enter").CombinedOutput(); err != nil {
 		log.Printf("swarm: warning — could not send claude command: %v: %s", err, out)
 	}
 
@@ -808,6 +870,9 @@ func spawnSiBotAgent(ctx context.Context, sessionID, agentID string) error {
 
 	tmuxName := swarmTmuxName(agentID)
 	log.Printf("swarm: spawning SiBot %s — tmux=%s workdir=%s", agentID[:8], tmuxName, workDir)
+
+	var agentModelName string
+	database.QueryRowContext(ctx, "SELECT COALESCE(model_name,'') FROM swarm_agents WHERE id = ?", agentID).Scan(&agentModelName) //nolint:errcheck
 
 	// Write role prompt as CLAUDE.md so Claude auto-reads it, then the API reference doc.
 	rolePrompt, promptVersion := loadRolePrompt(ctx, "orchestrator")
@@ -845,7 +910,7 @@ func spawnSiBotAgent(ctx context.Context, sessionID, agentID string) error {
 		ct.CreateQueue(agentID, runID)
 	}
 
-	if out, err := exec.Command("tmux", "send-keys", "-t", tmuxName, agentLaunchCmd(agentID, runID, runToken), "Enter").CombinedOutput(); err != nil {
+	if out, err := exec.Command("tmux", "send-keys", "-t", tmuxName, agentLaunchCmd(AgentLaunchConfig{AgentID: agentID, RunID: runID, RunToken: runToken, ModelName: agentModelName}), "Enter").CombinedOutput(); err != nil {
 		log.Printf("swarm: warning — could not send claude command: %v: %s", err, out)
 	}
 

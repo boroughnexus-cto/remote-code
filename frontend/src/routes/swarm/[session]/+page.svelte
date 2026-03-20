@@ -7,25 +7,7 @@
 	import OrchestratorPanel from '$lib/components/swarm/OrchestratorPanel.svelte';
 	import EventFeed from '$lib/components/swarm/EventFeed.svelte';
 	import VoiceConversation from '$lib/components/VoiceConversation.svelte';
-
-	const STAGES = ['spec', 'implement', 'test', 'deploy', 'done'] as const;
-	type Stage = (typeof STAGES)[number];
-
-	const STAGE_LABELS: Record<string, string> = {
-		spec: 'Spec',
-		implement: 'Implement',
-		test: 'Test',
-		deploy: 'Deploy',
-		done: 'Done'
-	};
-
-	const STAGE_COLORS: Record<string, string> = {
-		spec: 'border-blue-200 bg-blue-50/50',
-		implement: 'border-vanna-teal/30 bg-vanna-teal/5',
-		test: 'border-yellow-200 bg-yellow-50/50',
-		deploy: 'border-orange-200 bg-orange-50/50',
-		done: 'border-green-200 bg-green-50/50'
-	};
+	import { STAGES, type Stage, STAGE_LABELS, STAGE_COLORS } from '$lib/workflowStages';
 
 	const ROLES = [
 		{ value: 'orchestrator', label: 'Orchestrator' },
