@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 )
 
@@ -18,11 +19,19 @@ import (
 //   - One task per idle agent per call; subsequent calls handle remaining tasks.
 //   - Idempotent: safe to call repeatedly.
 func autoDispatchQueuedTasks(ctx context.Context, sessionID string) {
-	// Collect queued tasks with no assigned agent, ordered by creation time.
+	// Collect queued tasks with no assigned agent and no unresolved deps.
+	// Dependency filter uses json_each so only tasks whose deps are all terminal
+	// (complete/failed/cancelled/timed_out) are eligible for dispatch.
 	rows, err := database.QueryContext(ctx,
-		`SELECT id, title, COALESCE(description,''), COALESCE(goal_id,'')
+		`SELECT id, title, COALESCE(description,''), COALESCE(goal_id,''), COALESCE(required_capabilities,'')
 		 FROM swarm_tasks
 		 WHERE session_id=? AND stage='queued' AND agent_id IS NULL
+		   AND (depends_on IS NULL OR depends_on = '' OR depends_on = '[]'
+		        OR NOT EXISTS (
+		            SELECT 1 FROM swarm_tasks dep
+		            WHERE dep.id IN (SELECT value FROM json_each(swarm_tasks.depends_on))
+		              AND dep.stage NOT IN ('complete','failed','cancelled','timed_out')
+		        ))
 		 ORDER BY created_at ASC`,
 		sessionID,
 	)
@@ -32,11 +41,11 @@ func autoDispatchQueuedTasks(ctx context.Context, sessionID string) {
 	}
 	defer rows.Close()
 
-	type queuedTask struct{ id, title, desc, goalID string }
+	type queuedTask struct{ id, title, desc, goalID, requiredCaps string }
 	var queued []queuedTask
 	for rows.Next() {
 		var t queuedTask
-		if err := rows.Scan(&t.id, &t.title, &t.desc, &t.goalID); err != nil {
+		if err := rows.Scan(&t.id, &t.title, &t.desc, &t.goalID, &t.requiredCaps); err != nil {
 			log.Printf("swarm/dispatch: scan task row: %v", err)
 			break
 		}
@@ -52,7 +61,7 @@ func autoDispatchQueuedTasks(ctx context.Context, sessionID string) {
 
 	// Collect idle worker agents: live, non-orchestrator, no active task.
 	agentRows, err := database.QueryContext(ctx,
-		`SELECT a.id, a.name, a.role, a.tmux_session
+		`SELECT a.id, a.name, a.role, a.tmux_session, COALESCE(a.capabilities,'')
 		 FROM swarm_agents a
 		 WHERE a.session_id=?
 		   AND a.role != 'orchestrator'
@@ -71,11 +80,11 @@ func autoDispatchQueuedTasks(ctx context.Context, sessionID string) {
 	}
 	defer agentRows.Close()
 
-	type idleAgent struct{ id, name, role, tmuxSession string }
+	type idleAgent struct{ id, name, role, tmuxSession, capabilities string }
 	var idle []idleAgent
 	for agentRows.Next() {
 		var a idleAgent
-		if err := agentRows.Scan(&a.id, &a.name, &a.role, &a.tmuxSession); err != nil {
+		if err := agentRows.Scan(&a.id, &a.name, &a.role, &a.tmuxSession, &a.capabilities); err != nil {
 			log.Printf("swarm/dispatch: scan agent row: %v", err)
 			break
 		}
@@ -89,11 +98,47 @@ func autoDispatchQueuedTasks(ctx context.Context, sessionID string) {
 		return
 	}
 
-	// Pair tasks to agents (one-to-one, FIFO).
-	pairs := min(len(queued), len(idle))
-	for i := 0; i < pairs; i++ {
-		dispatchTaskToAgent(ctx, sessionID, queued[i].id, queued[i].title, queued[i].desc, idle[i].id, idle[i].name)
+	// Pair tasks to agents (FIFO, capability-aware).
+	// For each task, find the first idle agent that satisfies all required capabilities.
+	// Agents are consumed from the pool as they are matched.
+	for _, task := range queued {
+		if len(idle) == 0 {
+			break
+		}
+		for j, agent := range idle {
+			if agentHasCapabilities(agent.capabilities, task.requiredCaps) {
+				dispatchTaskToAgent(ctx, sessionID, task.id, task.title, task.desc, agent.id, agent.name)
+				idle = append(idle[:j], idle[j+1:]...)
+				break
+			}
+		}
 	}
+}
+
+// agentHasCapabilities returns true if agentCaps contains all of required.
+// An empty required set matches any agent.
+func agentHasCapabilities(agentCaps, required string) bool {
+	if required == "" {
+		return true
+	}
+	agentSet := parseCapabilities(agentCaps)
+	for req := range parseCapabilities(required) {
+		if !agentSet[req] {
+			return false
+		}
+	}
+	return true
+}
+
+// parseCapabilities normalises a comma-separated capability string into a set.
+func parseCapabilities(s string) map[string]bool {
+	result := make(map[string]bool)
+	for _, c := range strings.Split(s, ",") {
+		if c = strings.TrimSpace(strings.ToLower(c)); c != "" {
+			result[c] = true
+		}
+	}
+	return result
 }
 
 func dispatchTaskToAgent(ctx context.Context, sessionID, taskID, title, desc, agentID, agentName string) {

@@ -240,7 +240,7 @@ func TestGenerateRunToken_NonEmpty(t *testing.T) {
 
 func TestAgentLaunchArgs_TmuxMode(t *testing.T) {
 	t.Setenv("SWARMOPS_TRANSPORT", "tmux")
-	args := agentLaunchArgs("agent-1", "run-1", "tok-1")
+	args := agentLaunchArgs(AgentLaunchConfig{AgentID: "agent-1", RunID: "run-1", RunToken: "tok-1", DangerouslySkipPermissions: true})
 
 	if len(args) != 2 {
 		t.Errorf("tmux mode: expected 2 args, got %v", args)
@@ -254,7 +254,7 @@ func TestAgentLaunchArgs_ChannelsMode(t *testing.T) {
 	t.Setenv("SWARMOPS_TRANSPORT", "channels")
 	t.Setenv("SWARM_API_BASE_URL", "http://localhost:8080")
 
-	args := agentLaunchArgs("agent-1", "run-abc", "tok-xyz")
+	args := agentLaunchArgs(AgentLaunchConfig{AgentID: "agent-1", RunID: "run-abc", RunToken: "tok-xyz", DangerouslySkipPermissions: true})
 
 	// Expected: claude --dangerously-skip-permissions --mcp-config <path> --channels server:swarmops
 	if len(args) != 6 {
@@ -295,7 +295,7 @@ func TestAgentLaunchArgs_ChannelsMode(t *testing.T) {
 func TestAgentLaunchCmd_NoSpacesInComponents(t *testing.T) {
 	// runID and token are base64url-encoded — no spaces. Verify join is safe.
 	id, tok := generateRunToken()
-	cmd := agentLaunchCmd("agent-123", id, tok)
+	cmd := agentLaunchCmd(AgentLaunchConfig{AgentID: "agent-123", RunID: id, RunToken: tok, DangerouslySkipPermissions: true})
 	// Should never have adjacent spaces (which would indicate empty components).
 	if strings.Contains(cmd, "  ") {
 		t.Errorf("double space in launch cmd: %q", cmd)

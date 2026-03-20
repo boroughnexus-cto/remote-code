@@ -26,6 +26,8 @@ type SwarmSession struct {
 	Name                  string  `json:"name"`
 	AutopilotEnabled      bool    `json:"autopilot_enabled"`
 	AutopilotPlaneProject *string `json:"autopilot_plane_project_id,omitempty"`
+	TokenBudget           int64   `json:"token_budget"`
+	TokensUsed            int64   `json:"tokens_used"`
 	CreatedAt             int64   `json:"created_at"`
 	UpdatedAt             int64   `json:"updated_at"`
 }
@@ -56,11 +58,12 @@ type SwarmAgent struct {
 	Mission       *string `json:"mission"`
 	ContextPct    float64 `json:"context_pct"`
 	ContextState  string  `json:"context_state"`
-	ModelName                  string `json:"model_name,omitempty"`
-	AllowedTools               string `json:"allowed_tools,omitempty"`
-	DisallowedTools            string `json:"disallowed_tools,omitempty"`
-	DangerouslySkipPermissions bool   `json:"dangerously_skip_permissions"`
-	TokensUsed                 int64  `json:"tokens_used,omitempty"`
+	ModelName                  string   `json:"model_name,omitempty"`
+	AllowedTools               string   `json:"allowed_tools,omitempty"`
+	DisallowedTools            string   `json:"disallowed_tools,omitempty"`
+	DangerouslySkipPermissions bool     `json:"dangerously_skip_permissions"`
+	Capabilities               []string `json:"capabilities,omitempty"`
+	TokensUsed                 int64    `json:"tokens_used,omitempty"`
 	StatusChangedAt            int64  `json:"status_changed_at,omitempty"`
 	CreatedAt                  int64  `json:"created_at"`
 }
@@ -84,12 +87,14 @@ type SwarmTask struct {
 	PhaseOrder    *int64   `json:"phase_order,omitempty"`
 	CIStatus      *string  `json:"ci_status,omitempty"`
 	CIRunUrl      *string  `json:"ci_run_url,omitempty"`
-	StageChangedAt int64   `json:"stage_changed_at,omitempty"`
-	TimeoutAt     *int64   `json:"timeout_at,omitempty"`
-	PlaneIssueID  *string  `json:"plane_issue_id,omitempty"`
-	PlaneSyncedAt *int64   `json:"plane_synced_at,omitempty"`
-	CreatedAt     int64    `json:"created_at"`
-	UpdatedAt     int64    `json:"updated_at"`
+	StageChangedAt       int64    `json:"stage_changed_at,omitempty"`
+	TimeoutAt            *int64   `json:"timeout_at,omitempty"`
+	PlaneIssueID         *string  `json:"plane_issue_id,omitempty"`
+	PlaneSyncedAt        *int64   `json:"plane_synced_at,omitempty"`
+	DependsOn            []string `json:"depends_on,omitempty"`
+	RequiredCapabilities []string `json:"required_capabilities,omitempty"`
+	CreatedAt            int64    `json:"created_at"`
+	UpdatedAt            int64    `json:"updated_at"`
 }
 
 type SwarmEvent struct {
@@ -296,10 +301,14 @@ func getSwarmState(ctx context.Context, sessionID string) (*SwarmState, error) {
 	var autopilotPlaneProject sql.NullString
 	var autopilotEnabled int
 	err := database.QueryRowContext(ctx,
-		`SELECT id, name, COALESCE(autopilot_enabled,0), COALESCE(autopilot_plane_project_id,''), created_at, updated_at
+		`SELECT id, name, COALESCE(autopilot_enabled,0), COALESCE(autopilot_plane_project_id,''),
+		        COALESCE(token_budget,0), COALESCE(tokens_used,0),
+		        created_at, updated_at
 		 FROM swarm_sessions WHERE id = ?`,
 		sessionID,
-	).Scan(&session.ID, &session.Name, &autopilotEnabled, &autopilotPlaneProject, &session.CreatedAt, &session.UpdatedAt)
+	).Scan(&session.ID, &session.Name, &autopilotEnabled, &autopilotPlaneProject,
+		&session.TokenBudget, &session.TokensUsed,
+		&session.CreatedAt, &session.UpdatedAt)
 	session.AutopilotEnabled = autopilotEnabled == 1
 	if autopilotPlaneProject.Valid && autopilotPlaneProject.String != "" {
 		session.AutopilotPlaneProject = &autopilotPlaneProject.String
@@ -315,7 +324,8 @@ func getSwarmState(ctx context.Context, sessionID string) (*SwarmState, error) {
 		        (SELECT content FROM swarm_agent_notes WHERE agent_id = a.id ORDER BY created_at DESC LIMIT 1),
 		        COALESCE(a.model_name,''), COALESCE(a.allowed_tools,''), COALESCE(a.disallowed_tools,''),
 		        COALESCE(a.dangerously_skip_permissions,1),
-		        a.tokens_used, a.status_changed_at
+		        a.tokens_used, a.status_changed_at,
+		        COALESCE(a.capabilities,'')
 		 FROM swarm_agents a WHERE a.session_id = ?
 		 ORDER BY CASE WHEN a.role = 'orchestrator' THEN 0 ELSE 1 END, a.created_at ASC`,
 		sessionID,
@@ -331,6 +341,7 @@ func getSwarmState(ctx context.Context, sessionID string) (*SwarmState, error) {
 		var worktreePath, tmuxSession, project, repoPath, currentFile, currentTaskID, mission, latestNote sql.NullString
 		var dangerouslySkip int
 		var tokensUsed, statusChangedAt sql.NullInt64
+		var agentCaps string
 		if err := agentRows.Scan(&a.ID, &a.SessionID, &a.Name, &a.Role,
 			&worktreePath, &tmuxSession, &project,
 			&repoPath, &a.Status,
@@ -338,7 +349,8 @@ func getSwarmState(ctx context.Context, sessionID string) (*SwarmState, error) {
 			&a.ContextPct, &a.ContextState, &a.CreatedAt, &latestNote,
 			&a.ModelName, &a.AllowedTools, &a.DisallowedTools,
 			&dangerouslySkip,
-			&tokensUsed, &statusChangedAt); err != nil {
+			&tokensUsed, &statusChangedAt,
+			&agentCaps); err != nil {
 			return nil, err
 		}
 		a.WorktreePath = scanNullString(worktreePath)
@@ -350,6 +362,13 @@ func getSwarmState(ctx context.Context, sessionID string) (*SwarmState, error) {
 		a.Mission = scanNullString(mission)
 		a.LatestNote = scanNullString(latestNote)
 		a.DangerouslySkipPermissions = dangerouslySkip != 0
+		if agentCaps != "" {
+			for _, c := range strings.Split(agentCaps, ",") {
+				if c = strings.TrimSpace(strings.ToLower(c)); c != "" {
+					a.Capabilities = append(a.Capabilities, c)
+				}
+			}
+		}
 		if tokensUsed.Valid {
 			a.TokensUsed = tokensUsed.Int64
 		}
@@ -364,7 +383,8 @@ func getSwarmState(ctx context.Context, sessionID string) (*SwarmState, error) {
 		        branch, worktree_path, pr_url, goal_id, confidence, tokens_used, blocked_reason,
 		        phase, phase_order, ci_status, ci_run_url,
 		        created_at, updated_at, stage_changed_at,
-		        timeout_at, plane_issue_id, plane_synced_at
+		        timeout_at, plane_issue_id, plane_synced_at,
+		        COALESCE(depends_on,''), COALESCE(required_capabilities,'')
 		 FROM swarm_tasks WHERE session_id = ?
 		 ORDER BY COALESCE(phase_order, 9999), created_at ASC`,
 		sessionID,
@@ -382,12 +402,14 @@ func getSwarmState(ctx context.Context, sessionID string) (*SwarmState, error) {
 		var planeIssueID sql.NullString
 		var confidence sql.NullFloat64
 		var tokensUsed, phaseOrder, stageChangedAt, timeoutAt, planeSyncedAt sql.NullInt64
+		var dependsOnJSON, requiredCapsStr string
 		if err := taskRows.Scan(&t.ID, &t.SessionID, &t.Title, &description,
 			&t.Stage, &agentID, &project, &branch, &worktreePath, &prUrl,
 			&goalID, &confidence, &tokensUsed, &blockedReason,
 			&phase, &phaseOrder, &ciStatus, &ciRunUrl,
 			&t.CreatedAt, &t.UpdatedAt, &stageChangedAt,
-			&timeoutAt, &planeIssueID, &planeSyncedAt); err != nil {
+			&timeoutAt, &planeIssueID, &planeSyncedAt,
+			&dependsOnJSON, &requiredCapsStr); err != nil {
 			return nil, err
 		}
 		t.Description = scanNullString(description)
@@ -419,6 +441,16 @@ func getSwarmState(ctx context.Context, sessionID string) (*SwarmState, error) {
 		t.PlaneIssueID = scanNullString(planeIssueID)
 		if planeSyncedAt.Valid {
 			t.PlaneSyncedAt = &planeSyncedAt.Int64
+		}
+		if dependsOnJSON != "" && dependsOnJSON != "[]" {
+			json.Unmarshal([]byte(dependsOnJSON), &t.DependsOn) //nolint:errcheck
+		}
+		if requiredCapsStr != "" {
+			for _, c := range strings.Split(requiredCapsStr, ",") {
+				if c = strings.TrimSpace(strings.ToLower(c)); c != "" {
+					t.RequiredCapabilities = append(t.RequiredCapabilities, c)
+				}
+			}
 		}
 		tasks = append(tasks, t)
 	}
@@ -776,6 +808,8 @@ func handleSwarmSessionsAPI(w http.ResponseWriter, r *http.Request, ctx context.
 	}
 
 	switch subPath[0] {
+	case "budget":
+		handleSwarmSessionBudgetAPI(w, r, ctx, sessionID)
 	case "agents":
 		handleSwarmAgentsAPI(w, r, ctx, sessionID, subPath[1:])
 	case "tasks":
@@ -1021,6 +1055,48 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "…"
+}
+
+// detectDependencyCycle returns true if adding newDeps to taskID would create a cycle.
+// Uses BFS: from each dep, follow depends_on transitively and check if taskID is reachable.
+func detectDependencyCycle(ctx context.Context, taskID string, newDeps []string) bool {
+	visited := make(map[string]bool)
+	queue := make([]string, len(newDeps))
+	copy(queue, newDeps)
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		if cur == taskID {
+			return true
+		}
+		if visited[cur] {
+			continue
+		}
+		visited[cur] = true
+		var depsJSON string
+		database.QueryRowContext(ctx, "SELECT COALESCE(depends_on,'') FROM swarm_tasks WHERE id=?", cur).Scan(&depsJSON) //nolint:errcheck
+		if depsJSON != "" && depsJSON != "[]" {
+			var deps []string
+			if json.Unmarshal([]byte(depsJSON), &deps) == nil {
+				queue = append(queue, deps...)
+			}
+		}
+	}
+	return false
+}
+
+// normaliseCapabilities lowercases, trims, deduplicates, and returns a
+// canonical comma-separated capability string. Returns "" if input is empty.
+func normaliseCapabilities(s string) string {
+	seen := make(map[string]bool)
+	var out []string
+	for _, c := range strings.Split(s, ",") {
+		if c = strings.TrimSpace(strings.ToLower(c)); c != "" && !seen[c] {
+			seen[c] = true
+			out = append(out, c)
+		}
+	}
+	return strings.Join(out, ",")
 }
 
 // handleSwarmPlaneIssuesAPI returns work queue items for the session's Plane project.
@@ -1348,6 +1424,16 @@ func handleSwarmAgentsAPI(w http.ResponseWriter, r *http.Request, ctx context.Co
 			database.ExecContext(ctx, "UPDATE swarm_agents SET dangerously_skip_permissions = ? WHERE id = ? AND session_id = ?", //nolint:errcheck
 				skip, agentID, sessionID)
 		}
+		// capabilities: accepts a string (CSV) or null to clear.
+		// Normalised on write: lowercase, trimmed, deduplicated.
+		if val, ok := req["capabilities"]; ok {
+			if val == nil {
+				database.ExecContext(ctx, "UPDATE swarm_agents SET capabilities = NULL WHERE id = ? AND session_id = ?", agentID, sessionID) //nolint:errcheck
+			} else if s, ok := val.(string); ok {
+				database.ExecContext(ctx, "UPDATE swarm_agents SET capabilities = ? WHERE id = ? AND session_id = ?", //nolint:errcheck
+					swarmNullStr(normaliseCapabilities(s)), agentID, sessionID)
+			}
+		}
 		w.WriteHeader(http.StatusNoContent)
 
 	case http.MethodDelete:
@@ -1529,6 +1615,36 @@ func handleSwarmTasksAPI(w http.ResponseWriter, r *http.Request, ctx context.Con
 				database.ExecContext(ctx, "UPDATE swarm_tasks SET plane_issue_id = NULL, plane_synced_at = NULL, updated_at = ? WHERE id = ? AND session_id = ?", now, taskID, sessionID) //nolint:errcheck
 			} else if s, ok := val.(string); ok && s != "" {
 				database.ExecContext(ctx, "UPDATE swarm_tasks SET plane_issue_id = ?, updated_at = ? WHERE id = ? AND session_id = ?", s, now, taskID, sessionID) //nolint:errcheck
+			}
+		}
+		// depends_on: set ([]interface{}) or clear (null)
+		if val, ok := req["depends_on"]; ok {
+			if val == nil {
+				database.ExecContext(ctx, "UPDATE swarm_tasks SET depends_on = NULL, updated_at = ? WHERE id = ? AND session_id = ?", now, taskID, sessionID) //nolint:errcheck
+			} else if arr, ok := val.([]interface{}); ok {
+				depIDs := make([]string, 0, len(arr))
+				for _, v := range arr {
+					if s, ok := v.(string); ok && s != "" {
+						depIDs = append(depIDs, s)
+					}
+				}
+				// Cycle detection: reject if any dep transitively depends on this task.
+				if detectDependencyCycle(ctx, taskID, depIDs) {
+					w.WriteHeader(http.StatusUnprocessableEntity)
+					json.NewEncoder(w).Encode(map[string]string{"error": "depends_on would create a dependency cycle"}) //nolint:errcheck
+					return
+				}
+				j, _ := json.Marshal(depIDs)
+				database.ExecContext(ctx, "UPDATE swarm_tasks SET depends_on = ?, updated_at = ? WHERE id = ? AND session_id = ?", string(j), now, taskID, sessionID) //nolint:errcheck
+			}
+		}
+		// required_capabilities: set (string CSV) or clear (null)
+		if val, ok := req["required_capabilities"]; ok {
+			if val == nil {
+				database.ExecContext(ctx, "UPDATE swarm_tasks SET required_capabilities = NULL, updated_at = ? WHERE id = ? AND session_id = ?", now, taskID, sessionID) //nolint:errcheck
+			} else if s, ok := val.(string); ok {
+				database.ExecContext(ctx, "UPDATE swarm_tasks SET required_capabilities = ?, updated_at = ? WHERE id = ? AND session_id = ?", //nolint:errcheck
+					swarmNullStr(normaliseCapabilities(s)), now, taskID, sessionID)
 			}
 		}
 		swarmBroadcaster.schedule(sessionID)

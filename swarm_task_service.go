@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -102,11 +103,54 @@ func checkPhaseOrderConstraint(ctx context.Context, taskID string) error {
 	return nil
 }
 
+// checkDependencies returns an error if any of the task's depends_on tasks have
+// not yet reached a terminal stage. Failed/cancelled/timed_out deps count as
+// resolved — the orchestrator retains agency over what happens next.
+func checkDependencies(ctx context.Context, taskID string) error {
+	var depsJSON string
+	if err := database.QueryRowContext(ctx,
+		"SELECT COALESCE(depends_on,'') FROM swarm_tasks WHERE id=?", taskID,
+	).Scan(&depsJSON); err != nil || depsJSON == "" || depsJSON == "[]" {
+		return nil
+	}
+
+	var deps []string
+	if err := json.Unmarshal([]byte(depsJSON), &deps); err != nil || len(deps) == 0 {
+		return nil
+	}
+
+	// Build dynamic IN(?,?,?) placeholders — database/sql does not expand slices.
+	placeholders := make([]string, len(deps))
+	args := make([]interface{}, len(deps))
+	for i, d := range deps {
+		placeholders[i] = "?"
+		args[i] = d
+	}
+	query := fmt.Sprintf(
+		"SELECT COUNT(*) FROM swarm_tasks WHERE id IN (%s) AND stage NOT IN ('complete','failed','cancelled','timed_out')",
+		strings.Join(placeholders, ","),
+	)
+	var pending int
+	if err := database.QueryRowContext(ctx, query, args...).Scan(&pending); err != nil {
+		return fmt.Errorf("dependency check: %w", err)
+	}
+	if pending > 0 {
+		return fmt.Errorf("task has %d unresolved dependenc%s", pending, map[bool]string{true: "y", false: "ies"}[pending == 1])
+	}
+	return nil
+}
+
 func AcceptTask(ctx context.Context, taskID, messageID string) error {
 	if err := checkPhaseOrderConstraint(ctx, taskID); err != nil {
 		return err
 	}
+	if err := checkDependencies(ctx, taskID); err != nil {
+		return err
+	}
 	if err := checkGoalBudget(ctx, taskID); err != nil {
+		return err
+	}
+	if err := checkSessionBudget(ctx, taskID); err != nil {
 		return err
 	}
 	if err := transitionTask(ctx, taskID, "accepted"); err != nil {
@@ -156,8 +200,10 @@ func CompleteTask(ctx context.Context, sessionID, agentID, taskID string, h IPCH
 		`UPDATE swarm_tasks SET completed_at=?, confidence=?, tokens_used=?, updated_at=? WHERE id=?`,
 		now, h.Confidence, h.TokensUsed, now, taskID,
 	)
-	// Roll up token spend to the goal budget tracker (synchronous, O(1) atomic)
+	// Roll up token spend to goal and session budget trackers (synchronous, O(1) atomic each).
+	// Both are called at the same level — neither nests the other.
 	rollupGoalBudget(ctx, taskID)
+	rollupSessionBudget(ctx, taskID)
 	if newStage == "needs_review" {
 		database.ExecContext(ctx, //nolint:errcheck
 			"UPDATE swarm_tasks SET needs_review_count=needs_review_count+1 WHERE id=?", taskID)

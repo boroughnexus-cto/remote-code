@@ -17,6 +17,7 @@
 		allowed_tools?: string | null;
 		disallowed_tools?: string | null;
 		dangerously_skip_permissions?: boolean;
+		capabilities?: string[] | null;
 		context_pct?: number | null;
 		context_state?: string | null;
 	}
@@ -48,6 +49,7 @@
 	let allowedToolsInput = $state(agent.allowed_tools ?? '');
 	let disallowedToolsInput = $state(agent.disallowed_tools ?? '');
 	let dangerouslySkipInput = $state(agent.dangerously_skip_permissions ?? true);
+	let capabilitiesInput = $state((agent.capabilities ?? []).join(', '));
 	let savingConfig = $state(false);
 	// Local display copies — updated optimistically on save; parent polling will sync later
 	let localRepoPath = $state<string | null>(agent.repo_path ?? null);
@@ -55,6 +57,7 @@
 	let localAllowedTools = $state<string | null>(agent.allowed_tools ?? null);
 	let localDisallowedTools = $state<string | null>(agent.disallowed_tools ?? null);
 	let localDangerouslySkip = $state(agent.dangerously_skip_permissions ?? true);
+	let localCapabilities = $state<string[]>(agent.capabilities ?? []);
 
 	let showTerminal = $state(false);
 
@@ -68,7 +71,7 @@
 			const res = await fetch(`/api/swarm/sessions/${sessionId}/agents/${agent.id}`, {
 				method: 'PATCH',
 				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ repo_path: newPath, model_name: newModel, allowed_tools: newAllowed, disallowed_tools: newDisallowed, dangerously_skip_permissions: dangerouslySkipInput })
+				body: JSON.stringify({ repo_path: newPath, model_name: newModel, allowed_tools: newAllowed, disallowed_tools: newDisallowed, dangerously_skip_permissions: dangerouslySkipInput, capabilities: capabilitiesInput.trim() || null })
 			});
 			if (res.ok) {
 				localRepoPath = newPath;
@@ -77,6 +80,7 @@
 				localDisallowedTools = newDisallowed;
 				localDangerouslySkip = dangerouslySkipInput;
 				showConfigForm = false;
+				localCapabilities = capabilitiesInput.trim() ? capabilitiesInput.split(",").map(c => c.trim().toLowerCase()).filter(Boolean) : [];
 			}
 		} finally {
 			savingConfig = false;
@@ -268,6 +272,13 @@
 						{dangerouslySkipInput ? '⚠ Skip permission checks' : 'Enforce permission checks'}
 					</span>
 				</label>
+				<input
+					type="text"
+					bind:value={capabilitiesInput}
+					placeholder="Capabilities (e.g. python, docker, testing)"
+					class="w-full px-2 py-1 text-xs border border-slate-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-vanna-teal"
+					title="Comma-separated capabilities this agent has. Used for smart task routing."
+				/>
 				<div class="flex gap-1">
 					<button
 						type="button"
@@ -279,7 +290,7 @@
 					</button>
 					<button
 						type="button"
-						onclick={() => { showConfigForm = false; repoPathInput = localRepoPath ?? ''; modelNameInput = localModelName ?? ''; allowedToolsInput = localAllowedTools ?? ''; disallowedToolsInput = localDisallowedTools ?? ''; dangerouslySkipInput = localDangerouslySkip; }}
+						onclick={() => { showConfigForm = false; repoPathInput = localRepoPath ?? ''; modelNameInput = localModelName ?? ''; allowedToolsInput = localAllowedTools ?? ''; disallowedToolsInput = localDisallowedTools ?? ''; dangerouslySkipInput = localDangerouslySkip; capabilitiesInput = localCapabilities.join(', '); }}
 						class="text-xs px-2 py-1 rounded-lg border border-slate-200 text-slate-400 hover:bg-slate-50 transition-colors"
 					>
 						Cancel
@@ -289,7 +300,7 @@
 		{:else if localRepoPath}
 			<button
 				type="button"
-				onclick={() => { repoPathInput = localRepoPath ?? ''; modelNameInput = localModelName ?? ''; allowedToolsInput = localAllowedTools ?? ''; disallowedToolsInput = localDisallowedTools ?? ''; dangerouslySkipInput = localDangerouslySkip; showConfigForm = true; }}
+				onclick={() => { repoPathInput = localRepoPath ?? ''; modelNameInput = localModelName ?? ''; allowedToolsInput = localAllowedTools ?? ''; disallowedToolsInput = localDisallowedTools ?? ''; dangerouslySkipInput = localDangerouslySkip; capabilitiesInput = localCapabilities.join(', '); showConfigForm = true; }}
 				class="text-xs text-slate-300 font-mono truncate mb-2 w-full text-left hover:text-vanna-teal transition-colors"
 				title="Click to configure"
 			>
@@ -298,7 +309,7 @@
 		{:else}
 			<button
 				type="button"
-				onclick={() => { repoPathInput = ''; modelNameInput = localModelName ?? ''; allowedToolsInput = localAllowedTools ?? ''; disallowedToolsInput = localDisallowedTools ?? ''; dangerouslySkipInput = localDangerouslySkip; showConfigForm = true; }}
+				onclick={() => { repoPathInput = ''; modelNameInput = localModelName ?? ''; allowedToolsInput = localAllowedTools ?? ''; disallowedToolsInput = localDisallowedTools ?? ''; dangerouslySkipInput = localDangerouslySkip; capabilitiesInput = localCapabilities.join(', '); showConfigForm = true; }}
 				class="flex items-center gap-1 text-xs text-slate-400 italic mb-2 hover:text-vanna-teal transition-colors"
 				title="Configure agent"
 			>
@@ -379,6 +390,15 @@
 	{#if agent.project}
 		<div class="mt-2">
 			<span class="text-xs text-slate-400 bg-slate-100 rounded-full px-2 py-0.5">{agent.project}</span>
+		</div>
+	{/if}
+
+	<!-- Capabilities pills -->
+	{#if localCapabilities.length > 0}
+		<div class="mt-2 flex flex-wrap gap-1">
+			{#each localCapabilities as cap}
+				<span class="text-xs bg-vanna-teal/10 text-vanna-teal border border-vanna-teal/20 rounded-full px-1.5 py-0.5">{cap}</span>
+			{/each}
 		</div>
 	{/if}
 

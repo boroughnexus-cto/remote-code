@@ -163,6 +163,9 @@ func applyMigrations(database *sql.DB) error {
 		"db/migrations/032_status_timestamps.sql",
 		"db/migrations/033_agent_runs.sql",
 		"db/migrations/034_agent_escalations.sql",
+		"db/migrations/035_tool_restrictions.sql",
+		"db/migrations/036_batch3.sql",
+		"db/migrations/037_batch4.sql",
 	}
 
 	for _, migrationPath := range migrations {

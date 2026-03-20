@@ -144,6 +144,129 @@ Remaining budget may not be sufficient to complete all phases. Consider:
 	}
 }
 
+// ─── Session Token Budget (SWM-8) ─────────────────────────────────────────────
+//
+// Session-level budget mirrors the per-goal budget pattern.  When token_budget>0:
+//   - tokens_used incremented on task completion
+//   - At 80%: one-shot warning to orchestrator
+//   - At 100%: new tasks cannot be accepted; orchestrator is briefed
+//
+// Both rollups (goal + session) are called from CompleteTask at the same level
+// so neither nests the other — avoids double-rollup or ordering surprises.
+
+// rollupSessionBudget atomically increments session.tokens_used by the tokens
+// consumed by task taskID, then fires warnings/enforcement if thresholds are crossed.
+func rollupSessionBudget(ctx context.Context, taskID string) {
+	var sessionID string
+	var tokensUsed int64
+	if err := database.QueryRowContext(ctx,
+		"SELECT COALESCE(session_id,''), COALESCE(tokens_used,0) FROM swarm_tasks WHERE id=?", taskID,
+	).Scan(&sessionID, &tokensUsed); err != nil || sessionID == "" || tokensUsed == 0 {
+		return
+	}
+
+	if _, err := database.ExecContext(ctx,
+		"UPDATE swarm_sessions SET tokens_used=tokens_used+?, updated_at=? WHERE id=?",
+		tokensUsed, time.Now().Unix(), sessionID,
+	); err != nil {
+		log.Printf("swarm/budget: session rollup failed session=%s: %v", sessionID[:8], err)
+		return
+	}
+
+	var budget, total int64
+	var warningSent int
+	if err := database.QueryRowContext(ctx,
+		"SELECT token_budget, tokens_used, budget_warning_sent FROM swarm_sessions WHERE id=?", sessionID,
+	).Scan(&budget, &total, &warningSent); err != nil {
+		return
+	}
+	if budget <= 0 {
+		return
+	}
+
+	pct := float64(total) / float64(budget)
+	log.Printf("swarm/budget: session=%s tokens=%d/%d (%.0f%%)", sessionID[:8], total, budget, pct*100)
+
+	if pct >= 1.0 {
+		writeSwarmEvent(ctx, sessionID, "", "", "session_budget_exceeded",
+			fmt.Sprintf("session=%s used=%d budget=%d", sessionID[:8], total, budget))
+		swarmBroadcaster.schedule(sessionID)
+		go injectSessionBudgetNotice(ctx, sessionID, total, budget, true)
+	} else if pct >= budgetWarnThreshold && warningSent == 0 {
+		database.ExecContext(ctx, //nolint:errcheck
+			"UPDATE swarm_sessions SET budget_warning_sent=1 WHERE id=?", sessionID)
+		writeSwarmEvent(ctx, sessionID, "", "", "session_budget_warning",
+			fmt.Sprintf("session=%s at %.0f%% of budget", sessionID[:8], pct*100))
+		go injectSessionBudgetNotice(ctx, sessionID, total, budget, false)
+	}
+}
+
+// checkSessionBudget returns an error if the session token budget is exhausted.
+// Called from AcceptTask to block new work when session budget is exhausted.
+func checkSessionBudget(ctx context.Context, taskID string) error {
+	var sessionID string
+	if err := database.QueryRowContext(ctx,
+		"SELECT COALESCE(session_id,'') FROM swarm_tasks WHERE id=?", taskID,
+	).Scan(&sessionID); err != nil || sessionID == "" {
+		return nil
+	}
+
+	var budget, used int64
+	if err := database.QueryRowContext(ctx,
+		"SELECT token_budget, tokens_used FROM swarm_sessions WHERE id=?", sessionID,
+	).Scan(&budget, &used); err != nil || budget <= 0 {
+		return nil
+	}
+
+	if used >= budget {
+		return fmt.Errorf("session token budget exhausted (%d/%d tokens used)", used, budget)
+	}
+	return nil
+}
+
+// injectSessionBudgetNotice briefs the orchestrator about session budget status.
+func injectSessionBudgetNotice(ctx context.Context, sessionID string, used, budget int64, exceeded bool) {
+	var agentID string
+	if err := database.QueryRowContext(ctx,
+		`SELECT id FROM swarm_agents WHERE session_id=? AND role='orchestrator' AND tmux_session IS NOT NULL LIMIT 1`,
+		sessionID,
+	).Scan(&agentID); err != nil {
+		return
+	}
+
+	pct := float64(used) / float64(budget) * 100
+
+	var prompt string
+	if exceeded {
+		prompt = fmt.Sprintf(`## ⛔ Session Budget Exceeded
+
+Session token budget **exhausted** (used=%d, budget=%d, %.0f%%).
+
+No new tasks in this session can be accepted until the budget is raised.
+
+**Your options:**
+1. Raise the budget via PATCH /api/swarm/sessions/%s/budget {"token_budget": <new_limit>}
+2. Accept the partial work: mark remaining queued tasks cancelled
+3. Let in-progress tasks finish, then evaluate
+
+Queued tasks are NOT cancelled automatically — you retain full agency.`,
+			used, budget, pct, sessionID)
+	} else {
+		prompt = fmt.Sprintf(`## ⚠️ Session Budget Warning
+
+Session token budget at **%.0f%%** (used=%d of budget=%d).
+
+Remaining budget may not be sufficient to complete all tasks. Consider:
+- Keeping implementations tight and focused
+- Raising the budget if needed via PATCH /api/swarm/sessions/%s/budget`,
+			pct, used, budget, sessionID)
+	}
+
+	if err := injectToSwarmAgent(ctx, agentID, prompt); err != nil {
+		log.Printf("swarm/budget: inject session notice failed: %v", err)
+	}
+}
+
 // ─── Budget API ───────────────────────────────────────────────────────────────
 
 // handleSwarmGoalBudgetAPI handles PATCH /api/swarm/sessions/:id/goals/:gid/budget
@@ -179,6 +302,43 @@ func handleSwarmGoalBudgetAPI(w http.ResponseWriter, r *http.Request, ctx contex
 
 	json.NewEncoder(w).Encode(map[string]interface{}{ //nolint:errcheck
 		"goal_id":      goalID,
+		"token_budget": req.TokenBudget,
+	})
+}
+
+// handleSwarmSessionBudgetAPI handles PATCH /api/swarm/sessions/:id/budget
+func handleSwarmSessionBudgetAPI(w http.ResponseWriter, r *http.Request, ctx context.Context, sessionID string) {
+	w.Header().Set("Content-Type", "application/json")
+	if r.Method != http.MethodPatch {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		TokenBudget int64 `json:"token_budget"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.TokenBudget < 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "token_budget must be a non-negative integer"}) //nolint:errcheck
+		return
+	}
+
+	if _, err := database.ExecContext(ctx,
+		"UPDATE swarm_sessions SET token_budget=?, budget_warning_sent=0, updated_at=? WHERE id=?",
+		req.TokenBudget, time.Now().Unix(), sessionID,
+	); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()}) //nolint:errcheck
+		return
+	}
+
+	writeSwarmEvent(ctx, sessionID, "", "", "session_budget_set",
+		fmt.Sprintf("session=%s budget=%d", sessionID[:8], req.TokenBudget))
+	swarmBroadcaster.schedule(sessionID)
+	log.Printf("swarm/budget: set session=%s budget=%d", sessionID[:8], req.TokenBudget)
+
+	json.NewEncoder(w).Encode(map[string]interface{}{ //nolint:errcheck
+		"session_id":   sessionID,
 		"token_budget": req.TokenBudget,
 	})
 }
