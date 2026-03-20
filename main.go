@@ -70,6 +70,9 @@ func main() {
 	// Initialize agent transport (tmux for now; channels in Phase 3)
 	swarmTransport = initTransport()
 
+	// Initialize Telegram escalation router (no-op when env vars are absent).
+	telegramRouter = initTelegramRouter()
+
 	// Ensure the Claude Code Stop hook script is written to disk
 	ensureSwarmHookScript()
 
@@ -99,6 +102,13 @@ func main() {
 		http.HandleFunc("GET /mcp/channels/{agentID}/{runID}", ct.ServeSSE)
 		http.HandleFunc("POST /mcp/channels/{agentID}/{runID}/messages", ct.ServeMessages)
 		log.Printf("transport: channels MCP endpoints registered at /mcp/channels/{agentID}/{runID}")
+	}
+
+	// Telegram webhook: registered outside auth middleware because Telegram uses
+	// its own secret-token header (TELEGRAM_WEBHOOK_SECRET) for auth.
+	if telegramRouter != nil {
+		http.HandleFunc("POST /api/telegram/webhook", telegramRouter.HandleWebhook)
+		log.Printf("telegram: webhook registered at POST /api/telegram/webhook")
 	}
 
 	port := os.Getenv("PORT")

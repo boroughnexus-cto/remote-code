@@ -202,6 +202,14 @@ func BlockTask(ctx context.Context, sessionID, agentID, taskID, reason string) e
 	)
 	if err == nil {
 		writeEscalation(sessionID, agentID, taskID, reason)
+		// Also submit a DB-backed escalation to the Telegram hub if the router is active.
+		if tr := telegramRouter; tr != nil {
+			go func() {
+				if _, err := tr.SubmitEscalation(context.Background(), agentID, taskID, reason, 24*time.Hour); err != nil {
+					log.Printf("telegram: submit escalation for task %s: %v", truncateID(taskID), err)
+				}
+			}()
+		}
 		go briefSiBotImmediate(sessionID)
 	}
 	return err
