@@ -5,7 +5,7 @@ CREATE TABLE IF NOT EXISTS agent_runs (
     run_id         TEXT     NOT NULL PRIMARY KEY,
     agent_id       TEXT     NOT NULL REFERENCES swarm_agents(id) ON DELETE CASCADE,
     channels_url   TEXT,
-    run_token      TEXT,    -- unguessable per-run secret for SSE auth (Phase 3)
+    run_token      TEXT     NOT NULL DEFAULT '', -- unguessable per-run secret for SSE auth; always set at spawn
     transport_mode TEXT     NOT NULL DEFAULT 'tmux'
                             CHECK (transport_mode IN ('tmux', 'channels', 'shadow', 'canary')),
     started_at     INTEGER  NOT NULL DEFAULT (unixepoch()),

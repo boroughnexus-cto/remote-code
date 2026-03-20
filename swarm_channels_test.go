@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -255,18 +256,40 @@ func TestAgentLaunchArgs_ChannelsMode(t *testing.T) {
 
 	args := agentLaunchArgs("agent-1", "run-abc", "tok-xyz")
 
-	if len(args) != 4 {
-		t.Errorf("channels mode: expected 4 args, got %v", args)
+	// Expected: claude --dangerously-skip-permissions --mcp-config <path> --channels server:swarmops
+	if len(args) != 6 {
+		t.Fatalf("channels mode: expected 6 args, got %v", args)
 	}
-	if args[2] != "--channels" {
-		t.Errorf("third arg should be '--channels', got %q", args[2])
+	if args[0] != "claude" {
+		t.Errorf("args[0] should be 'claude', got %q", args[0])
 	}
-	if !strings.Contains(args[3], "agent-1") || !strings.Contains(args[3], "run-abc") {
-		t.Errorf("channels URL missing agentID/runID: %q", args[3])
+	if args[2] != "--mcp-config" {
+		t.Errorf("args[2] should be '--mcp-config', got %q", args[2])
 	}
-	if !strings.Contains(args[3], "tok-xyz") {
-		t.Errorf("channels URL missing token: %q", args[3])
+	mcpConfigPath := args[3]
+	if !strings.Contains(mcpConfigPath, "agent-1") || !strings.Contains(mcpConfigPath, "run-abc") {
+		t.Errorf("MCP config path missing agentID/runID: %q", mcpConfigPath)
 	}
+	if args[4] != "--channels" {
+		t.Errorf("args[4] should be '--channels', got %q", args[4])
+	}
+	if args[5] != "server:swarmops" {
+		t.Errorf("args[5] should be 'server:swarmops', got %q", args[5])
+	}
+	// Verify the config file was written with the correct SSE URL
+	data, err := os.ReadFile(mcpConfigPath)
+	if err != nil {
+		t.Fatalf("MCP config file not written: %v", err)
+	}
+	content := string(data)
+	if !strings.Contains(content, "agent-1") || !strings.Contains(content, "run-abc") {
+		t.Errorf("MCP config missing agentID/runID: %s", content)
+	}
+	if !strings.Contains(content, "tok-xyz") {
+		t.Errorf("MCP config missing token: %s", content)
+	}
+	// Cleanup
+	os.Remove(mcpConfigPath)
 }
 
 func TestAgentLaunchCmd_NoSpacesInComponents(t *testing.T) {

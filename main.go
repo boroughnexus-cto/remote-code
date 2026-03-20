@@ -97,7 +97,8 @@ func main() {
 	// ChannelsTransport is reachable through swarmTransport.
 	if ct := getChannelsTransport(); ct != nil {
 		http.HandleFunc("GET /mcp/channels/{agentID}/{runID}", ct.ServeSSE)
-		log.Printf("transport: channels SSE endpoint registered at /mcp/channels/{agentID}/{runID}")
+		http.HandleFunc("POST /mcp/channels/{agentID}/{runID}/messages", ct.ServeMessages)
+		log.Printf("transport: channels MCP endpoints registered at /mcp/channels/{agentID}/{runID}")
 	}
 
 	port := os.Getenv("PORT")

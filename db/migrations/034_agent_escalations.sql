@@ -18,3 +18,8 @@ CREATE TABLE IF NOT EXISTS agent_escalations (
 CREATE INDEX IF NOT EXISTS idx_escalations_active
     ON agent_escalations(tg_chat_id, tg_message_id)
     WHERE answered_at IS NULL;
+
+-- Index for background expiry cleanup/reaper queries (avoid full-table scans).
+CREATE INDEX IF NOT EXISTS idx_escalations_expiry
+    ON agent_escalations(expires_at)
+    WHERE answered_at IS NULL;

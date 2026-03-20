@@ -87,9 +87,13 @@ func (d *MessageDispatcher) Send(ctx context.Context, agentID string, msg Contro
 	switch d.mode {
 	case TransportShadow:
 		// Primary path: tmux (real). Secondary: channels (observed only).
+		// Use a background-derived context for the shadow so caller cancellation
+		// does not abort the observation goroutine before it completes.
 		err := d.fallback.Send(ctx, agentID, msg)
 		go func() {
-			if perr := d.primary.Send(ctx, agentID, msg); perr != nil {
+			shadowCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			defer cancel()
+			if perr := d.primary.Send(shadowCtx, agentID, msg); perr != nil {
 				log.Printf("transport: shadow channels mismatch for %s: %v", agentID, perr)
 			}
 		}()
@@ -119,10 +123,11 @@ func (d *MessageDispatcher) sendWithFallback(ctx context.Context, agentID string
 }
 
 // canaryHash maps agentID to [0, 1) using FNV-1a for deterministic, stable routing.
+// Divides by MaxUint32+1 to guarantee the range is strictly [0, 1).
 func canaryHash(agentID string) float64 {
 	h := fnv.New32a()
 	h.Write([]byte(agentID))
-	return float64(h.Sum32()) / math.MaxUint32
+	return float64(h.Sum32()) / (float64(math.MaxUint32) + 1)
 }
 
 // -----------------
@@ -155,11 +160,12 @@ func (t *TmuxTransport) Send(ctx context.Context, agentID string, msg ControlMes
 	// -l sends text as literal input so tmux does not interpret tokens as key names
 	// (e.g. "Up", "Enter", "C-c"). -- ends option parsing so text starting with
 	// "-" is not treated as a tmux flag.
-	if out, err := exec.Command("tmux", "send-keys", "-t", tmuxSession, "-l", "--", msg.Content).CombinedOutput(); err != nil {
+	// Use CommandContext so caller cancellation/timeout propagates to the subprocess.
+	if out, err := exec.CommandContext(ctx, "tmux", "send-keys", "-t", tmuxSession, "-l", "--", msg.Content).CombinedOutput(); err != nil {
 		return fmt.Errorf("tmux send-keys: %v: %s", err, out)
 	}
 	// Enter must be sent as a named key (not literal) to press the actual Return key.
-	if out, err := exec.Command("tmux", "send-keys", "-t", tmuxSession, "Enter").CombinedOutput(); err != nil {
+	if out, err := exec.CommandContext(ctx, "tmux", "send-keys", "-t", tmuxSession, "Enter").CombinedOutput(); err != nil {
 		return fmt.Errorf("tmux enter: %v: %s", err, out)
 	}
 	return nil
