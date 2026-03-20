@@ -84,25 +84,23 @@
 	}
 
 	function initializeTerminal() {
-		// Load xterm if not already loaded
+		// Load xterm if not already loaded, chaining onload to guarantee execution order
 		if (!window.Terminal) {
-			const script1 = document.createElement('script');
-			script1.src = 'https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js';
-			document.head.appendChild(script1);
-
-			const script2 = document.createElement('script');
-			script2.src = 'https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js';
-			document.head.appendChild(script2);
-
-			const script3 = document.createElement('script');
-			script3.src = 'https://cdn.jsdelivr.net/npm/xterm-addon-canvas@0.5.0/lib/xterm-addon-canvas.js';
-			document.head.appendChild(script3);
-
-			const script4 = document.createElement('script');
-			script4.src = 'https://cdn.jsdelivr.net/npm/@xterm/addon-unicode11@0.8.0/lib/addon-unicode11.js';
-			document.head.appendChild(script4);
-
-			script4.onload = () => createTerminal();
+			const srcs = [
+				'https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js',
+				'https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js',
+				'https://cdn.jsdelivr.net/npm/xterm-addon-canvas@0.5.0/lib/xterm-addon-canvas.js',
+				'https://cdn.jsdelivr.net/npm/@xterm/addon-unicode11@0.8.0/lib/addon-unicode11.js',
+			];
+			function loadNext(i) {
+				if (i >= srcs.length) { createTerminal(); return; }
+				const s = document.createElement('script');
+				s.src = srcs[i];
+				s.onload = () => loadNext(i + 1);
+				s.onerror = () => loadNext(i + 1); // skip failed addon, continue
+				document.head.appendChild(s);
+			}
+			loadNext(0);
 		} else {
 			createTerminal();
 		}
@@ -124,9 +122,11 @@
 
 		try {
 			if (!window.Terminal) {
-				throw new Error('Terminal library not loaded');
+				// Library still loading — retry after a short delay
+				setTimeout(createTerminal, 100);
+				return;
 			}
-			
+
 			term = new window.Terminal({
 				cursorBlink: true,
 				fontSize: 14,

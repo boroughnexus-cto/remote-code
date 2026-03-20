@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { goto } from '$app/navigation';
 	import KanbanMiniBar from './KanbanMiniBar.svelte';
 
 	interface SessionStats {
@@ -37,8 +38,14 @@
 	}
 </script>
 
-<div class="bg-white/80 rounded-2xl border border-slate-200 shadow-vanna-card p-5 group hover:shadow-md transition-all duration-200
-	{session.stuck_agents > 0 ? 'border-red-200' : hasActivity ? 'border-vanna-teal/30' : ''}">
+<div
+	role="link"
+	tabindex="0"
+	class="bg-white/80 rounded-2xl border border-slate-200 shadow-vanna-card p-5 group hover:shadow-md transition-all duration-200 cursor-pointer
+	{session.stuck_agents > 0 ? 'border-red-200' : hasActivity ? 'border-vanna-teal/30' : ''}"
+	onclick={(e) => { if (!(e.target as HTMLElement).closest('button')) goto(`/swarm/${session.id}`); }}
+	onkeydown={(e) => { if (e.key === 'Enter') goto(`/swarm/${session.id}`); }}
+>
 
 	<div class="flex items-start justify-between gap-3 mb-4">
 		<a href="/swarm/{session.id}" class="flex items-center gap-3 flex-1 min-w-0">

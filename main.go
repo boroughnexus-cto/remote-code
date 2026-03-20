@@ -145,14 +145,23 @@ func serveHome(w http.ResponseWriter, r *http.Request) {
 		filePath = "static/index.html"
 	}
 
-	// Check if file exists
-	if _, err := os.Stat(filePath); err == nil {
-		// File exists, serve it
+	// SvelteKit adapter-static generates <route>.html alongside <route>/ directories.
+	// Serve in priority order: exact file → route.html → SPA fallback index.html.
+	// Never serve a directory listing (that would expose the raw directory).
+	if fi, err := os.Stat(filePath); err == nil && !fi.IsDir() {
 		http.ServeFile(w, r, filePath)
-	} else {
-		// File doesn't exist, serve index.html for SPA routing
-		http.ServeFile(w, r, "static/index.html")
+		return
 	}
+	// Try the .html variant (e.g. /swarm → static/swarm.html)
+	if r.URL.Path != "/" {
+		htmlPath := "static" + strings.TrimRight(r.URL.Path, "/") + ".html"
+		if fi, err := os.Stat(htmlPath); err == nil && !fi.IsDir() {
+			http.ServeFile(w, r, htmlPath)
+			return
+		}
+	}
+	// SPA fallback for client-side routes (e.g. /swarm/[session])
+	http.ServeFile(w, r, "static/index.html")
 }
 
 func handleWebSocket(w http.ResponseWriter, r *http.Request) {

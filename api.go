@@ -2756,7 +2756,7 @@ func handleBaseDirectoriesAPI(w http.ResponseWriter, r *http.Request, ctx contex
 				return
 			}
 
-			var allDirs []map[string]interface{}
+			allDirs := make([]map[string]interface{}, 0)
 			for _, project := range projects {
 				dirs, err := queries.GetBaseDirectoriesByProjectID(ctx, project.ID)
 				if err != nil {

@@ -27,7 +27,7 @@
 		try {
 			const res = await fetch('/api/base-directories');
 			if (res.ok) {
-				directories = await res.json();
+				directories = (await res.json()) ?? [];
 			}
 		} catch (err) {
 			console.error('Failed to load directories:', err);

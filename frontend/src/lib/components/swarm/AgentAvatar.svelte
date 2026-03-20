@@ -34,6 +34,30 @@
 	let noteText = $state('');
 	let savingNote = $state(false);
 
+	let showConfigForm = $state(false);
+	let repoPathInput = $state(agent.repo_path ?? '');
+	let savingConfig = $state(false);
+	// Local display copy — updated optimistically on save; parent polling will sync later
+	let localRepoPath = $state<string | null>(agent.repo_path ?? null);
+
+	async function saveConfig() {
+		savingConfig = true;
+		const newPath = repoPathInput.trim() || null;
+		try {
+			const res = await fetch(`/api/swarm/sessions/${sessionId}/agents/${agent.id}`, {
+				method: 'PATCH',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ repo_path: newPath })
+			});
+			if (res.ok) {
+				localRepoPath = newPath;
+				showConfigForm = false;
+			}
+		} finally {
+			savingConfig = false;
+		}
+	}
+
 	async function saveNote() {
 		const text = noteText.trim();
 		if (!text || !onAddNote) return;
@@ -80,7 +104,7 @@
 	let roleLabel = $derived(roleLabels[agent.role] ?? agent.role);
 	let roleColor = $derived(roleColors[agent.role] ?? roleColors.worker);
 	let isLive = $derived(!!agent.tmux_session);
-	let canSpawn = $derived(!isLive && !!agent.repo_path);
+	let canSpawn = $derived(!isLive && !!localRepoPath);
 	let terminalHref = $derived(isLive ? `/terminal/${agent.tmux_session}` : null);
 
 	function initials(name: string) {
@@ -146,13 +170,56 @@
 		</div>
 	{/if}
 
-	<!-- Repo path (if no live session) -->
-	{#if !isLive && agent.repo_path}
-		<div class="text-xs text-slate-300 font-mono truncate mb-2">
-			{agent.repo_path.split('/').slice(-2).join('/')}
-		</div>
-	{:else if !isLive && !agent.repo_path}
-		<div class="text-xs text-slate-300 italic mb-2">No repo path — click ⚙ to configure</div>
+	<!-- Repo path / configure -->
+	{#if !isLive}
+		{#if showConfigForm}
+			<div class="mb-2">
+				<input
+					type="text"
+					bind:value={repoPathInput}
+					placeholder="/path/to/repo"
+					class="w-full px-2 py-1 text-xs border border-slate-200 rounded-lg font-mono focus:outline-none focus:ring-1 focus:ring-vanna-teal"
+				/>
+				<div class="flex gap-1 mt-1">
+					<button
+						type="button"
+						onclick={saveConfig}
+						disabled={savingConfig}
+						class="flex-1 text-xs py-1 rounded-lg bg-vanna-teal text-white font-medium hover:bg-vanna-teal/90 disabled:opacity-50 transition-colors"
+					>
+						{savingConfig ? 'Saving…' : 'Save'}
+					</button>
+					<button
+						type="button"
+						onclick={() => { showConfigForm = false; repoPathInput = agent.repo_path ?? ''; }}
+						class="text-xs px-2 py-1 rounded-lg border border-slate-200 text-slate-400 hover:bg-slate-50 transition-colors"
+					>
+						Cancel
+					</button>
+				</div>
+			</div>
+		{:else if localRepoPath}
+			<button
+				type="button"
+				onclick={() => { repoPathInput = localRepoPath ?? ''; showConfigForm = true; }}
+				class="text-xs text-slate-300 font-mono truncate mb-2 w-full text-left hover:text-vanna-teal transition-colors"
+				title="Click to change repo path"
+			>
+				{localRepoPath.split('/').slice(-2).join('/')}
+			</button>
+		{:else}
+			<button
+				type="button"
+				onclick={() => { repoPathInput = ''; showConfigForm = true; }}
+				class="flex items-center gap-1 text-xs text-slate-400 italic mb-2 hover:text-vanna-teal transition-colors"
+				title="Set repo path"
+			>
+				<svg class="w-3 h-3 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
+				</svg>
+				Configure repo path
+			</button>
+		{/if}
 	{/if}
 
 	<!-- Action buttons -->
@@ -197,7 +264,13 @@
 				Spawn
 			</button>
 		{:else}
-			<span class="text-xs text-slate-300 italic">Add repo path to spawn</span>
+			<button
+				type="button"
+				onclick={() => { repoPathInput = ''; showConfigForm = true; }}
+				class="flex-1 flex items-center justify-center gap-1 py-1.5 rounded-lg border border-dashed border-slate-200 text-slate-400 text-xs hover:border-vanna-teal/40 hover:text-vanna-teal transition-colors"
+			>
+				Set repo path to spawn
+			</button>
 		{/if}
 	</div>
 
