@@ -268,7 +268,24 @@ func (ct *ChannelsTransport) ServeMessages(w http.ResponseWriter, r *http.Reques
 			"serverInfo": map[string]any{"name": "swarmops", "version": "1.0.0"},
 		}
 	case "tools/list":
-		result = map[string]any{"tools": []any{}}
+		result = map[string]any{"tools": []any{
+			map[string]any{
+				"name":        "send_telegram_message",
+				"description": "Send a message to the SwarmOps Telegram chat. Use this to communicate with the human operator. Worker agent escalations arrive automatically — only call this for direct SiBot messages.",
+				"inputSchema": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"text": map[string]any{
+							"type":        "string",
+							"description": "Message text to send.",
+						},
+					},
+					"required": []string{"text"},
+				},
+			},
+		}}
+	case "tools/call":
+		result = ct.handleToolCall(req.Params)
 	case "resources/list":
 		result = map[string]any{"resources": []any{}}
 	case "prompts/list":
@@ -284,6 +301,48 @@ func (ct *ChannelsTransport) ServeMessages(w http.ResponseWriter, r *http.Reques
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp) //nolint:errcheck
+}
+
+// handleToolCall dispatches MCP tools/call requests from agents.
+// Returns the MCP result object (content array or isError response).
+func (ct *ChannelsTransport) handleToolCall(params json.RawMessage) any {
+	var p struct {
+		Name      string          `json:"name"`
+		Arguments json.RawMessage `json:"arguments"`
+	}
+	if err := json.Unmarshal(params, &p); err != nil {
+		return mcpToolError("invalid params")
+	}
+
+	switch p.Name {
+	case "send_telegram_message":
+		if telegramRouter == nil {
+			return mcpToolError("Telegram router not initialised (missing TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID)")
+		}
+		var args struct {
+			Text string `json:"text"`
+		}
+		if err := json.Unmarshal(p.Arguments, &args); err != nil || args.Text == "" {
+			return mcpToolError("missing required argument: text")
+		}
+		if _, err := telegramRouter.sendMessage(telegramRouter.chatID, args.Text); err != nil {
+			log.Printf("channels: send_telegram_message failed: %v", err)
+			return mcpToolError(fmt.Sprintf("Telegram send failed: %v", err))
+		}
+		return map[string]any{
+			"content": []any{map[string]any{"type": "text", "text": "Message sent."}},
+		}
+	default:
+		return mcpToolError(fmt.Sprintf("unknown tool: %s", p.Name))
+	}
+}
+
+// mcpToolError returns an MCP tools/call error response.
+func mcpToolError(msg string) map[string]any {
+	return map[string]any{
+		"content": []any{map[string]any{"type": "text", "text": msg}},
+		"isError": true,
+	}
 }
 
 // mcpNotification encodes a JSON-RPC 2.0 notification as a compact JSON string.
