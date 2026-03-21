@@ -112,7 +112,7 @@ type tuiModel struct {
 	gitFetching  bool
 
 	// Clients
-	client *swarmClient
+	client TUIClient
 	ws     *tuiWSManager
 }
 

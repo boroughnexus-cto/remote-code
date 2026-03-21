@@ -15,6 +15,23 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+// ─── Client interface ─────────────────────────────────────────────────────────
+
+// TUIClient is the interface implemented by *swarmClient.
+// Tests inject a fakeClient through this interface to avoid network I/O.
+type TUIClient interface {
+	fetchAll() tea.Cmd
+	fetchTerminal(sid, agentID string) tea.Cmd
+	fetchGitStatus(sid, agentID string) tea.Cmd
+	fetchNotes(sid, agentID string) tea.Cmd
+	post(op, path string, body interface{}) tea.Cmd
+	patch(op, path string, body interface{}) tea.Cmd
+	get(op, path string) tea.Cmd
+	deleteItem(op, path string) tea.Cmd
+	putSync(path string, body []byte) error
+	getSync(path string) ([]byte, error)
+}
+
 // ─── API client ───────────────────────────────────────────────────────────────
 
 type swarmClient struct {

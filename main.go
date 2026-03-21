@@ -132,35 +132,9 @@ func handleAPIWithAuth(w http.ResponseWriter, r *http.Request) {
 }
 
 func serveHome(w http.ResponseWriter, r *http.Request) {
-	// API routes should be handled by the API handler
-	if strings.HasPrefix(r.URL.Path, "/api/") {
-		http.NotFound(w, r)
-		return
-	}
-
-	// Check if the requested file exists in static directory
-	filePath := "static" + r.URL.Path
-	if r.URL.Path == "/" {
-		filePath = "static/index.html"
-	}
-
-	// SvelteKit adapter-static generates <route>.html alongside <route>/ directories.
-	// Serve in priority order: exact file → route.html → SPA fallback index.html.
-	// Never serve a directory listing (that would expose the raw directory).
-	if fi, err := os.Stat(filePath); err == nil && !fi.IsDir() {
-		http.ServeFile(w, r, filePath)
-		return
-	}
-	// Try the .html variant (e.g. /swarm → static/swarm.html)
-	if r.URL.Path != "/" {
-		htmlPath := "static" + strings.TrimRight(r.URL.Path, "/") + ".html"
-		if fi, err := os.Stat(htmlPath); err == nil && !fi.IsDir() {
-			http.ServeFile(w, r, htmlPath)
-			return
-		}
-	}
-	// SPA fallback for client-side routes (e.g. /swarm/[session])
-	http.ServeFile(w, r, "static/index.html")
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusNotFound)
+	w.Write([]byte(`{"error":"no web UI — use swarmops tui"}`)) //nolint:errcheck
 }
 
 func handleWebSocket(w http.ResponseWriter, r *http.Request) {
