@@ -190,6 +190,12 @@ func (ct *ChannelsTransport) ServeSSE(w http.ResponseWriter, r *http.Request) {
 	for {
 		select {
 		case msg := <-q.ch:
+			// Drop message if it expired while sitting in the queue.
+			if msg.isExpired() {
+				log.Printf("channels: dropped expired queued msg for agent %s (priority=%d age=%s)",
+					agentID[:8], msg.Priority, time.Since(msg.EnqueuedAt).Round(time.Second))
+				continue
+			}
 			lastEventID++
 			// Push as MCP channel notification so Claude Code injects it into the session.
 			notification := mcpNotification("notifications/claude/channel", map[string]any{

@@ -23,10 +23,21 @@ const (
 
 // ControlMessage is a server-to-agent message delivered via the active transport.
 type ControlMessage struct {
-	Content  string
-	Priority int           // 0=heartbeat, 1=budget-warn, 2=hitl-response, 3=task-brief
-	TTL      time.Duration // 0 = no expiry; non-zero messages are dropped if stale
-	RunID    string        // correlates to agent_runs.run_id (populated in Phase 3)
+	Content     string
+	Priority    int           // 0=heartbeat, 1=budget-warn, 2=hitl-response, 3=task-brief
+	TTL         time.Duration // 0 = no expiry; non-zero messages are dropped if stale
+	RunID       string        // correlates to agent_runs.run_id
+	EnqueuedAt  time.Time     // stamped by MessageDispatcher.Send(); zero until then
+}
+
+// isExpired reports whether the message has exceeded its TTL.
+// Messages with priority >= 2 (HITL responses, task briefs) are never dropped.
+// A zero EnqueuedAt or zero TTL means the message never expires.
+func (m ControlMessage) isExpired() bool {
+	if m.Priority >= 2 || m.TTL == 0 || m.EnqueuedAt.IsZero() {
+		return false
+	}
+	return time.Since(m.EnqueuedAt) > m.TTL
 }
 
 // AgentTransport abstracts server→agent message delivery.
@@ -78,10 +89,15 @@ func (d *MessageDispatcher) Mode() TransportMode    { return d.mode }
 func (d *MessageDispatcher) IsReady(id string) bool { return d.primary.IsReady(id) || d.fallback.IsReady(id) }
 
 func (d *MessageDispatcher) Send(ctx context.Context, agentID string, msg ControlMessage) error {
-	// Drop expired messages before delivery (never drop priority=2 HITL responses).
-	if msg.TTL > 0 && msg.Priority < 2 {
-		// We don't track enqueue time in ControlMessage yet; TTL semantics are
-		// implemented in the caller (e.g. watchdog heartbeats). This is a hook.
+	// Stamp enqueue time if not already set (allows callers to pre-set it for replay).
+	if msg.EnqueuedAt.IsZero() {
+		msg.EnqueuedAt = time.Now()
+	}
+	// Drop expired messages before even attempting delivery.
+	if msg.isExpired() {
+		log.Printf("transport: dropped expired msg for %s (priority=%d ttl=%s age=%s)",
+			agentID, msg.Priority, msg.TTL, time.Since(msg.EnqueuedAt).Round(time.Second))
+		return nil
 	}
 
 	switch d.mode {

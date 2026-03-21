@@ -135,3 +135,37 @@ func TestControlMessage_TTLSemantics(t *testing.T) {
 		t.Errorf("heartbeat TTL wrong: %v", heartbeat.TTL)
 	}
 }
+
+func TestControlMessage_IsExpired(t *testing.T) {
+	now := time.Now()
+
+	// Zero TTL — never expires.
+	m := ControlMessage{Priority: 0, TTL: 0, EnqueuedAt: now.Add(-10 * time.Minute)}
+	if m.isExpired() {
+		t.Error("zero TTL should never expire")
+	}
+
+	// Priority >= 2 — never expires regardless of TTL.
+	m = ControlMessage{Priority: 2, TTL: 1 * time.Second, EnqueuedAt: now.Add(-1 * time.Hour)}
+	if m.isExpired() {
+		t.Error("priority=2 should never expire")
+	}
+
+	// Fresh message with TTL — not expired.
+	m = ControlMessage{Priority: 0, TTL: 4 * time.Minute, EnqueuedAt: now}
+	if m.isExpired() {
+		t.Error("fresh message should not be expired")
+	}
+
+	// Stale heartbeat — expired.
+	m = ControlMessage{Priority: 0, TTL: 4 * time.Minute, EnqueuedAt: now.Add(-5 * time.Minute)}
+	if !m.isExpired() {
+		t.Error("stale heartbeat should be expired")
+	}
+
+	// Zero EnqueuedAt — never expires.
+	m = ControlMessage{Priority: 0, TTL: 1 * time.Second}
+	if m.isExpired() {
+		t.Error("zero EnqueuedAt should not expire")
+	}
+}
