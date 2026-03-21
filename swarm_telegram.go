@@ -163,14 +163,15 @@ func (tr *TelegramRouter) processUpdate(ctx context.Context, update tgUpdate) {
 	chatID := msg.Chat.ID
 
 	// Look up the open escalation keyed by (tg_chat_id, tg_message_id).
-	var escID, agentID, taskID, sessionID string
+	var escID, agentID, taskID, sessionID, escalationType, goalID string
 	err := database.QueryRowContext(ctx,
-		`SELECT e.id, e.agent_id, COALESCE(e.task_id,''), COALESCE(a.session_id,'')
+		`SELECT e.id, e.agent_id, COALESCE(e.task_id,''), COALESCE(a.session_id,''),
+		        COALESCE(e.escalation_type,'question'), COALESCE(e.goal_id,'')
 		 FROM agent_escalations e
 		 JOIN swarm_agents a ON a.id = e.agent_id
 		 WHERE e.tg_chat_id = ? AND e.tg_message_id = ? AND e.answered_at IS NULL`,
 		chatID, replyToMsgID,
-	).Scan(&escID, &agentID, &taskID, &sessionID)
+	).Scan(&escID, &agentID, &taskID, &sessionID, &escalationType, &goalID)
 	if err != nil {
 		// sql.ErrNoRows is normal (reply to a non-escalation message).
 		return
@@ -191,7 +192,19 @@ func (tr *TelegramRouter) processUpdate(ctx context.Context, update tgUpdate) {
 		return
 	}
 
-	// Route the answer to the waiting agent.
+	// Dispatch to appropriate handler based on escalation type.
+	switch escalationType {
+	case "ralph_loop":
+		tr.processRalphLoopReply(ctx, answer, sessionID, taskID, goalID, agentID)
+		tr.sendAck(chatID, "✅ Ralph escalation option processed.")
+		if sessionID != "" {
+			swarmBroadcaster.schedule(sessionID)
+		}
+		log.Printf("telegram: ralph escalation %s answered: %q", escID, answer)
+		return
+	}
+
+	// Default: route the answer to the waiting agent (question escalation).
 	content := fmt.Sprintf("## Human Response\n\n%s", answer)
 	if err := swarmTransport.Send(ctx, agentID, ControlMessage{
 		Content:  content,
@@ -332,6 +345,121 @@ func (tr *TelegramRouter) SubmitEscalation(ctx context.Context, agentID, taskID,
 
 	log.Printf("telegram: escalation %s submitted for agent %s (msg_id=%d, expires_in=%v)",
 		escID, truncateID(agentID), msgID, ttl)
+	return escID, nil
+}
+
+// processRalphLoopReply handles option replies for ralph_loop escalations.
+// Supported reply formats:
+//
+//	"1 <guidance>" — retry with guidance injected to orchestrator; goal → active
+//	"2"            — reassign (re-queue the failed task, clear agent_id)
+//	"3"            — cancel goal
+//	"4"            — defer (no-op, leave as needs_human)
+func (tr *TelegramRouter) processRalphLoopReply(ctx context.Context, answer, sessionID, taskID, goalID, agentID string) {
+	answer = strings.TrimSpace(answer)
+	if answer == "" {
+		return
+	}
+
+	now := time.Now().Unix()
+	option := answer[:1]
+	guidance := strings.TrimSpace(answer[1:])
+
+	switch option {
+	case "1":
+		// Retry with guidance: re-queue task + guidance injected to orchestrator + goal → active.
+		if taskID != "" {
+			database.ExecContext(ctx, //nolint:errcheck
+				`UPDATE swarm_tasks SET stage='queued', agent_id=NULL, terminal_reason=NULL,
+				 blocked_reason=NULL, requeued_at=?, updated_at=?, stage_changed_at=?
+				 WHERE id=? AND stage='failed_ralph_loop'`,
+				now, now, now, taskID,
+			)
+		}
+		if goalID != "" {
+			guidanceText := "Retry requested by human."
+			if guidance != "" {
+				guidanceText = guidance
+			}
+			database.ExecContext(ctx, //nolint:errcheck
+				`UPDATE swarm_goals SET status='active', terminal_reason=NULL, updated_at=?
+				 WHERE id=? AND status='needs_human'`,
+				now, goalID,
+			)
+			// Inject guidance to orchestrator
+			if agentID != "" {
+				msg := fmt.Sprintf("## Human Guidance — Ralph Loop Retry\n\n%s\n\nThe failed task has been re-queued. Please proceed with the above guidance.", guidanceText)
+				injectToSwarmAgent(ctx, agentID, msg) //nolint:errcheck
+			}
+			writeSwarmEvent(ctx, sessionID, agentID, taskID, "ralph_loop_retry", guidanceText)
+		}
+		go autoDispatchQueuedTasks(context.Background(), sessionID)
+		log.Printf("telegram: ralph reply=1 (retry with guidance) goal=%s", goalID[:8])
+
+	case "2":
+		// Reassign: re-queue the task (different agent will pick it up).
+		if taskID != "" {
+			database.ExecContext(ctx, //nolint:errcheck
+				`UPDATE swarm_tasks SET stage='queued', agent_id=NULL, terminal_reason=NULL,
+				 blocked_reason=NULL, needs_review_count=0, requeued_at=?, updated_at=?, stage_changed_at=?
+				 WHERE id=? AND stage='failed_ralph_loop'`,
+				now, now, now, taskID,
+			)
+		}
+		if goalID != "" {
+			database.ExecContext(ctx, //nolint:errcheck
+				`UPDATE swarm_goals SET status='active', terminal_reason=NULL, updated_at=?
+				 WHERE id=? AND status='needs_human'`,
+				now, goalID,
+			)
+			writeSwarmEvent(ctx, sessionID, agentID, taskID, "ralph_loop_reassign", "")
+		}
+		go autoDispatchQueuedTasks(context.Background(), sessionID)
+		log.Printf("telegram: ralph reply=2 (reassign) goal=%s", goalID[:8])
+
+	case "3":
+		// Cancel goal.
+		if goalID != "" {
+			database.ExecContext(ctx, //nolint:errcheck
+				`UPDATE swarm_goals SET status='cancelled', updated_at=? WHERE id=? AND status='needs_human'`,
+				now, goalID,
+			)
+			writeSwarmEvent(ctx, sessionID, agentID, taskID, "goal_cancelled_by_human", "ralph reply=3")
+		}
+		log.Printf("telegram: ralph reply=3 (cancel goal) goal=%s", goalID[:8])
+
+	case "4":
+		// Defer — no-op, leave as needs_human.
+		writeSwarmEvent(ctx, sessionID, agentID, taskID, "ralph_loop_deferred", "")
+		log.Printf("telegram: ralph reply=4 (defer) goal=%s", goalID[:8])
+
+	default:
+		log.Printf("telegram: ralph reply unrecognised option=%q", option)
+	}
+}
+
+// SubmitRalphEscalation is like SubmitEscalation but records escalation_type='ralph_loop'
+// and the goal_id for option-reply routing by processUpdate.
+func (tr *TelegramRouter) SubmitRalphEscalation(ctx context.Context, agentID, taskID, goalID, text string, ttl time.Duration) (string, error) {
+	msgID, err := tr.sendMessage(tr.chatID, text)
+	if err != nil {
+		return "", fmt.Errorf("telegram send: %w", err)
+	}
+
+	escID := newEscalationID()
+	expiresAt := time.Now().Add(ttl).Unix()
+
+	_, err = database.ExecContext(ctx,
+		`INSERT INTO agent_escalations
+		 (id, agent_id, task_id, goal_id, question, tg_chat_id, tg_message_id, expires_at, escalation_type)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'ralph_loop')`,
+		escID, agentID, taskID, goalID, text, tr.chatID, msgID, expiresAt,
+	)
+	if err != nil {
+		return "", fmt.Errorf("insert ralph escalation: %w", err)
+	}
+
+	log.Printf("telegram: ralph escalation %s goal=%s (msg_id=%d)", escID, goalID[:8], msgID)
 	return escID, nil
 }
 

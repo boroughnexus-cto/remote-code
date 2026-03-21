@@ -31,11 +31,11 @@ const (
 func startTaskWatchdog() {
 	go func() {
 		// Run once at startup to catch tasks stale from before a server restart.
-		watchdogTick()
+		watchdogTickFull()
 		ticker := time.NewTicker(watchdogInterval)
 		defer ticker.Stop()
 		for range ticker.C {
-			watchdogTick()
+			watchdogTickFull()
 		}
 	}()
 	log.Printf("swarm/watchdog: started (heartbeat_timeout=%s, absolute=%s)", watchdogHeartbeatTimeout, watchdogAbsoluteTimeout)
@@ -246,6 +246,8 @@ func timeoutTask(ctx context.Context, t watchdogTask, reason string) {
 		// Task likely already in terminal state — not an error
 		return
 	}
+	// H1: Release repo lease on timeout.
+	releaseRepoLease(ctx, database, t.id)
 	database.ExecContext(ctx, //nolint:errcheck
 		"UPDATE swarm_tasks SET blocked_reason=?, updated_at=? WHERE id=?",
 		reason, time.Now().Unix(), t.id,
@@ -253,4 +255,10 @@ func timeoutTask(ctx context.Context, t watchdogTask, reason string) {
 	writeSwarmEvent(ctx, t.sessionID, t.agentID, t.id, "task_timed_out", reason)
 	swarmBroadcaster.schedule(t.sessionID)
 	log.Printf("swarm/watchdog: timed out task=%s reason=%q", shortID(t.id), reason)
+}
+
+func watchdogTickFull() {
+	watchdogTick()
+	// H1: Periodic lease cleanup (expired TTL + terminal task orphans).
+	cleanupExpiredLeases(context.Background(), database)
 }

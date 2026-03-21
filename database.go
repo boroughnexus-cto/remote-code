@@ -15,7 +15,12 @@ import (
 )
 
 func initDatabase() (*sql.DB, *db.Queries) {
-	database, queries, _ := initDatabaseWithPathAndReturn("swarmops.db")
+	// Enable WAL mode and a 5s busy timeout in the DSN so all pool connections
+	// inherit them. Without busy_timeout, concurrent goroutines (broadcaster,
+	// goal auto-task creation) cause SQLITE_BUSY under load.
+	database, queries, _ := initDatabaseWithPathAndReturn(
+		"swarmops.db?_pragma=journal_mode%3DWAL&_pragma=busy_timeout%3D5000",
+	)
 	return database, queries
 }
 
@@ -166,6 +171,10 @@ func applyMigrations(database *sql.DB) error {
 		"db/migrations/035_tool_restrictions.sql",
 		"db/migrations/036_batch3.sql",
 		"db/migrations/037_batch4.sql",
+		"db/migrations/039_h2_merge_policy.sql",
+		"db/migrations/040_c3_handoff.sql",
+		"db/migrations/041_c1_ralph.sql",
+		"db/migrations/042_h1_leases.sql",
 	}
 
 	for _, migrationPath := range migrations {

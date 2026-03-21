@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"strconv"
 	"time"
 )
 
@@ -62,18 +64,28 @@ func rollupGoalBudget(ctx context.Context, taskID string) {
 	log.Printf("swarm/budget: goal=%s tokens=%d/%d (%.0f%%)", goalID[:8], total, budget, pct*100)
 
 	if pct >= 1.0 {
-		// Over budget — brief orchestrator; enforcement is in AcceptTask
+		// Over budget — brief orchestrator; enforcement is in AcceptTask.
+		// Try auto-raise if SWARM_BUDGET_AUTORAISE_PCT > 0 and ceiling allows.
+		if raised := tryAutoRaiseGoalBudget(ctx, goalID, budget); raised > 0 {
+			log.Printf("swarm/budget: goal=%s auto-raised budget %d→%d", goalID[:8], budget, raised)
+			return
+		}
 		writeSwarmEvent(ctx, sessionID, "", "", "budget_exceeded",
 			fmt.Sprintf("goal=%s used=%d budget=%d", goalID[:8], total, budget))
 		swarmBroadcaster.schedule(sessionID)
 		go injectBudgetNotice(ctx, sessionID, goalID, total, budget, true)
+		go sendTelegramNotification(fmt.Sprintf(
+			"⛔ *[BUDGET EXHAUSTED]* Goal `%s` — Session `%s`\n\nToken budget reached (%d/%d). New task acceptance blocked. Active agents may still be running.\n\nTo raise: `PATCH /api/swarm/sessions/.../goals/%s/budget`",
+			goalID[:8], sessionID[:8], total, budget, goalID,
+		))
 	} else if pct >= budgetWarnThreshold && warningSent == 0 {
-		// 80% warning — once only
+		// 80% warning — once only; checkpoint all running workers, not just orchestrator
 		database.ExecContext(ctx, //nolint:errcheck
 			"UPDATE swarm_goals SET budget_warning_sent=1 WHERE id=?", goalID)
 		writeSwarmEvent(ctx, sessionID, "", "", "budget_warning",
 			fmt.Sprintf("goal=%s at %.0f%% of budget", goalID[:8], pct*100))
 		go injectBudgetNotice(ctx, sessionID, goalID, total, budget, false)
+		go injectBudgetCheckpoint(ctx, sessionID, goalID, pct)
 	}
 }
 
@@ -142,6 +154,84 @@ Remaining budget may not be sufficient to complete all phases. Consider:
 	if err := injectToSwarmAgent(ctx, agentID, prompt); err != nil {
 		log.Printf("swarm/budget: inject notice failed: %v", err)
 	}
+}
+
+// injectBudgetCheckpoint sends a WIP checkpoint instruction to ALL running worker
+// agents on a goal (not just the orchestrator). Called at 80% budget.
+// Each agent is told to commit any in-progress work so a continuation agent can
+// pick up from a known state if the budget exhausts mid-task.
+func injectBudgetCheckpoint(ctx context.Context, sessionID, goalID string, pct float64) {
+	rows, err := database.QueryContext(ctx,
+		`SELECT DISTINCT a.id
+		 FROM swarm_agents a
+		 JOIN swarm_tasks t ON t.agent_id = a.id
+		 WHERE a.session_id = ?
+		   AND t.goal_id = ?
+		   AND t.stage IN ('running','accepted')
+		   AND a.tmux_session IS NOT NULL`,
+		sessionID, goalID,
+	)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+
+	checkpoint := fmt.Sprintf(`## ⚠️ Budget Checkpoint Required (%.0f%%)
+
+Goal token budget is at **%.0f%%**. Commit any in-progress work now, even if incomplete:
+
+`+"```"+`
+git add -A
+git commit -m "WIP: checkpoint at budget %.0f%% — [brief state description]"
+`+"```"+`
+
+Continue working. If the budget exhausts, a continuation agent will pick up from this commit.
+Do NOT stop work — just save your progress first.`, pct*100, pct*100, pct*100)
+
+	for rows.Next() {
+		var agentID string
+		if rows.Scan(&agentID) == nil {
+			if err := injectToSwarmAgent(ctx, agentID, checkpoint); err != nil {
+				log.Printf("swarm/budget: checkpoint inject failed agent=%s: %v", agentID[:8], err)
+			}
+		}
+	}
+}
+
+// tryAutoRaiseGoalBudget checks SWARM_BUDGET_AUTORAISE_PCT and SWARM_BUDGET_MAX_TOTAL.
+// If configured, raises goal budget by the configured percentage (subject to ceiling).
+// Returns the new budget value, or 0 if auto-raise is disabled or ceiling is exceeded.
+func tryAutoRaiseGoalBudget(ctx context.Context, goalID string, currentBudget int64) int64 {
+	pctStr := os.Getenv("SWARM_BUDGET_AUTORAISE_PCT")
+	if pctStr == "" || pctStr == "0" {
+		return 0
+	}
+	raisePct, err := strconv.ParseFloat(pctStr, 64)
+	if err != nil || raisePct <= 0 {
+		return 0
+	}
+
+	maxTotal := int64(0)
+	if maxStr := os.Getenv("SWARM_BUDGET_MAX_TOTAL"); maxStr != "" {
+		if v, err := strconv.ParseInt(maxStr, 10, 64); err == nil {
+			maxTotal = v
+		}
+	}
+
+	newBudget := int64(float64(currentBudget) * (1 + raisePct/100))
+	if maxTotal > 0 && newBudget > maxTotal {
+		log.Printf("swarm/budget: goal=%s auto-raise would exceed SWARM_BUDGET_MAX_TOTAL (%d) — blocked", goalID[:8], maxTotal)
+		return 0
+	}
+
+	if _, err := database.ExecContext(ctx,
+		"UPDATE swarm_goals SET token_budget=?, budget_warning_sent=0, updated_at=? WHERE id=?",
+		newBudget, time.Now().Unix(), goalID,
+	); err != nil {
+		log.Printf("swarm/budget: auto-raise failed goal=%s: %v", goalID[:8], err)
+		return 0
+	}
+	return newBudget
 }
 
 // ─── Session Token Budget (SWM-8) ─────────────────────────────────────────────

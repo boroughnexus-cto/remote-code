@@ -15,16 +15,17 @@ import (
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 type SwarmGoal struct {
-	ID          string  `json:"id"`
-	SessionID   string  `json:"session_id"`
-	Description string  `json:"description"`
-	Status      string  `json:"status"` // active | complete | cancelled | failed
-	Complexity  string  `json:"complexity"`
-	TokenBudget int64   `json:"token_budget"`
-	TokensUsed  int64   `json:"tokens_used"`
-	JudgeNotes  *string `json:"judge_notes,omitempty"`
-	CreatedAt   int64   `json:"created_at"`
-	UpdatedAt   int64   `json:"updated_at"`
+	ID             string  `json:"id"`
+	SessionID      string  `json:"session_id"`
+	Description    string  `json:"description"`
+	Status         string  `json:"status"` // active | complete | cancelled | failed | needs_human
+	Complexity     string  `json:"complexity"`
+	TokenBudget    int64   `json:"token_budget"`
+	TokensUsed     int64   `json:"tokens_used"`
+	JudgeNotes     *string `json:"judge_notes,omitempty"`
+	TerminalReason *string `json:"terminal_reason,omitempty"`
+	CreatedAt      int64   `json:"created_at"`
+	UpdatedAt      int64   `json:"updated_at"`
 }
 
 const maxTasksPerGoal = 20 // raised to accommodate 8 Talos phases + follow-up tasks
@@ -140,7 +141,7 @@ func listGoals(ctx context.Context, sessionID string) []SwarmGoal {
 		`SELECT id, session_id, description, status,
 		        COALESCE(complexity,'standard'),
 		        COALESCE(token_budget,0), COALESCE(tokens_used,0),
-		        judge_notes,
+		        judge_notes, terminal_reason,
 		        created_at, updated_at
 		 FROM swarm_goals WHERE session_id=? ORDER BY created_at ASC`,
 		sessionID,
@@ -152,12 +153,15 @@ func listGoals(ctx context.Context, sessionID string) []SwarmGoal {
 	var goals []SwarmGoal
 	for rows.Next() {
 		var g SwarmGoal
-		var judgeNotes sql.NullString
+		var judgeNotes, terminalReason sql.NullString
 		rows.Scan(&g.ID, &g.SessionID, &g.Description, &g.Status,
-			&g.Complexity, &g.TokenBudget, &g.TokensUsed, &judgeNotes,
-			&g.CreatedAt, &g.UpdatedAt)
+			&g.Complexity, &g.TokenBudget, &g.TokensUsed, &judgeNotes, &terminalReason,
+			&g.CreatedAt, &g.UpdatedAt) //nolint:errcheck
 		if judgeNotes.Valid {
 			g.JudgeNotes = &judgeNotes.String
+		}
+		if terminalReason.Valid {
+			g.TerminalReason = &terminalReason.String
 		}
 		goals = append(goals, g)
 	}
@@ -203,7 +207,7 @@ var talosPhases = []talosPhaseSpec{
 	{
 		Phase: "plan", PhaseOrder: 2,
 		Title:       "Plan: write implementation plan",
-		Description: "Write a concrete implementation plan (file-by-file changes, API design, dependencies) to decisions.md. Must reference the acceptance criteria from the spec phase.",
+		Description: "Write a concrete implementation plan (file-by-file changes, API design, dependencies) to decisions.md. Must reference the acceptance criteria from the spec phase. In your task_accepted event, include a scope_paths field listing the file/directory prefixes you will modify (e.g. [\"src/api/\", \"db/migrations/\"]) — this is required for repo lease acquisition.",
 	},
 	{
 		Phase: "plan_review", PhaseOrder: 3,
@@ -576,7 +580,20 @@ func reconcileGoal(ctx context.Context, sessionID, goalID string) {
 		"SELECT COUNT(*) FROM swarm_tasks WHERE goal_id=?", goalID,
 	).Scan(&total)
 
+	// Note: 'done' and 'document' are terminal in the card/workflow stage sets.
+	// Re-query with the full terminal set so active == 0 means truly finished.
+	database.QueryRowContext(ctx, //nolint:errcheck
+		`SELECT COUNT(*) FROM swarm_tasks
+		 WHERE goal_id=? AND stage NOT IN ('done','document','complete','failed','cancelled','timed_out')`,
+		goalID,
+	).Scan(&active)
+
 	if total > 0 && active == 0 {
+		// Before marking complete: attempt auto-merge of any eligible PRs.
+		// The idempotency guard (last_merge_attempt_at) makes this safe to call
+		// on every reconcile — only un-attempted PRs are dispatched.
+		go maybeAutoMergeGoalPRs(context.Background(), sessionID, goalID)
+
 		now := time.Now().Unix()
 		if _, err := database.ExecContext(ctx,
 			"UPDATE swarm_goals SET status='complete', updated_at=? WHERE id=? AND status='active'",

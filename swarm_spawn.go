@@ -719,7 +719,7 @@ func writeResumeContext(ctx context.Context, agentID, sessionID, worktreePath st
 	var agentName, agentRole string
 	database.QueryRowContext(ctx,
 		"SELECT name, role FROM swarm_agents WHERE id = ?", agentID,
-	).Scan(&agentName, &agentRole)
+	).Scan(&agentName, &agentRole) //nolint:errcheck
 
 	// Latest notes (up to 5, newest first)
 	noteRows, _ := database.QueryContext(ctx,
@@ -738,12 +738,30 @@ func writeResumeContext(ctx context.Context, agentID, sessionID, worktreePath st
 	}
 
 	// Current assigned task (most recently updated)
-	var taskTitle, taskDesc, taskStage string
+	var taskID, taskTitle, taskDesc, taskStage, taskPhase, taskGoalID string
 	database.QueryRowContext(ctx,
-		`SELECT title, COALESCE(description,''), stage FROM swarm_tasks
+		`SELECT id, title, COALESCE(description,''), stage, COALESCE(phase,''), COALESCE(goal_id,'')
+		 FROM swarm_tasks
 		 WHERE session_id = ? AND agent_id = ? ORDER BY updated_at DESC LIMIT 1`,
 		sessionID, agentID,
-	).Scan(&taskTitle, &taskDesc, &taskStage)
+	).Scan(&taskID, &taskTitle, &taskDesc, &taskStage, &taskPhase, &taskGoalID) //nolint:errcheck
+
+	// C3: Look up the most recent handoff for any task in the same goal+phase.
+	// This enriches the resume context for continuation agents spawned after a
+	// context rotation (emergencyRotateAgent path).
+	var handoffSummary, handoffDiffRef, handoffNextSteps, handoffDecisions, handoffFailing string
+	if taskGoalID != "" && taskPhase != "" {
+		database.QueryRowContext(ctx,
+			`SELECT COALESCE(h.context_summary,''), COALESCE(h.current_diff_ref,''),
+			        COALESCE(h.next_steps,'[]'), COALESCE(h.decisions_log,'[]'),
+			        COALESCE(h.failing_tests,'[]')
+			 FROM swarm_task_handoffs h
+			 JOIN swarm_tasks t ON t.id = h.task_id
+			 WHERE t.goal_id = ? AND t.phase = ? AND t.id != ?
+			 ORDER BY h.created_at DESC LIMIT 1`,
+			taskGoalID, taskPhase, taskID,
+		).Scan(&handoffSummary, &handoffDiffRef, &handoffNextSteps, &handoffDecisions, &handoffFailing) //nolint:errcheck
+	}
 
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("# Resume Context — %s\n\n", agentName))
@@ -757,6 +775,29 @@ func writeResumeContext(ctx context.Context, agentID, sessionID, worktreePath st
 		}
 	}
 
+	// C3: Include handoff data from the previous agent if available.
+	if handoffSummary != "" {
+		sb.WriteString("## Previous Agent Handoff\n\n")
+		sb.WriteString("*The previous agent ran out of context. This is what they recorded:*\n\n")
+		sb.WriteString("### State Summary\n\n")
+		sb.WriteString(handoffSummary + "\n\n")
+		if handoffDiffRef != "" {
+			sb.WriteString(fmt.Sprintf("### Branch\n\nRun `git diff main...%s` to see current changes.\n\n", handoffDiffRef))
+		}
+		if handoffNextSteps != "" && handoffNextSteps != "[]" {
+			sb.WriteString("### Next Steps (from previous agent)\n\n")
+			sb.WriteString(handoffNextSteps + "\n\n")
+		}
+		if handoffDecisions != "" && handoffDecisions != "[]" {
+			sb.WriteString("### Key Decisions Made\n\n")
+			sb.WriteString(handoffDecisions + "\n\n")
+		}
+		if handoffFailing != "" && handoffFailing != "[]" {
+			sb.WriteString("### Failing Tests\n\n")
+			sb.WriteString(handoffFailing + "\n\n")
+		}
+	}
+
 	if len(notes) > 0 {
 		sb.WriteString("## Notes from Orchestrator / User\n\n")
 		for _, n := range notes {
@@ -766,9 +807,15 @@ func writeResumeContext(ctx context.Context, agentID, sessionID, worktreePath st
 	}
 
 	sb.WriteString("## Next Steps\n\n")
-	sb.WriteString("1. Run `git log --oneline -5` to see recent commits on this branch\n")
-	sb.WriteString("2. Review any uncommitted changes with `git diff`\n")
-	sb.WriteString("3. Continue work on the task above\n")
+	if handoffNextSteps == "" || handoffNextSteps == "[]" {
+		sb.WriteString("1. Run `git log --oneline -5` to see recent commits on this branch\n")
+		sb.WriteString("2. Review any uncommitted changes with `git diff`\n")
+		sb.WriteString("3. Continue work on the task above\n")
+	} else {
+		sb.WriteString("Continue from the previous agent's next steps (listed above).\n")
+		sb.WriteString("1. Run `git log --oneline -5` to see the last commit\n")
+		sb.WriteString("2. Run `git diff HEAD` to see any uncommitted work\n")
+	}
 
 	filePath := filepath.Join(worktreePath, "RESUME_CONTEXT.md")
 	return os.WriteFile(filePath, []byte(sb.String()), 0644)

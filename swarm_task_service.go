@@ -26,16 +26,17 @@ func setAgentStatus(ctx context.Context, agentID, status string) {
 // ─── Valid state transitions ──────────────────────────────────────────────────
 
 var validTransitions = map[string][]string{
-	"queued":       {"assigned"},
-	"assigned":     {"accepted", "queued"},
-	"accepted":     {"running", "blocked", "failed"},
-	"running":      {"complete", "blocked", "needs_review", "needs_human", "failed", "timed_out"},
-	"blocked":      {"queued", "running", "failed"},
-	"needs_review": {"running", "complete", "failed"},
-	"needs_human":  {"running", "complete", "failed"},
-	"complete":     {},
-	"timed_out":    {},
-	"failed":       {},
+	"queued":            {"assigned"},
+	"assigned":          {"accepted", "queued"},
+	"accepted":          {"running", "blocked", "failed"},
+	"running":           {"complete", "blocked", "needs_review", "needs_human", "failed", "timed_out"},
+	"blocked":           {"queued", "running", "failed"},
+	"needs_review":      {"running", "complete", "failed", "queued", "failed_ralph_loop"},
+	"needs_human":       {"running", "complete", "failed"},
+	"complete":          {},
+	"timed_out":         {},
+	"failed":            {},
+	"failed_ralph_loop": {}, // terminal — no outbound transitions
 }
 
 func isValidTransition(from, to string) bool {
@@ -140,7 +141,18 @@ func checkDependencies(ctx context.Context, taskID string) error {
 	return nil
 }
 
+// AcceptTaskParams carries optional parameters for AcceptTask.
+// scope_paths is the list of file/directory prefixes the agent will modify.
+// If nil or empty, a broad "/" lease is acquired (safe default for v1).
+type AcceptTaskParams struct {
+	ScopePaths []string
+}
+
 func AcceptTask(ctx context.Context, taskID, messageID string) error {
+	return AcceptTaskWithParams(ctx, taskID, messageID, AcceptTaskParams{})
+}
+
+func AcceptTaskWithParams(ctx context.Context, taskID, messageID string, params AcceptTaskParams) error {
 	if err := checkPhaseOrderConstraint(ctx, taskID); err != nil {
 		return err
 	}
@@ -153,6 +165,14 @@ func AcceptTask(ctx context.Context, taskID, messageID string) error {
 	if err := checkSessionBudget(ctx, taskID); err != nil {
 		return err
 	}
+
+	// H1: Acquire repo lease atomically at AcceptTask time (PR-6: eliminates TOCTOU
+	// that would arise from a separate /scope endpoint + AcceptTask round-trip).
+	// Scope is declared by the agent in the accept request; empty → broad "/" lease.
+	if err := acquireRepoLeaseForTask(ctx, taskID, params.ScopePaths); err != nil {
+		return fmt.Errorf("repo lease: %w", err)
+	}
+
 	if err := transitionTask(ctx, taskID, "accepted"); err != nil {
 		return err
 	}
@@ -161,6 +181,34 @@ func AcceptTask(ctx context.Context, taskID, messageID string) error {
 		swarmNullStr(messageID), time.Now().Unix(), taskID,
 	)
 	return err
+}
+
+// acquireRepoLeaseForTask looks up the task's session/goal/agent worktree and
+// calls acquireRepoLease. No-ops if the task has no associated worktree.
+func acquireRepoLeaseForTask(ctx context.Context, taskID string, scopePaths []string) error {
+	var sessionID, goalID string
+	var agentID sql.NullString
+	if err := database.QueryRowContext(ctx,
+		`SELECT session_id, COALESCE(goal_id,''), agent_id FROM swarm_tasks WHERE id=?`, taskID,
+	).Scan(&sessionID, &goalID, &agentID); err != nil {
+		return nil // task not found — let AcceptTask surface the error
+	}
+
+	if !agentID.Valid || agentID.String == "" {
+		return nil // no agent — scratch task, no worktree lease needed
+	}
+
+	// Look up the agent's repo path from its worktree.
+	var repoPath string
+	database.QueryRowContext(ctx,
+		`SELECT COALESCE(repo_path,'') FROM swarm_agents WHERE id=?`, agentID.String,
+	).Scan(&repoPath) //nolint:errcheck
+
+	if repoPath == "" {
+		return nil // scratch agent — no repo lease needed
+	}
+
+	return acquireRepoLease(ctx, database, sessionID, goalID, taskID, repoPath, scopePaths)
 }
 
 func StartTask(ctx context.Context, taskID string) error {
@@ -194,6 +242,10 @@ func CompleteTask(ctx context.Context, sessionID, agentID, taskID string, h IPCH
 	if err := transitionTask(ctx, taskID, newStage); err != nil {
 		return err
 	}
+
+	// H1: Release repo lease on terminal/review transition.
+	// needs_review is included so the lease is freed for the next retry attempt.
+	releaseRepoLease(ctx, database, taskID)
 
 	now := time.Now().Unix()
 	database.ExecContext(ctx, //nolint:errcheck
@@ -239,6 +291,8 @@ func BlockTask(ctx context.Context, sessionID, agentID, taskID, reason string) e
 	if err := transitionTask(ctx, taskID, "blocked"); err != nil {
 		return err
 	}
+	// H1: Release repo lease so other tasks can use the repo while this one is blocked.
+	releaseRepoLease(ctx, database, taskID)
 	_, err := database.ExecContext(ctx,
 		"UPDATE swarm_tasks SET blocked_reason=?, updated_at=? WHERE id=?",
 		reason, time.Now().Unix(), taskID,

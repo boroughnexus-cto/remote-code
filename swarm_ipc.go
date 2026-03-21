@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -24,11 +25,12 @@ type IPCEvent struct {
 	Reason      string  `json:"reason,omitempty"`
 	Status      string  `json:"status,omitempty"`
 	ContextPct  float64 `json:"context_pct,omitempty"`
-	HandoffPath string  `json:"handoff_path,omitempty"`
-	Content     string  `json:"content,omitempty"`
-	ModelName   string  `json:"model_name,omitempty"`
-	TokensUsed  int64   `json:"tokens_used,omitempty"`
-	Ts          int64   `json:"ts,omitempty"`
+	HandoffPath string   `json:"handoff_path,omitempty"`
+	Content     string   `json:"content,omitempty"`
+	ModelName   string   `json:"model_name,omitempty"`
+	TokensUsed  int64    `json:"tokens_used,omitempty"`
+	Ts          int64    `json:"ts,omitempty"`
+	ScopePaths  []string `json:"scope_paths,omitempty"` // H1: file/dir prefixes agent will modify
 }
 
 // IPCArtifact describes a file produced by an agent task.
@@ -61,6 +63,14 @@ type IPCHandoff struct {
 	TokensUsed           int64                `json:"tokens_used,omitempty"`
 	ContextPct           float64              `json:"context_pct,omitempty"`
 	CompletedAt          int64                `json:"completed_at"`
+
+	// C3 — Context handoff fields (all omitempty for backward compatibility)
+	ContextSummary     string   `json:"context_summary,omitempty"`
+	CurrentDiffRef     string   `json:"current_diff_ref,omitempty"` // branch name
+	DecisionsLog       []string `json:"decisions_log,omitempty"`
+	FailingTests       []string `json:"failing_tests,omitempty"`
+	NextSteps          []string `json:"next_steps,omitempty"`
+	AcceptanceCriteria []string `json:"acceptance_criteria,omitempty"`
 }
 
 // InboxMessage is written by the orchestrator into an agent's inbox dir.
@@ -189,10 +199,30 @@ func handleIPCEvent(ctx context.Context, sessionID, agentID string, ev IPCEvent)
 	switch ev.Event {
 	case "task_accepted":
 		if ev.TaskID != "" {
-			if err := AcceptTask(ctx, ev.TaskID, ev.MessageID); err != nil {
+			params := AcceptTaskParams{ScopePaths: ev.ScopePaths}
+			if err := AcceptTaskWithParams(ctx, ev.TaskID, ev.MessageID, params); err != nil {
 				log.Printf("ipc: AcceptTask error: %v", err)
+				// H1: Scope conflict — notify orchestrator so it can back off and retry.
+				var scopeErr ErrScopeConflict
+				if errors.As(err, &scopeErr) {
+					msg := InboxMessage{
+						Type:      "scope_conflict",
+						MessageID: generateSwarmID(),
+						Action:    fmt.Sprintf("Task %s could not acquire repo lease: %s. Back off and retry when the conflicting task completes.", ev.TaskID[:8], err.Error()),
+					}
+					// Find the orchestrator agent to notify.
+					var orchID string
+					database.QueryRowContext(ctx,
+						`SELECT id FROM swarm_agents WHERE session_id=? AND role='orchestrator' AND tmux_session IS NOT NULL LIMIT 1`,
+						sessionID,
+					).Scan(&orchID) //nolint:errcheck
+					if orchID != "" {
+						writeAgentInboxMsg(ctx, sessionID, orchID, msg) //nolint:errcheck
+					}
+				}
+			} else {
+				writeSwarmEvent(ctx, sessionID, agentID, ev.TaskID, "task_accepted", ev.Note)
 			}
-			writeSwarmEvent(ctx, sessionID, agentID, ev.TaskID, "task_accepted", ev.Note)
 			swarmBroadcaster.schedule(sessionID)
 		}
 
@@ -272,13 +302,77 @@ func processHandoffFile(ctx context.Context, sessionID, agentID, path string) er
 		return fmt.Errorf("handoff missing task_id")
 	}
 
+	// Validate handoff completeness (non-blocking — warnings only).
+	if warnings := validateHandoff(h); len(warnings) > 0 {
+		log.Printf("ipc: handoff task=%s warnings: %v", h.TaskID[:8], warnings)
+		// Store warnings in blocked_reason for visibility (overwritten on CompleteTask).
+		warnText := strings.Join(warnings, "; ")
+		database.ExecContext(ctx, //nolint:errcheck
+			"UPDATE swarm_tasks SET blocked_reason=? WHERE id=?",
+			"handoff warnings: "+warnText, h.TaskID,
+		)
+	}
+
 	// Remove handoff file only after CompleteTask succeeds — preserves the file
 	// if processing fails so the next poll cycle can retry.
 	if err := CompleteTask(ctx, sessionID, agentID, h.TaskID, h); err != nil {
 		return err
 	}
+
+	// Store handoff data in swarm_task_handoffs for continuation agent enrichment.
+	storeTaskHandoff(ctx, h)
+
 	os.Remove(path) //nolint:errcheck
 	return nil
+}
+
+// validateHandoff returns warnings for missing required handoff fields.
+// These are non-blocking — logged and stored for visibility but do not block completion.
+func validateHandoff(h IPCHandoff) []string {
+	var warnings []string
+	if h.ContextSummary == "" {
+		warnings = append(warnings, "missing context_summary")
+	}
+	if len(h.NextSteps) == 0 {
+		warnings = append(warnings, "missing next_steps")
+	}
+	return warnings
+}
+
+// storeTaskHandoff persists the C3 handoff fields to swarm_task_handoffs.
+// Called after CompleteTask succeeds. Uses INSERT OR REPLACE for idempotency.
+func storeTaskHandoff(ctx context.Context, h IPCHandoff) {
+	if h.ContextSummary == "" && len(h.NextSteps) == 0 &&
+		len(h.DecisionsLog) == 0 && len(h.FailingTests) == 0 {
+		return // nothing to store — old-style handoff without C3 fields
+	}
+	nextSteps := jsonEncodeStrings(h.NextSteps)
+	decisionsLog := jsonEncodeStrings(h.DecisionsLog)
+	failingTests := jsonEncodeStrings(h.FailingTests)
+	acceptanceCriteria := jsonEncodeStrings(h.AcceptanceCriteria)
+	_, err := database.ExecContext(ctx,
+		`INSERT OR REPLACE INTO swarm_task_handoffs
+		 (task_id, context_summary, current_diff_ref, next_steps, decisions_log,
+		  failing_tests, acceptance_criteria, confidence, created_at)
+		 VALUES (?,?,?,?,?,?,?,?,unixepoch())`,
+		h.TaskID, h.ContextSummary, h.CurrentDiffRef,
+		nextSteps, decisionsLog, failingTests, acceptanceCriteria, h.Confidence,
+	)
+	if err != nil {
+		log.Printf("ipc: storeTaskHandoff failed task=%s: %v", h.TaskID[:8], err)
+	}
+}
+
+// jsonEncodeStrings encodes a string slice as a JSON array, or returns "[]" on error.
+func jsonEncodeStrings(ss []string) string {
+	if ss == nil {
+		return "[]"
+	}
+	b, err := json.Marshal(ss)
+	if err != nil {
+		return "[]"
+	}
+	return string(b)
 }
 
 // ─── Heartbeat / context management ──────────────────────────────────────────
@@ -357,9 +451,25 @@ func handleHeartbeat(ctx context.Context, sessionID, agentID string, ev IPCEvent
 			MessageID:     generateSwarmID(),
 			Type:          "handoff_prepare",
 			TaskID:        taskID,
-			Action:        fmt.Sprintf("You are approaching context limit (%.0f%%). Write a complete handoff JSON to %s and emit task_complete to your outbox. A replacement agent will continue.", pct*100, handoffPath),
-			WriteTo:       handoffPath,
-			SentAt:        time.Now().Unix(),
+			Action: fmt.Sprintf(`Context at %.0f%%. Write a complete handoff JSON to %s NOW, then emit task_complete.
+
+Required fields (a continuation agent WILL read these):
+  "context_summary"     — What has been done, what state things are in (required)
+  "next_steps"          — Ordered list of what to do next (required, JSON array)
+  "current_diff_ref"    — Your branch name so the continuation agent can git diff
+  "decisions_log"       — Key decisions made and why (JSON array)
+  "failing_tests"       — Tests currently failing and why (JSON array)
+  "acceptance_criteria" — Criteria from spec that still need verification (JSON array)
+  "confidence"          — How complete the work is (0.0–1.0)
+  "tests_passed"        — true if all tests pass, false otherwise
+  "summary"             — Brief summary of overall progress
+  "task_id"             — "%s" (required)
+  "schema_version"      — "1"
+
+Write this file, then emit: {"event":"task_complete","task_id":"%s","handoff_path":"%s","ts":<unix>}`,
+				pct*100, handoffPath, taskID, taskID, handoffPath),
+			WriteTo: handoffPath,
+			SentAt:  time.Now().Unix(),
 		}
 		writeAgentInboxMsg(ctx, sessionID, agentID, msg) //nolint:errcheck
 		writeSwarmEvent(ctx, sessionID, agentID, taskID, "context_rotation_requested", fmt.Sprintf("%.0f%%", pct*100))
@@ -426,12 +536,29 @@ func emergencyRotateAgent(ctx context.Context, sessionID, agentID, capturedTmux 
 		time.Now().Unix(), agentID,
 	)
 
-	// Mark any running task as needs_review
+	// Mark any running task as needs_review first, then idempotently re-queue it.
+	// Two-step: transition to needs_review (valid from 'running'), then needs_review → queued.
 	if taskID != "" {
+		now := time.Now().Unix()
+		// H1: Release repo lease before re-queuing so the next agent can acquire it.
+		releaseRepoLease(ctx, database, taskID)
 		database.ExecContext(ctx, //nolint:errcheck
 			"UPDATE swarm_tasks SET stage='needs_review', blocked_reason='emergency context rotation', updated_at=?, stage_changed_at=? WHERE id=? AND stage='running'",
-			time.Now().Unix(), time.Now().Unix(), taskID,
+			now, now, taskID,
 		)
+		// Idempotent re-queue: only if still in needs_review (not already re-queued).
+		// requeued_at guard prevents duplicate dispatch on crash/retry.
+		result, err := database.ExecContext(ctx,
+			`UPDATE swarm_tasks SET stage='queued', agent_id=NULL, requeued_at=?, updated_at=?, stage_changed_at=?
+			 WHERE id=? AND stage='needs_review' AND requeued_at IS NULL`,
+			now, now, now, taskID,
+		)
+		if err == nil {
+			if n, _ := result.RowsAffected(); n > 0 {
+				log.Printf("ipc: emergency rotate re-queued task=%s", taskID[:8])
+				go autoDispatchQueuedTasks(context.Background(), sessionID)
+			}
+		}
 	}
 
 	writeSwarmEvent(ctx, sessionID, agentID, taskID, "agent_emergency_rotated", "context limit exceeded")
