@@ -191,10 +191,10 @@ func (ct *ChannelsTransport) ServeSSE(w http.ResponseWriter, r *http.Request) {
 		select {
 		case msg := <-q.ch:
 			lastEventID++
-			// Push as MCP notification so Claude Code injects it into the session.
-			notification := mcpNotification("notifications/message", map[string]any{
-				"level": notificationLevel(msg.Priority),
-				"data":  msg.Content,
+			// Push as MCP channel notification so Claude Code injects it into the session.
+			notification := mcpNotification("notifications/claude/channel", map[string]any{
+				"content": msg.Content,
+				"meta":    map[string]string{"source": "swarmops", "priority": notificationLevel(msg.Priority)},
 			})
 			fmt.Fprintf(w, "id: %d\ndata: %s\n\n", lastEventID, notification)
 			flusher.Flush()
@@ -262,8 +262,10 @@ func (ct *ChannelsTransport) ServeMessages(w http.ResponseWriter, r *http.Reques
 	case "initialize":
 		result = map[string]any{
 			"protocolVersion": "2025-11-25",
-			"capabilities":    map[string]any{"logging": map[string]any{}},
-			"serverInfo":      map[string]any{"name": "swarmops", "version": "1.0.0"},
+			"capabilities": map[string]any{
+				"experimental": map[string]any{"claude/channel": map[string]any{}},
+			},
+			"serverInfo": map[string]any{"name": "swarmops", "version": "1.0.0"},
 		}
 	case "tools/list":
 		result = map[string]any{"tools": []any{}}
