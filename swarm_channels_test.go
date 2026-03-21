@@ -256,7 +256,7 @@ func TestAgentLaunchArgs_ChannelsMode(t *testing.T) {
 
 	args := agentLaunchArgs(AgentLaunchConfig{AgentID: "agent-1", RunID: "run-abc", RunToken: "tok-xyz", DangerouslySkipPermissions: true})
 
-	// Expected: claude --dangerously-skip-permissions --mcp-config <path> --channels server:swarmops
+	// Expected: claude --dangerously-skip-permissions --mcp-config <path> --dangerously-load-development-channels server:swarmops
 	if len(args) != 6 {
 		t.Fatalf("channels mode: expected 6 args, got %v", args)
 	}
@@ -270,8 +270,8 @@ func TestAgentLaunchArgs_ChannelsMode(t *testing.T) {
 	if !strings.Contains(mcpConfigPath, "agent-1") || !strings.Contains(mcpConfigPath, "run-abc") {
 		t.Errorf("MCP config path missing agentID/runID: %q", mcpConfigPath)
 	}
-	if args[4] != "--channels" {
-		t.Errorf("args[4] should be '--channels', got %q", args[4])
+	if args[4] != "--dangerously-load-development-channels" {
+		t.Errorf("args[4] should be '--dangerously-load-development-channels', got %q", args[4])
 	}
 	if args[5] != "server:swarmops" {
 		t.Errorf("args[5] should be 'server:swarmops', got %q", args[5])

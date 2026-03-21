@@ -261,7 +261,7 @@ func (ct *ChannelsTransport) ServeMessages(w http.ResponseWriter, r *http.Reques
 	switch req.Method {
 	case "initialize":
 		result = map[string]any{
-			"protocolVersion": "2025-11-25",
+			"protocolVersion": "2024-11-05",
 			"capabilities": map[string]any{
 				"experimental": map[string]any{"claude/channel": map[string]any{}},
 			},
@@ -364,9 +364,10 @@ func agentLaunchArgs(cfg AgentLaunchConfig) []string {
 	switch TransportMode(getEnvOrDefault("SWARMOPS_TRANSPORT", string(TransportTmux))) {
 	case TransportChannels, TransportShadow, TransportCanary:
 		// Write a per-agent MCP config so Claude can find the swarmops SSE endpoint.
-		// --channels server:swarmops then activates this server as a message channel.
+		// --dangerously-load-development-channels is required because SwarmOps is not on
+		// Claude's built-in channels allowlist; --channels only works for allowlisted servers.
 		if cfgPath := writeMCPConfig(cfg.AgentID, cfg.RunID, cfg.RunToken); cfgPath != "" {
-			args = append(args, "--mcp-config", cfgPath, "--channels", "server:swarmops")
+			args = append(args, "--mcp-config", cfgPath, "--dangerously-load-development-channels", "server:swarmops")
 		}
 	}
 	return args
