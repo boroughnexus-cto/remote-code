@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"database/sql"
+	_ "embed"
 	"encoding/json"
 	"io"
 	"log"
@@ -17,6 +18,9 @@ import (
 	"github.com/creack/pty"
 	"github.com/gorilla/websocket"
 )
+
+//go:embed voice.html
+var voiceHTML []byte
 
 func init() {
 	// Load .env file if present (ignored in production where env vars are set externally)
@@ -90,6 +94,7 @@ func main() {
 
 	// Setup HTTP routes
 	http.HandleFunc("/", serveHome)
+	http.HandleFunc("/voice", serveVoice)
 	http.HandleFunc("/ws", authMiddleware(handleWebSocket))
 	http.HandleFunc("/ws/swarm", authMiddleware(handleSwarmWebSocket))
 	http.HandleFunc("/api/", handleAPIWithAuth)
@@ -132,9 +137,18 @@ func handleAPIWithAuth(w http.ResponseWriter, r *http.Request) {
 }
 
 func serveHome(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/" {
+		http.NotFound(w, r)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusNotFound)
-	w.Write([]byte(`{"error":"no web UI — use swarmops tui"}`)) //nolint:errcheck
+	w.Write([]byte(`{"status":"ok","ui":"/voice"}`)) //nolint:errcheck
+}
+
+func serveVoice(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Write(voiceHTML) //nolint:errcheck
 }
 
 func handleWebSocket(w http.ResponseWriter, r *http.Request) {

@@ -23,6 +23,7 @@ const (
 	tuiModalInjectAgent   // direct instruction to a specific agent
 	tuiModalEditTaskStage // manually set task stage
 	tuiModalAddNote       // add a note to an agent's memory
+	tuiModalFeedback      // alt-F feedback report → Plane issue
 )
 
 // pendingConfirmAction holds state for a two-press confirmation. The first key
@@ -82,6 +83,12 @@ func newTUIModal(kind tuiModalKind, sid string) *tuiModal {
 		specs = []spec{{"Message", "Direct instruction to agent's Claude Code session…"}}
 	case tuiModalAddNote:
 		specs = []spec{{"Note", "Observation, instruction, or context for the agent…"}}
+	case tuiModalFeedback:
+		specs = []spec{
+			{"Type", "bug  ·  feature  ·  ux"},
+			{"Summary", "one-line title for the Plane issue"},
+			{"Details", "optional extra context (viewport snapshot auto-attached)"},
+		}
 	}
 	fields := make([]tuiModalField, len(specs))
 	for i, s := range specs {
@@ -100,6 +107,7 @@ func newTUIModal(kind tuiModalKind, sid string) *tuiModal {
 		tuiModalQuickAgent:  "+ Quick Spawn Worker",
 		tuiModalInjectAgent: "Inject to Agent",
 		tuiModalAddNote:     "Add Agent Note",
+		tuiModalFeedback:    "Submit Feedback",
 	}
 	return &tuiModal{kind: kind, title: titles[kind], fields: fields, sid: sid}
 }
@@ -182,6 +190,10 @@ func (m tuiModel) updateModal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 	switch msg.String() {
 	case "esc":
+		if mo.kind == tuiModalFeedback {
+			m.feedbackCapture = nil
+			m.feedbackSubmitting = false
+		}
 		m.modal = nil
 		m.focus = tuiFocusSidebar
 
@@ -212,7 +224,20 @@ func (m tuiModel) updateModal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					return m, tea.Batch(cmds...)
 				}
 			}
+			// Block double-submit for feedback modal
+			if mo.kind == tuiModalFeedback && m.feedbackSubmitting {
+				return m, tea.Batch(cmds...)
+			}
 			cmd := m.submitModal()
+			if mo.kind == tuiModalFeedback {
+				// Keep modal open until result arrives; set submitting flag
+				if cmd != nil {
+					m.feedbackSubmitting = true
+					mo.err = ""
+					return m, cmd
+				}
+				return m, tea.Batch(cmds...)
+			}
 			m.modal = nil
 			m.pendingConfirm = nil
 			m.focus = tuiFocusSidebar
@@ -349,6 +374,21 @@ func (m tuiModel) submitModal() tea.Cmd {
 			"/api/swarm/sessions/"+mo.sid+"/agents/"+mo.eid+"/note",
 			map[string]string{"content": content, "created_by": "user"},
 		)
+
+	case tuiModalFeedback:
+		summary := mo.value(1)
+		if summary == "" {
+			return nil
+		}
+		issueType := mo.value(0)
+		if issueType == "" {
+			issueType = "feature"
+		}
+		details := mo.value(2)
+		if m.feedbackCapture == nil {
+			return nil
+		}
+		return submitFeedbackCmd(*m.feedbackCapture, summary, details, issueType)
 	}
 	return nil
 }
@@ -376,6 +416,12 @@ func (m tuiModel) viewModal() string {
 	if mo.kind == tuiModalConfirmTyped {
 		hint := "type exact name to enable confirm  ·  Enter confirm  ·  Esc cancel"
 		sb.WriteString(dimStyle.Render(hint))
+	} else if mo.kind == tuiModalFeedback {
+		if m.feedbackSubmitting {
+			sb.WriteString(lipgloss.NewStyle().Foreground(colorTeal).Render("Submitting…"))
+		} else {
+			sb.WriteString(dimStyle.Render("Tab/↑↓ next field  ·  Enter submit  ·  Esc cancel  ·  snapshot attached"))
+		}
 	} else {
 		sb.WriteString(dimStyle.Render("Tab/↑↓ next field  ·  Enter confirm  ·  Esc cancel"))
 	}

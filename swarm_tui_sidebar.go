@@ -547,6 +547,14 @@ func (m tuiModel) updateSidebar(msg tea.KeyMsg) (tuiModel, []tea.Cmd) {
 
 	case "R":
 		cmds = append(cmds, m.client.fetchAll())
+
+	case "alt+f":
+		// Capture current TUI state and open feedback modal
+		fc := captureFeedbackState(&m)
+		m.feedbackCapture = &fc
+		m.feedbackSubmitting = false
+		m.modal = newTUIModal(tuiModalFeedback, m.selSessionID())
+		m.focus = tuiFocusModal
 	}
 	return m, cmds
 }

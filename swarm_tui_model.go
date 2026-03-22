@@ -109,6 +109,10 @@ type tuiModel struct {
 	evtDetailView   *tuiEvent
 	vpRawEvents     map[string][]tuiEvent
 
+	// Feedback (alt-F)
+	feedbackCapture    *tuiFeedbackCapture
+	feedbackSubmitting bool
+
 	// Git status cache (agentID → last fetched status)
 	gitStatus    map[string]tuiGitStatus
 	gitFetching  bool
@@ -430,6 +434,22 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tuiRolePromptSavedMsg:
 		m.setFlash("Role prompt updated: "+msg.role, false)
 
+	case tuiFeedbackResultMsg:
+		m.feedbackSubmitting = false
+		m.feedbackCapture = nil
+		if msg.err != nil {
+			// Keep modal open so user can retry
+			if m.modal != nil && m.modal.kind == tuiModalFeedback {
+				m.modal.err = msg.err.Error()
+			} else {
+				m.setFlash("Feedback failed: "+msg.err.Error(), true)
+			}
+		} else {
+			m.modal = nil
+			m.focus = tuiFocusSidebar
+			m.setFlash(fmt.Sprintf("Feedback submitted — SWM-%d", msg.seqID), false)
+		}
+
 	case tea.KeyMsg:
 		// ? shows hold-to-view help from anywhere; each press resets the hide timer.
 		if msg.String() == "?" {
@@ -437,6 +457,17 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.helpVersion++
 			cmds = append(cmds, hideHelpAfter(m.helpVersion))
 			break
+		}
+		// alt+F opens the feedback modal from any view (except when feedback modal already open)
+		if msg.String() == "alt+f" {
+			if m.modal == nil || m.modal.kind != tuiModalFeedback {
+				fc := captureFeedbackState(&m)
+				m.feedbackCapture = &fc
+				m.feedbackSubmitting = false
+				m.modal = newTUIModal(tuiModalFeedback, m.selSessionID())
+				m.focus = tuiFocusModal
+				break
+			}
 		}
 		// Any other key hides the help overlay immediately.
 		if m.helpVisible {

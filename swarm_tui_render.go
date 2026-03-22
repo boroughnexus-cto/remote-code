@@ -1088,7 +1088,8 @@ func (m tuiModel) viewHelpScreen() string {
 	sb.WriteString(key("e", "Escalations — pending human-in-the-loop requests") + "\n")
 	sb.WriteString(key("g", "Goals — goal status + budget tracking") + "\n")
 	sb.WriteString(key("W", "Work queue — Plane backlog") + "\n")
-	sb.WriteString(key("R", "Refresh all data") + "\n\n")
+	sb.WriteString(key("R", "Refresh all data") + "\n")
+	sb.WriteString(key("Alt+F", "Submit feedback / bug report to Plane (snapshot auto-attached)") + "\n\n")
 
 	sb.WriteString(dim("  Hold ? to keep this screen open · release to dismiss"))
 
