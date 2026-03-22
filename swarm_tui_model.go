@@ -27,9 +27,11 @@ type tuiModel struct {
 	cursor int
 
 	// Right pane
-	vp      viewport.Model
-	vpReady bool
-	vpLines map[string][]string // sid → rendered log lines
+	vp       viewport.Model
+	vpReady  bool
+	vpLines          map[string][]string // sid → rendered log lines
+	vpPinned         bool                // true = auto-scroll to bottom; false = user scrolled up
+	vpLastContentKey string              // last content key; vpPinned resets to true when this changes
 
 	// Input
 	chatInput textarea.Model
@@ -137,6 +139,7 @@ func newTUIModel() tuiModel {
 		escInput:          ei,
 		client:            c,
 		ws:                ws,
+		vpPinned:          true, // start pinned to bottom; scrolling up unpins
 	}
 }
 
@@ -189,9 +192,16 @@ func (m *tuiModel) updateVP() {
 	if it != nil && it.kind == tuiItemAgent {
 		agent := m.lookupAgent(it.sid, it.eid)
 		if agent != nil && agent.TmuxSession != nil {
+			key := "term:" + it.sid + ":" + it.eid
+			if key != m.vpLastContentKey {
+				m.vpLastContentKey = key
+				m.vpPinned = true
+			}
 			if content, ok := m.termContent[it.eid]; ok && content != "" {
 				m.vp.SetContent(content)
-				m.vp.GotoBottom()
+				if m.vpPinned {
+					m.vp.GotoBottom()
+				}
 				return
 			}
 			m.vp.SetContent(dimStyle.Render("  Fetching terminal…"))
@@ -199,13 +209,20 @@ func (m *tuiModel) updateVP() {
 		}
 	}
 	sid := m.selSessionID()
+	key := "events:" + sid
+	if key != m.vpLastContentKey {
+		m.vpLastContentKey = key
+		m.vpPinned = true
+	}
 	lines := m.vpLines[sid]
 	if len(lines) == 0 {
 		m.vp.SetContent(dimStyle.Render("  No events yet"))
 		return
 	}
 	m.vp.SetContent(strings.Join(lines, "\n"))
-	m.vp.GotoBottom()
+	if m.vpPinned {
+		m.vp.GotoBottom()
+	}
 }
 
 func tuiEventColor(evType string) lipgloss.Color {
@@ -250,7 +267,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.WindowSizeMsg:
 		m.w, m.h = msg.Width, msg.Height
-		bodyH := m.h - 3 - 1 - tuiInputH - 2 // hud(content+border+join-newline) + help + input rows + input borders
+		bodyH := m.h - 3 - 1 - tuiInputH - 2 - 1 // hud(content+border+join-newline) + help + input rows + input borders + status bar
 		if bodyH < 5 {
 			bodyH = 5
 		}
@@ -455,12 +472,40 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	// Pass scroll events to viewport when sidebar focused
-	if m.focus == tuiFocusSidebar && m.vpReady {
-		var cmd tea.Cmd
-		m.vp, cmd = m.vp.Update(msg)
-		if cmd != nil {
-			cmds = append(cmds, cmd)
+	// PageUp / PageDown and mouse wheel always scroll the Claude Code viewport,
+	// regardless of which pane has keyboard focus.
+	if m.vpReady {
+		switch msg := msg.(type) {
+		case tea.KeyMsg:
+			switch msg.String() {
+			case "pgup", "pgdown":
+				prevOffset := m.vp.YOffset
+				var cmd tea.Cmd
+				m.vp, cmd = m.vp.Update(msg)
+				if cmd != nil {
+					cmds = append(cmds, cmd)
+				}
+				if m.vp.YOffset < prevOffset {
+					m.vpPinned = false // scrolled up — unpin
+				} else if m.vp.AtBottom() {
+					m.vpPinned = true // scrolled back to bottom — re-pin
+				}
+			}
+		case tea.MouseMsg:
+			if msg.Action == tea.MouseActionPress &&
+				(msg.Button == tea.MouseButtonWheelUp || msg.Button == tea.MouseButtonWheelDown) {
+				prevOffset := m.vp.YOffset
+				var cmd tea.Cmd
+				m.vp, cmd = m.vp.Update(msg)
+				if cmd != nil {
+					cmds = append(cmds, cmd)
+				}
+				if m.vp.YOffset < prevOffset {
+					m.vpPinned = false // scrolled up — unpin
+				} else if m.vp.AtBottom() {
+					m.vpPinned = true // scrolled back to bottom — re-pin
+				}
+			}
 		}
 	}
 
@@ -512,7 +557,7 @@ func (m tuiModel) updateInput(msg tea.KeyMsg) (tuiModel, []tea.Cmd) {
 // ─── Entry Point ─────────────────────────────────────────────────────────────
 
 func RunSwarmTUI() {
-	p := tea.NewProgram(newTUIModel(), tea.WithAltScreen())
+	p := tea.NewProgram(newTUIModel(), tea.WithAltScreen(), tea.WithMouseCellMotion())
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "swarm TUI error: %v\n", err)
 		os.Exit(1)

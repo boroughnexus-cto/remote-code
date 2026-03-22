@@ -570,13 +570,20 @@ func (m tuiModel) viewDetail(bodyH int) string {
 			m.viewTaskDetail(&det, it.sid, it.eid, rightW)
 		}
 	}
-	// Pad detail to tuiDetailH lines
+	// Clamp detail to exactly tuiDetailH lines (pad up, truncate down).
 	detStr := det.String()
-	n := strings.Count(detStr, "\n")
-	for n < tuiDetailH {
-		detStr += "\n"
-		n++
+	detLines := strings.Split(detStr, "\n")
+	// Split always produces at least one element; trim trailing empty from WriteString's trailing \n.
+	if len(detLines) > 0 && detLines[len(detLines)-1] == "" {
+		detLines = detLines[:len(detLines)-1]
 	}
+	if len(detLines) > tuiDetailH {
+		detLines = detLines[:tuiDetailH]
+	}
+	for len(detLines) < tuiDetailH {
+		detLines = append(detLines, "")
+	}
+	detStr = strings.Join(detLines, "\n") + "\n"
 	// Divider + viewport
 	divLine := dimStyle.Render(strings.Repeat("─", rightW))
 	vpStr := ""
