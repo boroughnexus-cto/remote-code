@@ -127,6 +127,9 @@ type tuiModel struct {
 	// Command Palette (: key)
 	cmdPalette *cmdPaletteModel
 
+	// Settings overlay (Esc from sidebar)
+	settings *tuiSettingsModel
+
 	// Git status cache (agentID → last fetched status)
 	gitStatus    map[string]tuiGitStatus
 	gitFetching  bool
@@ -496,6 +499,20 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.setFlash(fmt.Sprintf("Feedback submitted — SWM-%d", msg.seqID), false)
 		}
 
+	case personasLoadedMsg:
+		applyPersonasLoaded(&m, msg)
+
+	case sessionContextsLoadedMsg:
+		applySessionContextsLoaded(&m, msg)
+
+	case sessionContextSavedMsg:
+		applySessionContextSaved(&m, msg)
+		if msg.err == nil {
+			m.setFlash("Session context saved", false)
+		} else {
+			m.setFlash("Save failed: "+msg.err.Error(), true)
+		}
+
 	case opsFleetActionMsg:
 		if msg.err != nil {
 			m.setFlash("Fleet action failed: "+msg.err.Error(), true)
@@ -546,6 +563,8 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.cmdPalette != nil {
 			m, cmds = m.updateCmdPalette(msg)
+		} else if m.settings != nil {
+			m, cmds = m.updateSettings(msg)
 		} else if m.modal != nil || m.focus == tuiFocusModal {
 			return m.updateModal(msg)
 		} else if m.opsView {

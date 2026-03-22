@@ -157,6 +157,17 @@ func (m tuiModel) updateSidebar(msg tea.KeyMsg) (tuiModel, []tea.Cmd) {
 		m.ws.closeAll()
 		cmds = append(cmds, tea.Quit)
 
+	case "esc":
+		// Open settings overlay when no other overlay is active
+		if m.modal == nil && m.settings == nil && !m.opsView && m.cmdPalette == nil {
+			st := newTUISettings()
+			m.settings = st
+			// Kick off data load for the first active section
+			if st.activeSection() != nil {
+				cmds = append(cmds, st.activeSection().Init())
+			}
+		}
+
 	case "up", "k", "w":
 		if m.cursor > 0 {
 			m.cursor--
