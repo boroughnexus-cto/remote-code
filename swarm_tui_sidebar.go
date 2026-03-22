@@ -162,7 +162,7 @@ func (m tuiModel) updateSidebar(msg tea.KeyMsg) (tuiModel, []tea.Cmd) {
 			m.cursor--
 			m.updateVP()
 		}
-	case "down", "j":
+	case "down", "j", "s":
 		if m.cursor < len(m.items)-1 {
 			m.cursor++
 			m.updateVP()
@@ -205,7 +205,7 @@ func (m tuiModel) updateSidebar(msg tea.KeyMsg) (tuiModel, []tea.Cmd) {
 			}
 		}
 
-	case "s":
+	case "alt+s":
 		it := m.selItem()
 		if it != nil && it.kind == tuiItemAgent {
 			agent := m.lookupAgent(it.sid, it.eid)

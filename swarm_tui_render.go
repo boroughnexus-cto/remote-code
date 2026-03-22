@@ -1066,14 +1066,14 @@ func (m tuiModel) viewHelpScreen() string {
 
 	// ── Keys ──
 	sb.WriteString(h("NAVIGATION") + "\n")
-	sb.WriteString(key("↑↓  j k", "Move sidebar cursor") + "\n")
+	sb.WriteString(key("↑↓  j k  w s", "Move sidebar cursor") + "\n")
 	sb.WriteString(key("Enter (session)", "Collapse / expand session in sidebar") + "\n")
 	sb.WriteString(key("Enter (agent)", "Attach to agent's tmux session") + "\n")
 	sb.WriteString(key("Tab  /", "Focus chat / message bar") + "\n")
 	sb.WriteString(key("q", "Quit") + "\n\n")
 
 	sb.WriteString(h("ACTIONS") + "\n")
-	sb.WriteString(key("s", "Spawn agent") + "\n")
+	sb.WriteString(key("Alt+S", "Spawn agent") + "\n")
 	sb.WriteString(key("d  d", "Stop agent (press twice to confirm)") + "\n")
 	sb.WriteString(key("i", "Inject message to agent's Claude Code session") + "\n")
 	sb.WriteString(key("N", "View and add agent notes") + "\n")
