@@ -1,8 +1,5 @@
 package main
 
-// TODO main.go: call globalConfigService = newConfigService(db) after db init
-// TODO swarm.go: register handleConfigAPI under /api/swarm/config
-
 import (
 	"database/sql"
 	"encoding/json"

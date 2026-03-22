@@ -601,8 +601,7 @@ func applySessionContextSaved(m *tuiModel, msg sessionContextSavedMsg) {
 			if msg.err != nil {
 				sc.err = msg.err.Error()
 			} else {
-				// Reload
-				_ = sc.Init() // trigger reload on next tick via re-open
+				sc.loading = true // caller must dispatch sc.Init() to complete the reload
 			}
 			return
 		}

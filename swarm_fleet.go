@@ -10,9 +10,6 @@ import (
 	"time"
 )
 
-// TODO swarm.go: add case "fleet" in handleSwarmAPI to route to handleFleetAPI
-// TODO main.go: no init needed — globalFleetState initialises at var declaration time
-
 // fleetMode represents the current operating mode of the agent fleet.
 type fleetMode string
 

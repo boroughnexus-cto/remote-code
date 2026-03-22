@@ -528,6 +528,14 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		applySessionContextSaved(&m, msg)
 		if msg.err == nil {
 			m.setFlash("Session context saved", false)
+			// Trigger reload in section
+			if m.settings != nil {
+				for _, sec := range m.settings.sections {
+					if sc, ok := sec.(*sessionContextsSection); ok && sc.loading {
+						cmds = append(cmds, sc.Init())
+					}
+				}
+			}
 		} else {
 			m.setFlash("Save failed: "+msg.err.Error(), true)
 		}
