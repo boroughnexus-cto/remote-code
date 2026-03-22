@@ -32,12 +32,13 @@
 		agent: Agent;
 		tasks: Task[];
 		sessionId: string;
+		spawning?: boolean;
 		onSpawn: (agentId: string) => void;
 		onDespawn: (agentId: string) => void;
 		onAddNote?: (agentId: string, content: string) => Promise<void>;
 	}
 
-	let { agent, tasks, sessionId, onSpawn, onDespawn, onAddNote }: Props = $props();
+	let { agent, tasks, sessionId, spawning = false, onSpawn, onDespawn, onAddNote }: Props = $props();
 
 	let showNoteForm = $state(false);
 	let noteText = $state('');
@@ -367,13 +368,25 @@
 			<button
 				type="button"
 				onclick={() => onSpawn(agent.id)}
-				class="flex-1 flex items-center justify-center gap-1 py-1.5 rounded-lg bg-vanna-teal text-white text-xs font-medium hover:bg-vanna-teal/90 transition-colors"
+				disabled={spawning}
+				class="flex-1 flex items-center justify-center gap-1.5 py-2 rounded-lg text-sm font-semibold transition-all
+					{spawning
+						? 'bg-vanna-teal/60 text-white/70 cursor-not-allowed'
+						: 'bg-gradient-to-r from-vanna-teal to-teal-500 text-white shadow-md shadow-vanna-teal/30 hover:shadow-lg hover:shadow-vanna-teal/40 hover:brightness-110 active:scale-95'}"
 				title="Spawn agent"
 			>
-				<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
-				</svg>
-				Spawn
+				{#if spawning}
+					<svg class="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+						<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3"/>
+						<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"/>
+					</svg>
+					Spawning…
+				{:else}
+					<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/>
+					</svg>
+					Spawn
+				{/if}
 			</button>
 		{:else}
 			<button

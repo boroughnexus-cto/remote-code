@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textinput"
@@ -453,6 +454,18 @@ func (s *sessionContextsSection) Update(msg tea.KeyMsg) (SettingsSectionModel, [
 			s.editField = 0
 			s.editing = true
 		}
+	case "d", "delete":
+		if len(s.items) > 0 {
+			id := s.items[s.cursor].id
+			return s, []tea.Cmd{func() tea.Msg {
+				_, err := database.ExecContext(context.Background(),
+					"DELETE FROM session_contexts WHERE id=?", id)
+				if err != nil {
+					return tuiErrMsg{op: "delete-context", text: err.Error()}
+				}
+				return tuiDoneMsg{op: "delete-context"}
+			}}
+		}
 	}
 	return s, nil
 }
@@ -469,6 +482,39 @@ func (s *sessionContextsSection) updateEditing(msg tea.KeyMsg) (SettingsSectionM
 		s.fields[s.editField].Blur()
 		s.editField = (s.editField - 1 + len(s.fields)) % len(s.fields)
 		s.fields[s.editField].Focus()
+	case "ctrl+e":
+		// Open content in $EDITOR — only for existing (saved) contexts
+		if s.draft.id == "" {
+			break // must save metadata first
+		}
+		f, err := os.CreateTemp("", "swarm-ctx-*.md")
+		if err != nil {
+			break
+		}
+		f.WriteString(s.draft.content) //nolint:errcheck
+		f.Close()
+		tmpPath := f.Name()
+		// Snapshot draft fields before suspending
+		ctxID := s.draft.id
+		ctxName := strings.TrimSpace(s.fields[0].Value())
+		ctxDesc := strings.TrimSpace(s.fields[1].Value())
+		ctxTags := strings.TrimSpace(s.fields[2].Value())
+		if ctxName == "" {
+			ctxName = s.draft.name
+		}
+		editorBin, editorArgs := resolveEditor()
+		return s, []tea.Cmd{func() tea.Msg {
+			return tuiCtxContentEditMsg{
+				ctxID:      ctxID,
+				ctxName:    ctxName,
+				ctxDesc:    ctxDesc,
+				ctxTags:    ctxTags,
+				tmpPath:    tmpPath,
+				editor:     editorBin,
+				editorArgs: editorArgs,
+			}
+		}}
+
 	case "enter":
 		if s.editField < len(s.fields)-1 {
 			s.fields[s.editField].Blur()
@@ -544,7 +590,7 @@ func (s *sessionContextsSection) View(w, h int) string {
 		}
 	}
 
-	sb.WriteString("\n" + dimStyle.Render("n new  e/Enter edit  ↑/↓ navigate"))
+	sb.WriteString("\n" + dimStyle.Render("n new  e/Enter edit  d delete  ↑/↓ navigate"))
 	return sb.String()
 }
 
@@ -567,7 +613,11 @@ func (s *sessionContextsSection) viewEditing(w int) string {
 		sb.WriteString("  " + f.View() + "\n\n")
 	}
 
-	sb.WriteString(dimStyle.Render("Note: edit full content in $EDITOR via the API") + "\n\n")
+	if s.draft.id != "" {
+		sb.WriteString(dimStyle.Render("Ctrl+E  edit full content in $EDITOR") + "\n\n")
+	} else {
+		sb.WriteString(dimStyle.Render("Save metadata first, then Ctrl+E to edit full content") + "\n\n")
+	}
 	sb.WriteString(dimStyle.Render("Tab/↑↓ next field  Enter save (on last field)  Esc cancel"))
 	return sb.String()
 }

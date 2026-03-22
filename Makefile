@@ -1,4 +1,4 @@
-.PHONY: build clean dev frontend backend install run sqlc-generate test test-race test-swarm vet lint ci
+.PHONY: build clean dev frontend backend install run restart sqlc-generate test test-race test-swarm vet lint ci
 
 GIT_COMMIT := $(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
 
@@ -27,8 +27,13 @@ clean:
 
 run: build
 	@echo "Killing any process running on port 8080..."
-	@lsof -ti:8080 | xargs -r kill -9 2>/dev/null || true
+	@fuser -k 8080/tcp 2>/dev/null || true
 	./swarmops
+
+restart: build
+	@fuser -k 8080/tcp 2>/dev/null || true
+	systemctl --user restart swarmops
+	@echo "SwarmOps restarted ($(GIT_COMMIT))"
 
 ## test: run all tests
 test:

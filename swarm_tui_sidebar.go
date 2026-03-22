@@ -19,6 +19,7 @@ const (
 	tuiItemSession tuiItemKind = iota
 	tuiItemAgent
 	tuiItemTask
+	tuiItemControlTower // pinned fleet supervisor — cannot be deleted
 )
 
 type tuiSidebarItem struct {
@@ -39,6 +40,8 @@ func (m *tuiModel) rebuildItems() {
 	}
 
 	m.items = nil
+	// Control Tower is always pinned at the top.
+	m.items = append(m.items, tuiSidebarItem{kind: tuiItemControlTower})
 	for _, sess := range m.sessions {
 		m.items = append(m.items, tuiSidebarItem{kind: tuiItemSession, sid: sess.ID})
 		if m.collapsedSessions[sess.ID] {
@@ -91,9 +94,10 @@ func (m tuiModel) selItem() *tuiSidebarItem {
 
 func (m tuiModel) selSessionID() string {
 	it := m.selItem()
-	if it != nil {
+	if it != nil && it.kind != tuiItemControlTower {
 		return it.sid
 	}
+	// Control Tower selected (or no item): fall back to first session.
 	if len(m.sessions) > 0 {
 		return m.sessions[0].ID
 	}
@@ -187,6 +191,10 @@ func (m tuiModel) updateSidebar(msg tea.KeyMsg) (tuiModel, []tea.Cmd) {
 		it := m.selItem()
 		if it != nil {
 			switch it.kind {
+			case tuiItemControlTower:
+				m.ctView = true
+				return m, nil
+
 			case tuiItemSession:
 				// Toggle collapse
 				if m.collapsedSessions[it.sid] {
@@ -344,6 +352,10 @@ func (m tuiModel) updateSidebar(msg tea.KeyMsg) (tuiModel, []tea.Cmd) {
 
 	case "X":
 		it := m.selItem()
+		if it != nil && it.kind == tuiItemControlTower {
+			m.setFlash("Control Tower is permanent — it cannot be deleted", false)
+			break
+		}
 		if it != nil && it.kind == tuiItemSession {
 			sess := m.lookupSession(it.sid)
 			if sess != nil {
@@ -528,12 +540,26 @@ func (m tuiModel) updateSidebar(msg tea.KeyMsg) (tuiModel, []tea.Cmd) {
 			tmpPath := f.Name()
 			f.WriteString(currentPrompt) //nolint:errcheck
 			f.Close()
-			editor := os.Getenv("EDITOR")
-			if editor == "" {
-				editor = "vi"
-			}
-			return tuiRolePromptEditMsg{role: roleCapture, tmpPath: tmpPath, editor: editor}
+			editorBin, editorArgs := resolveEditor()
+			return tuiRolePromptEditMsg{role: roleCapture, tmpPath: tmpPath, editor: editorBin, editorArgs: editorArgs}
 		})
+
+	case "C":
+		// Open context picker for the selected session
+		it := m.selItem()
+		sid := ""
+		if it != nil && it.kind == tuiItemSession {
+			sid = it.sid
+		} else if it != nil && it.kind == tuiItemControlTower {
+			m.setFlash("Select a session to assign a context", false)
+			break
+		} else {
+			sid = m.selSessionID()
+		}
+		if sid != "" {
+			m.ctxPicker = newCtxPicker(sid)
+			cmds = append(cmds, fetchContextsForPicker())
+		}
 
 	case "o", "O":
 		m.opsView = true
@@ -602,6 +628,33 @@ func (m tuiModel) viewSidebar(h int) string {
 		}
 		sel := i == m.cursor && m.focus == tuiFocusSidebar
 		switch it.kind {
+		case tuiItemControlTower:
+			mode := strings.ToUpper(m.statusBar.fleetMode)
+			if mode == "" {
+				mode = "NORMAL"
+			}
+			var modeC lipgloss.Color
+			switch m.statusBar.fleetMode {
+			case "contain":
+				modeC = colorRed
+			case "stabilize":
+				modeC = colorOrange
+			default:
+				modeC = colorGreen
+			}
+			modeSuffix := " " + lipgloss.NewStyle().Foreground(modeC).Render(mode)
+			base := lipgloss.NewStyle().Foreground(colorTeal).Bold(true)
+			if sel {
+				base = base.Background(colorSubtle)
+				modeSuffix = lipgloss.NewStyle().Foreground(modeC).Background(colorSubtle).Render(mode)
+				modeSuffix = " " + modeSuffix
+			}
+			lines = append(lines, base.Width(tuiSidebarW-len([]rune(mode))-1).Render("⊕ Control Tower")+modeSuffix)
+			// Thin separator below CT
+			if len(lines) < h {
+				lines = append(lines, dimStyle.Width(tuiSidebarW).Render(strings.Repeat("─", tuiSidebarW)))
+			}
+
 		case tuiItemSession:
 			sess := m.lookupSession(it.sid)
 			if sess == nil {
@@ -620,6 +673,10 @@ func (m tuiModel) viewSidebar(h int) string {
 			collapsePrefix := "▼ "
 			if collapsed {
 				collapsePrefix = "▶ "
+			}
+			ctxBadge := ""
+			if sess.ContextName != nil {
+				ctxBadge = " " + lipgloss.NewStyle().Foreground(colorPurple).Render("@"+truncStr(*sess.ContextName, 10))
 			}
 			name := truncStr(sess.Name, tuiSidebarW-9)
 			suffix := ""
@@ -643,6 +700,8 @@ func (m tuiModel) viewSidebar(h int) string {
 				} else if live > 0 {
 					suffix = lipgloss.NewStyle().Foreground(colorTeal).Render(fmt.Sprintf(" ·%d", live))
 				}
+				// Context badge shown alongside (appended after exceptions)
+				suffix += ctxBadge
 			}
 			base := lipgloss.NewStyle().Foreground(colorText).Bold(true)
 			if pendingDel {

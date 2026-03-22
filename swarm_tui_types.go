@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -67,6 +69,8 @@ type tuiSession struct {
 	Name                  string  `json:"name"`
 	AutopilotEnabled      bool    `json:"autopilot_enabled"`
 	AutopilotPlaneProject *string `json:"autopilot_plane_project_id,omitempty"`
+	ContextID             *string `json:"context_id,omitempty"`
+	ContextName           *string `json:"context_name,omitempty"`
 }
 
 type tuiEvent struct {
@@ -108,11 +112,38 @@ type tuiState struct {
 // ─── Messages ─────────────────────────────────────────────────────────────────
 
 type tuiAnimTickMsg struct{}
+type tuiSlowTickMsg struct{}
 type tuiRolePromptSavedMsg struct{ role string }
 type tuiRolePromptEditMsg struct {
-	role    string
-	tmpPath string
-	editor  string
+	role       string
+	tmpPath    string
+	editor     string
+	editorArgs []string
+}
+
+type tuiCtxContentEditMsg struct {
+	ctxID      string
+	ctxName    string
+	ctxDesc    string
+	ctxTags    string
+	tmpPath    string
+	editor     string
+	editorArgs []string
+}
+
+// resolveEditor reads $VISUAL then $EDITOR, splits into binary + pre-file args.
+// Supports common forms like "code --wait" or "emacsclient -c".
+// Falls back to "vi" when neither variable is set.
+func resolveEditor() (bin string, args []string) {
+	raw := os.Getenv("VISUAL")
+	if raw == "" {
+		raw = os.Getenv("EDITOR")
+	}
+	parts := strings.Fields(raw)
+	if len(parts) == 0 {
+		return "vi", nil
+	}
+	return parts[0], parts[1:]
 }
 type tuiTermMsg struct {
 	agentID string
@@ -171,6 +202,10 @@ type tuiFleetModeMsg struct {
 
 func tuiAnimTick() tea.Cmd {
 	return tea.Tick(150*time.Millisecond, func(time.Time) tea.Msg { return tuiAnimTickMsg{} })
+}
+
+func tuiSlowTick() tea.Cmd {
+	return tea.Tick(30*time.Second, func(time.Time) tea.Msg { return tuiSlowTickMsg{} })
 }
 
 func hideHelpAfter(version int) tea.Cmd {

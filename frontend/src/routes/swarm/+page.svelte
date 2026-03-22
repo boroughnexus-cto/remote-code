@@ -14,6 +14,7 @@
 		waiting_agents: number;
 		tasks_by_stage: Record<string, number>;
 		last_event_ts: number;
+		context_name?: string | null;
 	}
 
 	let sessions = $state<SessionStats[]>([]);

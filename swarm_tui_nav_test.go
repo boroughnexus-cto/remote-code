@@ -92,17 +92,18 @@ func TestNav_EnterCollapseSession(t *testing.T) {
 	sessions, states := stdSessions()
 	m := newTestModel(sessions, states)
 
-	// Cursor should start at the first session item.
-	if len(m.items) == 0 {
-		t.Fatal("no items in sidebar")
+	// Cursor starts at Control Tower (items[0]); navigate down to the first session.
+	if len(m.items) < 2 {
+		t.Fatal("expected at least 2 items (Control Tower + session)")
 	}
-	if m.items[0].kind != tuiItemSession {
-		t.Fatal("first item is not a session")
+	if m.items[1].kind != tuiItemSession {
+		t.Fatal("second item is not a session")
 	}
-	sid := m.items[0].sid
+	sid := m.items[1].sid
 	countBefore := len(m.items)
 
-	m = drive(m, keyEnter())
+	// Navigate to first session, then collapse it.
+	m = drive(m, keyDown(), keyEnter())
 
 	if !m.collapsedSessions[sid] {
 		t.Error("session should be collapsed after Enter")
@@ -116,11 +117,12 @@ func TestNav_EnterExpandSession(t *testing.T) {
 	sessions, states := stdSessions()
 	m := newTestModel(sessions, states)
 
-	sid := m.items[0].sid
+	// Navigate down to first session (past Control Tower).
+	sid := m.items[1].sid
 	countBefore := len(m.items)
 
-	// Collapse then expand.
-	m = drive(m, keyEnter(), keyEnter())
+	// Navigate to first session, collapse, then expand.
+	m = drive(m, keyDown(), keyEnter(), keyEnter())
 
 	if m.collapsedSessions[sid] {
 		t.Error("session should be expanded after second Enter")

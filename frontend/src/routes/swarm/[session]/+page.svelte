@@ -59,6 +59,14 @@
 		name: string;
 		created_at: number;
 		updated_at: number;
+		context_id?: string | null;
+		context_name?: string | null;
+	}
+
+	interface SessionContext {
+		id: string;
+		name: string;
+		description: string;
 	}
 
 	let sessionId = $derived($page.params.session);
@@ -83,6 +91,41 @@
 	let injectingTaskId = $state<string | null>(null);
 
 	let voiceOpen = $state(false);
+
+	// Context picker
+	let showContextPicker = $state(false);
+	let contexts = $state<SessionContext[]>([]);
+	let loadingContexts = $state(false);
+	let assigningContext = $state(false);
+
+	async function openContextPicker() {
+		showContextPicker = true;
+		loadingContexts = true;
+		try {
+			const res = await fetch('/api/swarm/contexts');
+			if (res.ok) {
+				const data = await res.json();
+				contexts = data.contexts ?? [];
+			}
+		} finally {
+			loadingContexts = false;
+		}
+	}
+
+	async function assignContext(contextId: string | null) {
+		assigningContext = true;
+		try {
+			await fetch(`/api/swarm/sessions/${sessionId}/context`, {
+				method: 'PATCH',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ context_id: contextId })
+			});
+			showContextPicker = false;
+			await loadState();
+		} finally {
+			assigningContext = false;
+		}
+	}
 
 	// Add task form — per-column
 	let showTaskForm = $state<Record<string, boolean>>({});
@@ -347,7 +390,16 @@
 			</button>
 			<div>
 				<h1 class="text-xl font-bold text-vanna-navy">{session?.name}</h1>
-				<p class="text-xs text-slate-400">{agents.length} agent{agents.length !== 1 ? 's' : ''} · {tasks.length} task{tasks.length !== 1 ? 's' : ''}</p>
+				<div class="flex items-center gap-2 mt-0.5">
+					<p class="text-xs text-slate-400">{agents.length} agent{agents.length !== 1 ? 's' : ''} · {tasks.length} task{tasks.length !== 1 ? 's' : ''}</p>
+					<button
+						type="button"
+						onclick={openContextPicker}
+						class="text-xs px-1.5 py-0.5 rounded-md transition-colors {session?.context_name ? 'bg-vanna-teal/10 text-vanna-teal hover:bg-vanna-teal/20' : 'bg-slate-100 text-slate-400 hover:bg-slate-200'}"
+					>
+						{session?.context_name ? `@${session.context_name}` : '+ context'}
+					</button>
+				</div>
 			</div>
 		</div>
 		<div class="flex items-center gap-2">
@@ -464,6 +516,7 @@
 							{agent}
 							{tasks}
 							{sessionId}
+							spawning={spawningAgentId === agent.id}
 							onSpawn={spawnAgent}
 							onDespawn={despawnAgent}
 							onAddNote={addNote}
@@ -587,4 +640,64 @@
 
 {#if voiceOpen}
 	<VoiceConversation sessionId={sessionId} onClose={() => (voiceOpen = false)} />
+{/if}
+
+{#if showContextPicker}
+	<!-- Context picker modal -->
+	<div
+		role="dialog"
+		aria-modal="true"
+		class="fixed inset-0 bg-black/40 flex items-center justify-center z-50"
+		onclick={(e) => { if (e.target === e.currentTarget) showContextPicker = false; }}
+		onkeydown={(e) => { if (e.key === 'Escape') showContextPicker = false; }}
+		tabindex="-1"
+	>
+		<div class="bg-white rounded-2xl shadow-xl w-full max-w-sm mx-4 overflow-hidden">
+			<div class="flex items-center justify-between px-5 pt-5 pb-3 border-b border-slate-100">
+				<h2 class="font-semibold text-vanna-navy text-sm">Select Session Context</h2>
+				<button onclick={() => showContextPicker = false} class="text-slate-400 hover:text-slate-600 transition-colors">
+					<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+					</svg>
+				</button>
+			</div>
+			<div class="px-5 py-3 max-h-72 overflow-y-auto">
+				{#if loadingContexts}
+					<p class="text-sm text-slate-400 py-4 text-center">Loading…</p>
+				{:else if contexts.length === 0}
+					<p class="text-sm text-slate-400 py-4 text-center">No contexts defined. Create one in Settings.</p>
+				{:else}
+					<ul class="space-y-1">
+						{#each contexts as ctx}
+							<li>
+								<button
+									type="button"
+									onclick={() => assignContext(ctx.id)}
+									disabled={assigningContext}
+									class="w-full text-left px-3 py-2 rounded-xl text-sm transition-colors disabled:opacity-50 {session?.context_id === ctx.id ? 'bg-vanna-teal/10 text-vanna-teal font-medium' : 'hover:bg-slate-50 text-vanna-navy'}"
+								>
+									<span class="font-medium">{ctx.name}</span>
+									{#if ctx.description}
+										<span class="text-xs text-slate-400 ml-1.5">{ctx.description}</span>
+									{/if}
+								</button>
+							</li>
+						{/each}
+					</ul>
+				{/if}
+			</div>
+			{#if session?.context_id}
+				<div class="px-5 pb-4 pt-2 border-t border-slate-100">
+					<button
+						type="button"
+						onclick={() => assignContext(null)}
+						disabled={assigningContext}
+						class="w-full px-3 py-2 rounded-xl text-sm text-red-400 hover:bg-red-50 transition-colors disabled:opacity-50"
+					>
+						Remove context
+					</button>
+				</div>
+			{/if}
+		</div>
+	</div>
 {/if}

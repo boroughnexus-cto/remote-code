@@ -124,6 +124,12 @@ type tuiModel struct {
 	opsView   bool
 	opsCursor int
 
+	// Control Tower (pinned fleet dashboard)
+	ctView bool
+
+	// Context picker overlay (C on a session)
+	ctxPicker *tuiCtxPickerModel
+
 	// Command Palette (: key)
 	cmdPalette *cmdPaletteModel
 
@@ -274,7 +280,9 @@ func (m tuiModel) Init() tea.Cmd {
 	return tea.Batch(
 		tea.EnterAltScreen,
 		tuiAnimTick(),
+		tuiSlowTick(),
 		m.client.fetchAll(),
+		m.client.get("icinga", "/api/icinga/services"),
 		waitForWS(m.ws.ch),
 		checkVersionCmd(m.client),
 	)
@@ -353,6 +361,20 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+	case tuiSlowTickMsg:
+		cmds = append(cmds, tuiSlowTick())
+		// Always refresh Icinga in the background so data is ready when the view opens.
+		cmds = append(cmds, m.client.get("icinga", "/api/icinga/services"))
+		// Background Plane fetch: use the work queue session if open, otherwise the selected session.
+		planeSID := m.workQueueSID
+		if planeSID == "" {
+			planeSID = m.selSessionID()
+		}
+		if planeSID != "" {
+			path := "/api/swarm/sessions/" + planeSID + "/plane/issues?state_group=backlog,unstarted"
+			cmds = append(cmds, m.client.get("workqueue", path))
+		}
+
 	case tuiTermMsg:
 		m.termFetching = false
 		if msg.content != "" {
@@ -391,6 +413,15 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tuiErrMsg:
 		m.setFlash(msg.text, true)
+		// Update integration health flags on fetch failure.
+		if msg.op == "icinga" {
+			m.statusBar.icingaOK = false
+			m.statusBar.icingaReady = true
+		}
+		if msg.op == "workqueue" {
+			m.statusBar.planeOK = false
+			m.statusBar.planeReady = true
+		}
 		// If promotion failed, stay in work queue so user can retry
 		if msg.op == "create-goal" && m.workQueueView {
 			m.workQueuePromoting = false
@@ -408,6 +439,16 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.op == "add-note" && m.notesView {
 			cmds = append(cmds, m.client.fetchNotes(m.notesSID, m.notesAgentID))
 		}
+		if (msg.op == "ctx-content" || msg.op == "delete-context") && m.settings != nil {
+			// Reload the Session Contexts settings tab after content edit or delete.
+			for _, sec := range m.settings.sections {
+				if sc, ok := sec.(*sessionContextsSection); ok {
+					sc.loading = true
+					cmds = append(cmds, sc.Init())
+					break
+				}
+			}
+		}
 		labels := map[string]string{
 			"spawn": "Agent spawned", "despawn": "Agent stopped",
 			"msg": "Message sent", "create-session": "Session created",
@@ -417,7 +458,8 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			"inject-agent": "Message injected", "edit-task-stage": "Stage updated",
 			"delete-agent": "Agent deleted", "delete-task": "Task deleted",
 			"cancel-goal": "Goal cancelled", "reactivate-goal": "Goal reactivated",
-			"add-note": "Note added",
+			"add-note": "Note added", "set-context": "Context assigned",
+			"ctx-content": "Context content updated", "delete-context": "Context deleted",
 		}
 		label := labels[msg.op]
 		if label == "" {
@@ -436,15 +478,26 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.icingaTopCur = 0
 		// Scroll bottom pane to show most recent alert at top.
 		m.icingaBotCur = 0
+		m.statusBar.icingaOK = true
+		m.statusBar.icingaReady = true
 
 	case tuiNotesMsg:
 		m.notesItems = msg.items
 		m.notesCursor = 0
 
+	case tuiCtxPickerMsg:
+		if m.ctxPicker != nil {
+			m.ctxPicker.items = msg.items
+			m.ctxPicker.ready = true
+			m.ctxPicker.cursor = 0
+		}
+
 	case tuiWorkQueueMsg:
 		m.workQueueItems = msg.items
 		m.workQueueCursor = 0
 		m.workQueuePromoting = false
+		m.statusBar.planeOK = true
+		m.statusBar.planeReady = true
 		m.updateVP()
 
 	case tuiAttachMsg:
@@ -456,7 +509,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		role := msg.role
 		tmpPath := msg.tmpPath
 		client := m.client
-		cmd := exec.Command(msg.editor, tmpPath)
+		cmd := exec.Command(msg.editor, append(msg.editorArgs, tmpPath)...)
 		cmds = append(cmds, tea.ExecProcess(cmd, func(err error) tea.Msg {
 			defer os.Remove(tmpPath) //nolint:errcheck
 			if err != nil {
@@ -475,6 +528,34 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tuiRolePromptSavedMsg:
 		m.setFlash("Role prompt updated: "+msg.role, false)
+
+	case tuiCtxContentEditMsg:
+		// Open $EDITOR for context content, then PUT updated content on close.
+		ctxID := msg.ctxID
+		ctxName := msg.ctxName
+		ctxDesc := msg.ctxDesc
+		ctxTags := msg.ctxTags
+		tmpPath := msg.tmpPath
+		client := m.client
+		cmd := exec.Command(msg.editor, append(msg.editorArgs, tmpPath)...)
+		cmds = append(cmds, tea.ExecProcess(cmd, func(err error) tea.Msg {
+			defer os.Remove(tmpPath) //nolint:errcheck
+			if err != nil {
+				return tuiErrMsg{op: "ctx-content", text: err.Error()}
+			}
+			newContent, readErr := os.ReadFile(tmpPath)
+			if readErr != nil {
+				return tuiErrMsg{op: "ctx-content", text: "could not read temp file: " + readErr.Error()}
+			}
+			body, _ := json.Marshal(map[string]string{
+				"name": ctxName, "description": ctxDesc,
+				"content": string(newContent), "tags": ctxTags,
+			})
+			if putErr := client.putSync("/api/swarm/contexts/"+ctxID, body); putErr != nil {
+				return tuiErrMsg{op: "ctx-content", text: putErr.Error()}
+			}
+			return tuiDoneMsg{op: "ctx-content"}
+		}))
 
 	case tuiVersionMsg:
 		m.updateAvailable = msg.updateAvail
@@ -588,7 +669,9 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.helpVisible {
 			m.helpVisible = false
 		}
-		if m.cmdPalette != nil {
+		if m.ctxPicker != nil {
+			m, cmds = m.updateCtxPicker(msg)
+		} else if m.cmdPalette != nil {
 			m, cmds = m.updateCmdPalette(msg)
 		} else if m.settings != nil {
 			m, cmds = m.updateSettings(msg)
@@ -614,6 +697,8 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m, cmds = m.updateGoalView(msg)
 		} else if m.escView {
 			m, cmds = m.updateEscalation(msg)
+		} else if m.ctView {
+			m, cmds = m.updateControlTower(msg)
 		} else {
 			switch m.focus {
 			case tuiFocusInput:

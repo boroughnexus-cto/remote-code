@@ -154,11 +154,11 @@ func TestRender_CollapsedSessionHidesChildren(t *testing.T) {
 	sessions, states := stdSessions()
 	m := newTestModel(sessions, states)
 
-	// Collapse the first session.
-	if len(m.items) == 0 || m.items[0].kind != tuiItemSession {
-		t.Fatal("first item is not a session")
+	// Collapse the first session (items[1] after Control Tower).
+	if len(m.items) < 2 || m.items[1].kind != tuiItemSession {
+		t.Fatal("second item is not a session")
 	}
-	m = drive(m, keyEnter())
+	m = drive(m, keyDown(), keyEnter())
 
 	// Alice is in session Alpha — she should not appear in items after collapse.
 	for _, it := range m.items {

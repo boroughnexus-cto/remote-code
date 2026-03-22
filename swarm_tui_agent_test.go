@@ -210,10 +210,11 @@ func TestAgent_RKeyOnSessionProducesResumeCommand(t *testing.T) {
 	sessions, states := stdSessions()
 	m := newTestModel(sessions, states)
 
-	// Cursor at first item (session).
-	if len(m.items) == 0 || m.items[0].kind != tuiItemSession {
-		t.Fatal("first item is not a session")
+	// Navigate to first session (past Control Tower at items[0]).
+	if len(m.items) < 2 || m.items[1].kind != tuiItemSession {
+		t.Fatal("second item is not a session")
 	}
+	m = drive(m, keyDown())
 
 	_, cmd := m.Update(keyRune('r'))
 	if cmd == nil {

@@ -33,6 +33,21 @@ func loadRolePrompt(ctx context.Context, role string) (prompt string, version in
 	return
 }
 
+// loadSessionContextContent fetches the content of the context assigned to a session.
+// Returns "" if no context is assigned or on any error.
+func loadSessionContextContent(ctx context.Context, sessionID string) string {
+	var content string
+	err := database.QueryRowContext(ctx,
+		`SELECT sc.content FROM session_contexts sc
+		 JOIN swarm_sessions ss ON ss.context_id = sc.id
+		 WHERE ss.id = ?`, sessionID,
+	).Scan(&content)
+	if err != nil {
+		return ""
+	}
+	return content
+}
+
 // writeAgentCLAUDE writes the agent's role prompt + spawn context to CLAUDE.md
 // in the given workdir so Claude Code picks it up automatically on startup.
 func writeAgentCLAUDE(workDir, sessionID, agentID, role, mission, prompt string) error {
@@ -45,6 +60,14 @@ func writeAgentCLAUDE(workDir, sessionID, agentID, role, mission, prompt string)
 	var sb strings.Builder
 	sb.WriteString(prompt)
 	sb.WriteString("\n\n---\n\n")
+
+	// Inject session context if one is assigned.
+	if ctxContent := loadSessionContextContent(context.Background(), sessionID); ctxContent != "" {
+		sb.WriteString("## Session Context\n\n")
+		sb.WriteString(ctxContent)
+		sb.WriteString("\n\n---\n\n")
+	}
+
 	sb.WriteString("## Agent Instance Context\n\n")
 	fmt.Fprintf(&sb, "- Spawn type: %s\n", spawnType)
 	fmt.Fprintf(&sb, "- Session ID: `%s`\n", sessionID)

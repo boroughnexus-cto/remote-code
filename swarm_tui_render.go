@@ -397,6 +397,9 @@ func (m tuiModel) View() string {
 	if m.cmdPalette != nil {
 		return m.viewCmdPalette()
 	}
+	if m.ctxPicker != nil {
+		return m.viewCtxPicker()
+	}
 	if m.settings != nil {
 		return m.viewSettings()
 	}
@@ -427,8 +430,11 @@ func (m tuiModel) View() string {
 	if m.escView {
 		return m.viewEscalationScreen()
 	}
+	if m.ctView {
+		return m.viewControlTower()
+	}
 
-	bodyH := m.h - 3 - 1 - tuiInputH - 2 - 1 - 1 // hud(content+border+join-newline) + help + input borders + status bar + fleet bar
+	bodyH := m.h - 3 - m.helpLineCount() - tuiInputH - 2 - 1 - 1 // hud(content+border+join-newline) + help + input borders + status bar + fleet bar
 	if bodyH < 5 {
 		bodyH = 5
 	}
@@ -562,7 +568,7 @@ func (m tuiModel) viewHUD() string {
 		}
 		parts = append(parts, updateStyle.Render("⬆ update"))
 	}
-	return hudStyle.Width(m.w).Render(strings.Join(parts, "  "))
+	return hudStyle.Width(m.w).Inline(true).Render(strings.Join(parts, "  "))
 }
 
 func (m tuiModel) viewDetail(bodyH int) string {
@@ -1011,11 +1017,52 @@ func (m tuiModel) viewStatusBar() string {
 	return leftRendered + rightRendered
 }
 
+// keyHelpItems are the individual key hint tokens shown at the bottom of the TUI.
+var keyHelpItems = []string{
+	"↑↓/jk nav", "Enter attach/collapse", "Tab// input", "s spawn", "d stop",
+	"i inject", "N notes", "D delete", "S stage", "+ quick-agent", "n agent",
+	"t task", "c session", "E edit", "T triage", "I icinga", "L log",
+	"e esc", "g goals", "R refresh", "q quit",
+}
+
+// wrapHelpItems packs key hint items into lines that fit within width,
+// separated by "  ·  " with a leading "  " indent on each line.
+func wrapHelpItems(items []string, width int) []string {
+	const sep = "  ·  "
+	const indent = "  "
+	var lines []string
+	line := indent
+	for _, item := range items {
+		var candidate string
+		if line == indent {
+			candidate = indent + item
+		} else {
+			candidate = line + sep + item
+		}
+		if len([]rune(candidate)) <= width || line == indent {
+			line = candidate
+		} else {
+			lines = append(lines, line)
+			line = indent + item
+		}
+	}
+	if line != indent {
+		lines = append(lines, line)
+	}
+	return lines
+}
+
+func (m tuiModel) helpLineCount() int {
+	return len(wrapHelpItems(keyHelpItems, m.w))
+}
+
 func (m tuiModel) viewHelp() string {
-	keys := "  ↑↓/jk nav  ·  Enter attach/collapse  ·  Tab// input  ·  s spawn  ·  d stop  ·  i inject  ·  N notes  ·  D delete  ·  S stage  ·  + quick-agent  ·  n agent  ·  t task  ·  c session  ·  E edit  ·  T triage  ·  I icinga  ·  L log  ·  e esc  ·  g goals  ·  R refresh  ·  q quit"
-	// Truncate to terminal width — do NOT use Width() here as that causes wrapping,
-	// which pushes content off the top of the screen.
-	return dimStyle.Render(truncStr(keys, m.w))
+	lines := wrapHelpItems(keyHelpItems, m.w)
+	rendered := make([]string, len(lines))
+	for i, l := range lines {
+		rendered[i] = dimStyle.Render(l)
+	}
+	return strings.Join(rendered, "\n")
 }
 
 // ─── Help screen ──────────────────────────────────────────────────────────────

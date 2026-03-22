@@ -38,8 +38,11 @@ var globalCommands = []cmdEntry{
 	}},
 	{label: "Icinga Monitoring", keywords: []string{"icinga", "monitor", "alerts", "problems"}, action: func(m tuiModel) (tuiModel, []tea.Cmd) {
 		m.icingaView = true
+		m.icingaTopCur = 0
+		m.icingaBotCur = 0
+		m.icingaFocus = 0
 		m.cmdPalette = nil
-		return m, nil
+		return m, []tea.Cmd{m.client.get("icinga", "/api/icinga/services")}
 	}},
 	{label: "Event Log", keywords: []string{"events", "log", "history"}, action: func(m tuiModel) (tuiModel, []tea.Cmd) {
 		sid := m.selSessionID()
@@ -71,7 +74,7 @@ var globalCommands = []cmdEntry{
 			m.workQueueSID = sid
 			m.workQueueCursor = 0
 			m.cmdPalette = nil
-			return m, []tea.Cmd{m.client.get("workqueue", "/api/swarm/sessions/"+sid+"/workqueue")}
+			return m, []tea.Cmd{m.client.get("workqueue", "/api/swarm/sessions/"+sid+"/plane/issues?state_group=backlog,unstarted")}
 		}
 		m.cmdPalette = nil
 		return m, nil

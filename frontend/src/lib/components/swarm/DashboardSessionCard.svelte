@@ -13,6 +13,7 @@
 		waiting_agents: number;
 		tasks_by_stage: Record<string, number>;
 		last_event_ts: number;
+		context_name?: string | null;
 	}
 
 	interface Props {
@@ -65,7 +66,12 @@
 				<p class="font-semibold text-vanna-navy group-hover:text-vanna-teal transition-colors truncate">
 					{session.name}
 				</p>
-				<p class="text-xs text-slate-400 mt-0.5">{relativeTime(session.last_event_ts)}</p>
+				<div class="flex items-center gap-2 mt-0.5">
+					<p class="text-xs text-slate-400">{relativeTime(session.last_event_ts)}</p>
+					{#if session.context_name}
+						<span class="text-xs px-1.5 py-0.5 rounded-md bg-vanna-teal/10 text-vanna-teal font-medium truncate max-w-[120px]">@{session.context_name}</span>
+					{/if}
+				</div>
 			</div>
 		</a>
 

@@ -178,6 +178,7 @@ func applyMigrations(database *sql.DB) error {
 		"db/migrations/043_system_config.sql",
 		"db/migrations/044_session_contexts.sql",
 		"db/migrations/045_fleet_state.sql",
+		"db/migrations/046_session_context_link.sql",
 	}
 
 	for _, migrationPath := range migrations {
