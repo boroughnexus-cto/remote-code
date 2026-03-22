@@ -74,6 +74,9 @@ func main() {
 	// Initialize config service (reads/writes system_config table)
 	globalConfigService = newConfigService(database)
 
+	// Restore fleet mode from DB (may be non-normal if server restarted mid-incident)
+	globalFleetState.LoadFromDB(database)
+
 	// Initialize agent transport (tmux for now; channels in Phase 3)
 	swarmTransport = initTransport()
 

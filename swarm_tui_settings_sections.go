@@ -202,8 +202,10 @@ func (s *swarmConfigSection) View(w, h int) string {
 				scopeBadge = lipgloss.NewStyle().Foreground(colorGreen).Render("[db]")
 			case scopeEnv:
 				scopeBadge = lipgloss.NewStyle().Foreground(colorYellow).Render("[env]")
-			default:
+			case scopeDefault:
 				scopeBadge = dimStyle.Render("[def]")
+			default:
+				scopeBadge = dimStyle.Render("[?]")
 			}
 
 			meta, _ := configRegistry[entry.Key]

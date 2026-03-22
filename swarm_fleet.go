@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -31,6 +32,7 @@ type fleetState struct {
 	noWrites bool   // true = external write integrations disabled (Plane, Komodo, n8n)
 	setAt    time.Time
 	setBy    string // "tui", "api", "ctrl+x"
+	db       *sql.DB // may be nil (TUI-only mode); used for persistence
 }
 
 var globalFleetState = &fleetState{mode: fleetModeNormal}
@@ -58,39 +60,95 @@ func (fs *fleetState) IsWriteAllowed() bool {
 	return !fs.noWrites
 }
 
-// Apply sets the fleet to a preset mode. Logs the change.
+// Apply sets the fleet to a preset mode, persists it to DB, and logs the change.
 func (fs *fleetState) Apply(mode fleetMode, setBy string) {
 	fs.mu.Lock()
-	defer fs.mu.Unlock()
-
 	prev := fs.mode
 
 	switch mode {
-	case fleetModeNormal:
-		fs.mode = fleetModeNormal
-		fs.paused = false
-		fs.noWrites = false
+	case fleetModeNormal, fleetModeResume:
+		fs.mode, fs.paused, fs.noWrites = fleetModeNormal, false, false
 	case fleetModeContain:
-		fs.mode = fleetModeContain
-		fs.paused = true
-		fs.noWrites = true
+		fs.mode, fs.paused, fs.noWrites = fleetModeContain, true, true
 	case fleetModeStabilize:
-		fs.mode = fleetModeStabilize
-		fs.paused = true
-		fs.noWrites = false
-	case fleetModeResume:
-		// Transitional: clear all overrides → set mode to normal
-		fs.mode = fleetModeNormal
-		fs.paused = false
-		fs.noWrites = false
+		fs.mode, fs.paused, fs.noWrites = fleetModeStabilize, true, false
 	default:
 		fs.mode = mode
 	}
-
 	fs.setAt = time.Now()
 	fs.setBy = setBy
+	newMode := fs.mode
+	fs.mu.Unlock()
 
-	log.Printf("fleet: mode changed %s → %s (by %s)", prev, fs.mode, setBy)
+	log.Printf("fleet: mode changed %s → %s (by %s)", prev, newMode, setBy)
+	fs.persistToDB() // best-effort; acquires its own RLock
+}
+
+// LoadFromDB restores fleet mode from the database on startup. Must be called
+// after the DB is initialized. Safe to call with a nil db (no-op).
+func (fs *fleetState) LoadFromDB(db *sql.DB) {
+	if db == nil {
+		return
+	}
+	fs.mu.Lock()
+	fs.db = db
+	fs.mu.Unlock()
+
+	var modeStr, setBy string
+	var setAt int64
+	err := db.QueryRow(
+		"SELECT mode, set_by, set_at FROM fleet_state WHERE id = 1",
+	).Scan(&modeStr, &setBy, &setAt)
+	if err == sql.ErrNoRows {
+		return // fresh DB; default (normal) is already set
+	}
+	if err != nil {
+		log.Printf("fleet: could not load state from DB (%v), using default", err)
+		return
+	}
+
+	fs.mu.Lock()
+	switch fleetMode(modeStr) {
+	case fleetModeContain:
+		fs.mode, fs.paused, fs.noWrites = fleetModeContain, true, true
+	case fleetModeStabilize:
+		fs.mode, fs.paused, fs.noWrites = fleetModeStabilize, true, false
+	default:
+		fs.mode, fs.paused, fs.noWrites = fleetModeNormal, false, false
+	}
+	if setAt > 0 {
+		fs.setAt = time.Unix(setAt, 0)
+	}
+	fs.setBy = setBy
+	restored := fs.mode
+	fs.mu.Unlock()
+
+	if restored != fleetModeNormal {
+		log.Printf("fleet: ⚠ restored non-normal mode %s (set by %s) from DB", restored, setBy)
+	}
+}
+
+// persistToDB writes the current mode to the fleet_state table (upsert).
+// Best-effort: logs on failure but never panics.
+func (fs *fleetState) persistToDB() {
+	fs.mu.RLock()
+	db := fs.db
+	mode := string(fs.mode)
+	setBy := fs.setBy
+	fs.mu.RUnlock()
+
+	if db == nil {
+		return
+	}
+	_, err := db.Exec(
+		`INSERT INTO fleet_state (id, mode, set_by, set_at)
+		 VALUES (1, ?, ?, unixepoch())
+		 ON CONFLICT(id) DO UPDATE SET mode=excluded.mode, set_by=excluded.set_by, set_at=excluded.set_at`,
+		mode, setBy,
+	)
+	if err != nil {
+		log.Printf("fleet: failed to persist state to DB: %v", err)
+	}
 }
 
 // ModeString returns the current mode as a string (for status bar, API responses).
@@ -161,8 +219,10 @@ func handleFleetAPI(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			SetBy string `json:"set_by"`
 		}
-		// best-effort decode; ignore errors (halt is emergency — proceed regardless)
-		json.NewDecoder(r.Body).Decode(&req) //nolint:errcheck
+		// best-effort decode: log failures but proceed (halt is emergency — must not block)
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			log.Printf("fleet: halt request body decode failed (%v), proceeding with halt anyway", err)
+		}
 		setBy := req.SetBy
 		if setBy == "" {
 			setBy = "halt"

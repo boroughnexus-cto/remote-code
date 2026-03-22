@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"strconv"
@@ -21,6 +22,7 @@ const (
 	scopeEnv     configScope = iota // read-only env var baseline
 	scopeDB                         // persisted in system_config table
 	scopeRuntime                    // in-memory override, resets on restart
+	scopeDefault                    // hardcoded registry default (no env var, no DB row)
 )
 
 // configEntry holds a resolved config value with provenance.
@@ -38,7 +40,60 @@ type configMeta struct {
 	Description string
 	DangerLevel int
 	Restartable bool
-	EnvVar      string // e.g. "SWARM_MAX_AGENTS" — read as baseline if set
+	EnvVar      string            // e.g. "SWARM_MAX_AGENTS" — read as baseline if set
+	Validate    func(string) error // optional value validator; nil = accept anything
+}
+
+// ─── Validator helpers ────────────────────────────────────────────────────────
+
+func validatePositiveInt(min, max int) func(string) error {
+	return func(v string) error {
+		n, err := strconv.Atoi(strings.TrimSpace(v))
+		if err != nil {
+			return fmt.Errorf("must be an integer")
+		}
+		if n < min {
+			return fmt.Errorf("must be >= %d", min)
+		}
+		if max > 0 && n > max {
+			return fmt.Errorf("must be <= %d", max)
+		}
+		return nil
+	}
+}
+
+func validatePositiveFloat(min float64) func(string) error {
+	return func(v string) error {
+		f, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
+		if err != nil {
+			return fmt.Errorf("must be a number")
+		}
+		if f < min {
+			return fmt.Errorf("must be >= %g", min)
+		}
+		return nil
+	}
+}
+
+func validateBoolValue() func(string) error {
+	return func(v string) error {
+		if _, err := strconv.ParseBool(strings.TrimSpace(v)); err != nil {
+			return fmt.Errorf("must be true or false")
+		}
+		return nil
+	}
+}
+
+func validateEnum(vals ...string) func(string) error {
+	return func(v string) error {
+		t := strings.TrimSpace(v)
+		for _, valid := range vals {
+			if t == valid {
+				return nil
+			}
+		}
+		return fmt.Errorf("must be one of: %s", strings.Join(vals, ", "))
+	}
 }
 
 // configChange is one record from system_config_history.
@@ -54,33 +109,34 @@ type configChange struct {
 // configRegistry is the hardcoded map of known keys with metadata.
 var configRegistry = map[string]configMeta{
 	// Swarm limits
-	"swarm.max_agents":  {Default: "10", EnvVar: "SWARM_MAX_AGENTS", DangerLevel: 1, Description: "Maximum concurrent agents"},
-	"swarm.max_tasks":   {Default: "50", EnvVar: "SWARM_MAX_TASKS", DangerLevel: 0, Description: "Maximum tracked tasks"},
-	"swarm.max_disk_mb": {Default: "5000", EnvVar: "SWARM_MAX_DISK_MB", DangerLevel: 1, Description: "Max worktree disk usage (MB)"},
-	"swarm.cost_limit_usd": {Default: "5.0", EnvVar: "SWARM_COST_LIMIT_USD", DangerLevel: 1, Description: "Per-session cost limit (USD)"},
-	"swarm.stuck_timeout": {Default: "120", EnvVar: "SWARM_STUCK_TIMEOUT", DangerLevel: 0, Description: "Seconds before agent marked stuck"},
+	"swarm.max_agents":     {Default: "10", EnvVar: "SWARM_MAX_AGENTS", DangerLevel: 1, Description: "Maximum concurrent agents", Validate: validatePositiveInt(1, 1000)},
+	"swarm.max_tasks":      {Default: "50", EnvVar: "SWARM_MAX_TASKS", DangerLevel: 0, Description: "Maximum tracked tasks", Validate: validatePositiveInt(1, 10000)},
+	"swarm.max_disk_mb":    {Default: "5000", EnvVar: "SWARM_MAX_DISK_MB", DangerLevel: 1, Description: "Max worktree disk usage (MB)", Validate: validatePositiveInt(100, 0)},
+	"swarm.cost_limit_usd": {Default: "5.0", EnvVar: "SWARM_COST_LIMIT_USD", DangerLevel: 1, Description: "Per-session cost limit (USD)", Validate: validatePositiveFloat(0)},
+	"swarm.stuck_timeout":  {Default: "120", EnvVar: "SWARM_STUCK_TIMEOUT", DangerLevel: 0, Description: "Seconds before agent marked stuck", Validate: validatePositiveInt(10, 0)},
 	// Budget
-	"swarm.budget_max_total":     {Default: "100.0", EnvVar: "SWARM_BUDGET_MAX_TOTAL", DangerLevel: 1, Description: "Total budget ceiling (USD)"},
-	"swarm.budget_autoraise_pct": {Default: "10", EnvVar: "SWARM_BUDGET_AUTORAISE_PCT", DangerLevel: 1, Description: "Auto-raise budget by this % when limit hit"},
+	"swarm.budget_max_total":     {Default: "100.0", EnvVar: "SWARM_BUDGET_MAX_TOTAL", DangerLevel: 1, Description: "Total budget ceiling (USD)", Validate: validatePositiveFloat(0)},
+	"swarm.budget_autoraise_pct": {Default: "10", EnvVar: "SWARM_BUDGET_AUTORAISE_PCT", DangerLevel: 1, Description: "Auto-raise budget by this % when limit hit", Validate: validatePositiveInt(0, 100)},
 	// Spawn rate
-	"swarm.spawn_rate_interval": {Default: "60", EnvVar: "SWARM_SPAWN_RATE_INTERVAL", DangerLevel: 0, Description: "Spawn rate interval (seconds)"},
-	"swarm.spawn_rate_burst":    {Default: "3", EnvVar: "SWARM_SPAWN_RATE_BURST", DangerLevel: 0, Description: "Spawn burst limit"},
+	"swarm.spawn_rate_interval": {Default: "60", EnvVar: "SWARM_SPAWN_RATE_INTERVAL", DangerLevel: 0, Description: "Spawn rate interval (seconds)", Validate: validatePositiveInt(1, 0)},
+	"swarm.spawn_rate_burst":    {Default: "3", EnvVar: "SWARM_SPAWN_RATE_BURST", DangerLevel: 0, Description: "Spawn burst limit", Validate: validatePositiveInt(1, 100)},
 	// Triage
-	"swarm.triage_enabled":  {Default: "false", EnvVar: "SWARM_TRIAGE_ENABLED", DangerLevel: 0, Description: "Enable background triage agent"},
-	"swarm.triage_interval": {Default: "3600", EnvVar: "SWARM_TRIAGE_INTERVAL", DangerLevel: 0, Description: "Triage check interval (seconds)"},
+	"swarm.triage_enabled":  {Default: "false", EnvVar: "SWARM_TRIAGE_ENABLED", DangerLevel: 0, Description: "Enable background triage agent", Validate: validateBoolValue()},
+	"swarm.triage_interval": {Default: "3600", EnvVar: "SWARM_TRIAGE_INTERVAL", DangerLevel: 0, Description: "Triage check interval (seconds)", Validate: validatePositiveInt(60, 0)},
 	// Fleet
-	"fleet.mode":   {Default: "normal", DangerLevel: 2, Restartable: false, Description: "Fleet operating mode: normal/contain/stabilize"},
-	"fleet.paused": {Default: "false", DangerLevel: 2, Restartable: false, Description: "Pause all new agent spawning"},
+	"fleet.mode":   {Default: "normal", DangerLevel: 2, Restartable: false, Description: "Fleet operating mode: normal/contain/stabilize", Validate: validateEnum("normal", "contain", "stabilize")},
+	"fleet.paused": {Default: "false", DangerLevel: 2, Restartable: false, Description: "Pause all new agent spawning", Validate: validateBoolValue()},
 	// Display
-	"display.log_verbosity": {Default: "info", DangerLevel: 0, Description: "TUI log verbosity: info/debug/trace"},
-	"display.timestamps":    {Default: "relative", DangerLevel: 0, Description: "Timestamp format: relative/absolute/none"},
+	"display.log_verbosity": {Default: "info", DangerLevel: 0, Description: "TUI log verbosity: info/debug/trace", Validate: validateEnum("info", "debug", "trace")},
+	"display.timestamps":    {Default: "relative", DangerLevel: 0, Description: "Timestamp format: relative/absolute/none", Validate: validateEnum("relative", "absolute", "none")},
 }
 
 // configService is the settings service backed by SQLite.
 type configService struct {
 	db      *sql.DB
 	mu      sync.RWMutex
-	runtime map[string]string // in-memory overrides (scope=runtime)
+	runtime map[string]string // in-memory overrides (scope=runtime), highest precedence
+	dbCache map[string]string // read-through cache for DB layer; invalidated on Set()
 }
 
 var globalConfigService *configService
@@ -90,6 +146,7 @@ func newConfigService(db *sql.DB) *configService {
 	return &configService{
 		db:      db,
 		runtime: make(map[string]string),
+		dbCache: make(map[string]string),
 	}
 }
 
@@ -103,58 +160,47 @@ func (cs *configService) Get(key string) configEntry {
 		restartable = meta.Restartable
 	}
 
-	// 1. Runtime override (in-memory)
+	// 1. Runtime override (in-memory, highest precedence)
 	cs.mu.RLock()
-	if v, ok := cs.runtime[key]; ok {
-		cs.mu.RUnlock()
-		return configEntry{
-			Key:         key,
-			Value:       v,
-			Source:      scopeRuntime,
-			DangerLevel: dangerLevel,
-			Restartable: restartable,
-		}
-	}
+	rv, hasRuntime := cs.runtime[key]
+	cv, hasCache := cs.dbCache[key]
 	cs.mu.RUnlock()
 
-	// 2. Persisted DB value
+	if hasRuntime {
+		return configEntry{Key: key, Value: rv, Source: scopeRuntime, DangerLevel: dangerLevel, Restartable: restartable}
+	}
+
+	// 2. DB value — served from cache when available
+	if hasCache {
+		return configEntry{Key: key, Value: cv, Source: scopeDB, DangerLevel: dangerLevel, Restartable: restartable}
+	}
+
+	// Cache miss — query DB
 	var dbValue string
 	err := cs.db.QueryRow("SELECT value FROM system_config WHERE key = ?", key).Scan(&dbValue)
 	if err == nil {
-		return configEntry{
-			Key:         key,
-			Value:       dbValue,
-			Source:      scopeDB,
-			DangerLevel: dangerLevel,
-			Restartable: restartable,
-		}
+		cs.mu.Lock()
+		cs.dbCache[key] = dbValue
+		cs.mu.Unlock()
+		return configEntry{Key: key, Value: dbValue, Source: scopeDB, DangerLevel: dangerLevel, Restartable: restartable}
+	}
+	if err != sql.ErrNoRows {
+		log.Printf("config: DB query for key %q: %v", key, err)
 	}
 
 	// 3. Env var baseline (if registered)
 	if known && meta.EnvVar != "" {
 		if envVal := os.Getenv(meta.EnvVar); envVal != "" {
-			return configEntry{
-				Key:         key,
-				Value:       envVal,
-				Source:      scopeEnv,
-				DangerLevel: dangerLevel,
-				Restartable: restartable,
-			}
+			return configEntry{Key: key, Value: envVal, Source: scopeEnv, DangerLevel: dangerLevel, Restartable: restartable}
 		}
 	}
 
-	// 4. Default value
+	// 4. Hardcoded default
 	defaultVal := ""
 	if known {
 		defaultVal = meta.Default
 	}
-	return configEntry{
-		Key:         key,
-		Value:       defaultVal,
-		Source:      scopeEnv,
-		DangerLevel: dangerLevel,
-		Restartable: restartable,
-	}
+	return configEntry{Key: key, Value: defaultVal, Source: scopeDefault, DangerLevel: dangerLevel, Restartable: restartable}
 }
 
 // GetString returns the string value for a key, or fallback if not found/empty.
@@ -185,15 +231,26 @@ func (cs *configService) GetBool(key string, fallback bool) bool {
 }
 
 // Set writes a value to the DB and appends an audit history row.
-// Returns an error if the key is not in the registry.
+// Returns an error if the key is not in the registry or the value fails validation.
 func (cs *configService) Set(key, value, changedBy string) error {
-	if _, ok := configRegistry[key]; !ok {
+	meta, ok := configRegistry[key]
+	if !ok {
 		return fmt.Errorf("config: unknown key %q", key)
 	}
+	if meta.Validate != nil {
+		if err := meta.Validate(value); err != nil {
+			return fmt.Errorf("config: invalid value for %q: %w", key, err)
+		}
+	}
 
-	// Read current value for history (may be NULL if first write).
+	// Read current value for history (may not exist yet).
 	var oldValue sql.NullString
 	cs.db.QueryRow("SELECT value FROM system_config WHERE key = ?", key).Scan(&oldValue) //nolint:errcheck
+	// Convert to a driver-friendly parameter: nil for NULL, string otherwise.
+	var oldParam interface{}
+	if oldValue.Valid {
+		oldParam = oldValue.String
+	}
 
 	tx, err := cs.db.Begin()
 	if err != nil {
@@ -214,7 +271,7 @@ func (cs *configService) Set(key, value, changedBy string) error {
 	_, err = tx.Exec(
 		`INSERT INTO system_config_history (key, old_value, new_value, changed_at, changed_by)
 		 VALUES (?, ?, ?, unixepoch(), ?)`,
-		key, oldValue, value, changedBy,
+		key, oldParam, value, changedBy,
 	)
 	if err != nil {
 		return fmt.Errorf("config: insert history for key %q: %w", key, err)
@@ -223,19 +280,45 @@ func (cs *configService) Set(key, value, changedBy string) error {
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("config: commit tx: %w", err)
 	}
+
+	// Update read-through cache so subsequent Get() calls don't hit the DB.
+	cs.mu.Lock()
+	cs.dbCache[key] = value
+	cs.mu.Unlock()
 	return nil
 }
 
 // SetRuntime writes a value to the in-memory runtime map only (no DB, no history).
+// The override is lost on restart. Logs and ignores unknown keys.
 func (cs *configService) SetRuntime(key, value string) {
+	if _, ok := configRegistry[key]; !ok {
+		log.Printf("config: SetRuntime called with unknown key %q (ignored)", key)
+		return
+	}
 	cs.mu.Lock()
 	cs.runtime[key] = value
 	cs.mu.Unlock()
 }
 
 // GetAll returns all known registry keys matching the given prefix (or all if prefix is ""),
-// resolved with provenance.
+// resolved with provenance. Warms the DB cache with a single query before resolution.
 func (cs *configService) GetAll(prefix string) []configEntry {
+	// Warm cache with a single SELECT rather than N individual queries.
+	rows, err := cs.db.Query("SELECT key, value FROM system_config")
+	if err != nil {
+		log.Printf("config: GetAll DB scan: %v", err)
+	} else {
+		defer rows.Close()
+		cs.mu.Lock()
+		for rows.Next() {
+			var k, v string
+			if rows.Scan(&k, &v) == nil {
+				cs.dbCache[k] = v
+			}
+		}
+		cs.mu.Unlock()
+	}
+
 	entries := make([]configEntry, 0, len(configRegistry))
 	for key := range configRegistry {
 		if prefix == "" || strings.HasPrefix(key, prefix) {
