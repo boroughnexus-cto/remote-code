@@ -157,7 +157,7 @@ func (m tuiModel) updateSidebar(msg tea.KeyMsg) (tuiModel, []tea.Cmd) {
 		m.ws.closeAll()
 		cmds = append(cmds, tea.Quit)
 
-	case "up", "k":
+	case "up", "k", "w":
 		if m.cursor > 0 {
 			m.cursor--
 			m.updateVP()
