@@ -80,10 +80,10 @@ func TestRobust_NilTmuxSession(t *testing.T) {
 	if !navigateToAgent(&m) {
 		t.Skip("no agent item")
 	}
-	// 's' on no-tmux agent should produce a spawn command (not nil-deref).
-	_, cmd := m.Update(keyRune('s'))
+	// 'alt+s' on no-tmux agent should produce a spawn command (not nil-deref).
+	_, cmd := m.Update(keyAltRune('s'))
 	if cmd == nil {
-		t.Error("s on nil-tmux agent should return a spawn command")
+		t.Error("alt+s on nil-tmux agent should return a spawn command")
 	}
 }
 

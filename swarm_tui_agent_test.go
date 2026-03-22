@@ -2,8 +2,8 @@
 //
 // User stories:
 //   US-A.1  Agent item shows name and status in sidebar
-//   US-A.2  s on idle agent (no tmux) produces spawn command
-//   US-A.3  s on already-running agent shows flash "Agent already running"
+//   US-A.2  alt+s on idle agent (no tmux) produces spawn command
+//   US-A.3  alt+s on already-running agent shows flash "Agent already running"
 //   US-A.4  D on running agent requires confirmation (first D → flash; second D → despawn)
 //   US-A.5  Agent status changes via WS update are reflected in model
 //   US-A.6  r on agent item triggers resume command
@@ -67,13 +67,13 @@ func TestAgent_SpawnIdleAgentProducesCommand(t *testing.T) {
 		t.Fatal("no agent item in sidebar")
 	}
 
-	_, cmd := m.Update(keyRune('s'))
+	_, cmd := m.Update(keyAltRune('s'))
 	if cmd == nil {
-		t.Error("s on idle agent should return a spawn command")
+		t.Error("alt+s on idle agent should return a spawn command")
 	}
 }
 
-// ─── US-A.3: s on already-running agent shows flash ──────────────────────────
+// ─── US-A.3: alt+s on already-running agent shows flash ─────────────────────
 
 func TestAgent_SpawnRunningAgentShowsFlash(t *testing.T) {
 	s := makeSession("s1", "Already Running")
@@ -88,7 +88,7 @@ func TestAgent_SpawnRunningAgentShowsFlash(t *testing.T) {
 	if !navigateToAgent(&m) {
 		t.Fatal("no agent item in sidebar")
 	}
-	m = drive(m, keyRune('s'))
+	m = drive(m, keyAltRune('s'))
 	if m.flash == "" {
 		t.Error("flash should be set when spawning already-running agent")
 	}

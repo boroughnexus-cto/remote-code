@@ -162,6 +162,13 @@ type tuiVersionMsg struct {
 	remote      string
 }
 
+// tuiFleetModeMsg is sent to the TUI when fleet mode changes.
+type tuiFleetModeMsg struct {
+	mode     string
+	paused   bool
+	noWrites bool
+}
+
 func tuiAnimTick() tea.Cmd {
 	return tea.Tick(150*time.Millisecond, func(time.Time) tea.Msg { return tuiAnimTickMsg{} })
 }

@@ -187,8 +187,9 @@ func newTestModelWithClient(sessions []tuiSession, states map[string]tuiState, c
 
 // ─── Key helpers ──────────────────────────────────────────────────────────────
 
-func keyRune(r rune) tea.KeyMsg  { return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}} }
-func keyStr(s string) tea.KeyMsg { return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)} }
+func keyRune(r rune) tea.KeyMsg     { return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}} }
+func keyStr(s string) tea.KeyMsg    { return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)} }
+func keyAltRune(r rune) tea.KeyMsg  { return tea.KeyMsg{Type: tea.KeyRunes, Alt: true, Runes: []rune{r}} }
 
 func keyUp() tea.KeyMsg    { return tea.KeyMsg{Type: tea.KeyUp} }
 func keyDown() tea.KeyMsg  { return tea.KeyMsg{Type: tea.KeyDown} }

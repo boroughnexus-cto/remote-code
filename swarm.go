@@ -567,6 +567,10 @@ func handleSwarmAPI(w http.ResponseWriter, r *http.Request, ctx context.Context,
 		handleSwarmVersionAPI(w, r)
 		return
 	}
+	if len(pathParts) > 0 && pathParts[0] == "fleet" {
+		handleFleetAPI(w, r)
+		return
+	}
 	if len(pathParts) > 0 && pathParts[0] == "sessions" && len(pathParts) > 1 && pathParts[1] == "bulk" {
 		handleSwarmBulkAPI(w, r, ctx)
 		return

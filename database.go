@@ -175,6 +175,7 @@ func applyMigrations(database *sql.DB) error {
 		"db/migrations/040_c3_handoff.sql",
 		"db/migrations/041_c1_ralph.sql",
 		"db/migrations/042_h1_leases.sql",
+		"db/migrations/043_system_config.sql",
 	}
 
 	for _, migrationPath := range migrations {

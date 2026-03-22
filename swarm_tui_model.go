@@ -52,6 +52,9 @@ type tuiModel struct {
 	flash    string
 	flashErr bool
 
+	// Fleet status bar (always-visible bottom line)
+	statusBar tuiStatusBar
+
 	// Terminal snapshot (agentID → last captured content)
 	termContent  map[string]string
 	termFetching bool
@@ -116,6 +119,10 @@ type tuiModel struct {
 	// Feedback (alt-F)
 	feedbackCapture    *tuiFeedbackCapture
 	feedbackSubmitting bool
+
+	// Ops Console (o key)
+	opsView   bool
+	opsCursor int
 
 	// Git status cache (agentID → last fetched status)
 	gitStatus    map[string]tuiGitStatus
@@ -296,7 +303,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.WindowSizeMsg:
 		m.w, m.h = msg.Width, msg.Height
-		bodyH := m.h - 3 - 1 - tuiInputH - 2 - 1 // hud(content+border+join-newline) + help + input rows + input borders + status bar
+		bodyH := m.h - 3 - 1 - tuiInputH - 2 - 1 - 1 // hud(content+border+join-newline) + help + input rows + input borders + status bar + fleet bar
 		if bodyH < 5 {
 			bodyH = 5
 		}
@@ -358,7 +365,11 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.appendEvents(msg.sid, msg.state)
 		m.rebuildItems()
 		m.updateVP()
+		m.statusBar = buildStatusBar(&m)
 		cmds = append(cmds, waitForWS(m.ws.ch))
+
+	case tuiFleetModeMsg:
+		m.statusBar.fleetMode = msg.mode
 
 	case tuiDataMsg:
 		m.sessions = msg.sessions
@@ -482,7 +493,21 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.setFlash(fmt.Sprintf("Feedback submitted — SWM-%d", msg.seqID), false)
 		}
 
+	case opsFleetActionMsg:
+		if msg.err != nil {
+			m.setFlash("Fleet action failed: "+msg.err.Error(), true)
+		} else {
+			m.statusBar.fleetMode = msg.mode
+		}
+
 	case tea.KeyMsg:
+		// ctrl+x global halt — works from anywhere, no menu navigation required
+		if msg.String() == "ctrl+x" {
+			m.opsView = false
+			cmds = append(cmds, postFleetHalt("user"))
+			m.setFlash("⚠ HALT — fleet entering CONTAIN mode", true)
+			break
+		}
 		// ? shows hold-to-view help from anywhere; each press resets the hide timer.
 		if msg.String() == "?" {
 			m.helpVisible = true
@@ -507,6 +532,8 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.modal != nil || m.focus == tuiFocusModal {
 			return m.updateModal(msg)
+		} else if m.opsView {
+			m, cmds = m.updateOpsView(msg)
 		} else if m.notesView {
 			m, cmds = m.updateNotesView(msg)
 		} else if m.triageView {

@@ -394,6 +394,9 @@ func (m tuiModel) View() string {
 	if m.modal != nil {
 		return m.viewModal()
 	}
+	if m.opsView {
+		return m.viewOpsConsole()
+	}
 	if m.notesView {
 		return m.viewNotesScreen()
 	}
@@ -419,7 +422,7 @@ func (m tuiModel) View() string {
 		return m.viewEscalationScreen()
 	}
 
-	bodyH := m.h - 3 - 1 - tuiInputH - 2 - 1 // hud(content+border+join-newline) + help + input borders + status bar
+	bodyH := m.h - 3 - 1 - tuiInputH - 2 - 1 - 1 // hud(content+border+join-newline) + help + input borders + status bar + fleet bar
 	if bodyH < 5 {
 		bodyH = 5
 	}
@@ -433,7 +436,7 @@ func (m tuiModel) View() string {
 		Render(strings.Repeat("│\n", bodyH))
 	body := lipgloss.JoinHorizontal(lipgloss.Top, sidebar, divider, detail)
 
-	return strings.Join([]string{m.viewHUD(), body, m.viewStatusBar(), m.viewInput(), m.viewHelp()}, "\n")
+	return strings.Join([]string{m.viewHUD(), body, m.viewStatusBar(), viewFleetStatusBar(m.statusBar, m.w), m.viewInput(), m.viewHelp()}, "\n")
 }
 
 func (m tuiModel) viewHUD() string {

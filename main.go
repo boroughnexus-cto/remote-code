@@ -71,6 +71,9 @@ func main() {
 	database, queries = initDatabase()
 	defer database.Close()
 
+	// Initialize config service (reads/writes system_config table)
+	globalConfigService = newConfigService(database)
+
 	// Initialize agent transport (tmux for now; channels in Phase 3)
 	swarmTransport = initTransport()
 

@@ -524,6 +524,10 @@ func (m tuiModel) updateSidebar(msg tea.KeyMsg) (tuiModel, []tea.Cmd) {
 			return tuiRolePromptEditMsg{role: roleCapture, tmpPath: tmpPath, editor: editor}
 		})
 
+	case "o", "O":
+		m.opsView = true
+		m.opsCursor = 0
+
 	case "I":
 		m.icingaView = true
 		m.icingaServices = nil // show loading state

@@ -157,6 +157,11 @@ func swarmBranchName(agentID string) string {
 // -----------------
 
 func spawnSwarmAgent(ctx context.Context, sessionID, agentID string) error {
+	// Check fleet mode — refuse spawn if fleet is paused.
+	if !globalFleetState.IsSpawnAllowed() {
+		return fmt.Errorf("spawn rejected: fleet is in %s mode", globalFleetState.ModeString())
+	}
+
 	// Fetch agent from DB
 	var repoPath, tmuxSession, existingWorktreePath, agentRole, agentModelName, agentAllowedTools, agentDisallowedTools string
 	var agentDangerouslySkip int
@@ -826,6 +831,11 @@ func writeResumeContext(ctx context.Context, agentID, sessionID, worktreePath st
 // -----------------
 
 func spawnScratchAgent(ctx context.Context, sessionID, agentID string) error {
+	// Check fleet mode — refuse spawn if fleet is paused.
+	if !globalFleetState.IsSpawnAllowed() {
+		return fmt.Errorf("spawn rejected: fleet is in %s mode", globalFleetState.ModeString())
+	}
+
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		return fmt.Errorf("could not determine home dir: %v", err)
