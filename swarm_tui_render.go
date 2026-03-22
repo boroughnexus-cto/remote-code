@@ -546,6 +546,13 @@ func (m tuiModel) viewHUD() string {
 			parts = append(parts, dimStyle.Render(tokStr+"  "+costStr))
 		}
 	}
+	if m.updateAvailable {
+		updateStyle := lipgloss.NewStyle().Foreground(colorOrange).Bold(true)
+		if m.frame%2 != 0 {
+			updateStyle = updateStyle.Faint(true)
+		}
+		parts = append(parts, updateStyle.Render("⬆ update"))
+	}
 	return hudStyle.Width(m.w).Render(strings.Join(parts, "  "))
 }
 

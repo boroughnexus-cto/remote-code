@@ -1,12 +1,14 @@
 .PHONY: build clean dev frontend backend install run sqlc-generate test test-race test-swarm vet lint ci
 
+GIT_COMMIT := $(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
+
 build: frontend backend
 
 frontend:
 	cd frontend && npm run build
 
 backend:
-	go build -o swarmops .
+	go build -ldflags="-X main.BuildCommit=$(GIT_COMMIT)" -o swarmops .
 
 dev:
 	go run .

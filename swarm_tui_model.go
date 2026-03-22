@@ -109,6 +109,10 @@ type tuiModel struct {
 	evtDetailView   *tuiEvent
 	vpRawEvents     map[string][]tuiEvent
 
+	// Version check
+	updateAvailable bool
+	updateRemote    string
+
 	// Feedback (alt-F)
 	feedbackCapture    *tuiFeedbackCapture
 	feedbackSubmitting bool
@@ -259,7 +263,28 @@ func (m tuiModel) Init() tea.Cmd {
 		tuiAnimTick(),
 		m.client.fetchAll(),
 		waitForWS(m.ws.ch),
+		checkVersionCmd(m.client),
 	)
+}
+
+// checkVersionCmd fires 15 s after startup — enough for the server's own
+// background goroutine to have run its first git check.
+func checkVersionCmd(c TUIClient) tea.Cmd {
+	return func() tea.Msg {
+		time.Sleep(15 * time.Second)
+		data, err := c.getSync("/api/swarm/version")
+		if err != nil {
+			return nil
+		}
+		var resp struct {
+			UpdateAvail bool   `json:"update_available"`
+			Remote      string `json:"remote"`
+		}
+		if err := json.Unmarshal(data, &resp); err != nil {
+			return nil
+		}
+		return tuiVersionMsg{updateAvail: resp.UpdateAvail, remote: resp.Remote}
+	}
 }
 
 // ─── Update ──────────────────────────────────────────────────────────────────
@@ -433,6 +458,13 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tuiRolePromptSavedMsg:
 		m.setFlash("Role prompt updated: "+msg.role, false)
+
+	case tuiVersionMsg:
+		m.updateAvailable = msg.updateAvail
+		m.updateRemote = msg.remote
+		if msg.updateAvail {
+			m.setFlash(fmt.Sprintf("⬆ SwarmOps update available (remote: %s) — git pull && make backend", msg.remote), false)
+		}
 
 	case tuiFeedbackResultMsg:
 		m.feedbackSubmitting = false

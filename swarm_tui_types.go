@@ -157,6 +157,11 @@ type tuiGitStatusMsg struct {
 	status  tuiGitStatus
 }
 
+type tuiVersionMsg struct {
+	updateAvail bool
+	remote      string
+}
+
 func tuiAnimTick() tea.Cmd {
 	return tea.Tick(150*time.Millisecond, func(time.Time) tea.Msg { return tuiAnimTickMsg{} })
 }

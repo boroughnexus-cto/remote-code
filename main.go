@@ -80,6 +80,9 @@ func main() {
 	// Ensure the Claude Code Stop hook script is written to disk
 	ensureSwarmHookScript()
 
+	// Start background version check (logs if update available; served at /api/swarm/version)
+	startVersionCheck()
+
 	// Start swarm agent status monitor
 	startSwarmMonitor()
 	startIPCPoller()
