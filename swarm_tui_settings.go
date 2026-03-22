@@ -56,6 +56,8 @@ func newTUISettings() *tuiSettingsModel {
 		sections: []SettingsSectionModel{
 			newPersonasSection(),
 			newSessionContextsSection(),
+			newSwarmConfigSection(),
+			newIntegrationsSection(),
 		},
 	}
 }

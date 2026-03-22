@@ -499,6 +499,25 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.setFlash(fmt.Sprintf("Feedback submitted — SWM-%d", msg.seqID), false)
 		}
 
+	case swarmConfigLoadedMsg:
+		applySwarmConfigLoaded(&m, msg)
+
+	case swarmConfigSavedMsg:
+		applySwarmConfigSaved(&m, msg)
+		if msg.err == nil {
+			m.setFlash("Config saved: "+msg.key, false)
+			// Trigger reload in section
+			if m.settings != nil {
+				for _, sec := range m.settings.sections {
+					if sc, ok := sec.(*swarmConfigSection); ok && sc.loading {
+						cmds = append(cmds, sc.Init())
+					}
+				}
+			}
+		} else {
+			m.setFlash("Config save failed: "+msg.err.Error(), true)
+		}
+
 	case personasLoadedMsg:
 		applyPersonasLoaded(&m, msg)
 
