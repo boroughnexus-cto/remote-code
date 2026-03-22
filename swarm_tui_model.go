@@ -124,6 +124,9 @@ type tuiModel struct {
 	opsView   bool
 	opsCursor int
 
+	// Command Palette (: key)
+	cmdPalette *cmdPaletteModel
+
 	// Git status cache (agentID → last fetched status)
 	gitStatus    map[string]tuiGitStatus
 	gitFetching  bool
@@ -501,6 +504,17 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case tea.KeyMsg:
+		// : opens command palette from anywhere (except when typing in a text field)
+		if msg.String() == ":" && m.focus != tuiFocusInput && m.cmdPalette == nil &&
+			m.modal == nil && !m.opsView {
+			m.cmdPalette = newCmdPaletteModel()
+			break
+		}
+		// esc closes command palette
+		if msg.String() == "esc" && m.cmdPalette != nil {
+			m.cmdPalette = nil
+			break
+		}
 		// ctrl+x global halt — works from anywhere, no menu navigation required
 		if msg.String() == "ctrl+x" {
 			m.opsView = false
@@ -530,7 +544,9 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.helpVisible {
 			m.helpVisible = false
 		}
-		if m.modal != nil || m.focus == tuiFocusModal {
+		if m.cmdPalette != nil {
+			m, cmds = m.updateCmdPalette(msg)
+		} else if m.modal != nil || m.focus == tuiFocusModal {
 			return m.updateModal(msg)
 		} else if m.opsView {
 			m, cmds = m.updateOpsView(msg)

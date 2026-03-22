@@ -394,6 +394,9 @@ func (m tuiModel) View() string {
 	if m.modal != nil {
 		return m.viewModal()
 	}
+	if m.cmdPalette != nil {
+		return m.viewCmdPalette()
+	}
 	if m.opsView {
 		return m.viewOpsConsole()
 	}
