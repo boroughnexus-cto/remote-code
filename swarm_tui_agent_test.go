@@ -12,6 +12,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -219,5 +220,44 @@ func TestAgent_RKeyOnSessionProducesResumeCommand(t *testing.T) {
 	_, cmd := m.Update(keyRune('r'))
 	if cmd == nil {
 		t.Error("r on session should return a command")
+	}
+}
+
+// ─── US-A.7 (new): A toggles autopilot ───────────────────────────────────────
+
+func TestAgent_ATogglesAutopilotOn(t *testing.T) {
+	sessions, states := stdSessions() // AutopilotEnabled defaults to false
+	fc := newFakeClient()
+	m := newTestModelWithClient(sessions, states, fc)
+
+	// Cursor starts at Control Tower; selSessionID falls back to first session.
+	m = drive(m, keyRune('A'))
+
+	patchCalls := fc.callsForOp("autopilot")
+	if len(patchCalls) == 0 {
+		t.Fatal("expected autopilot PATCH call after A")
+	}
+	if !strings.Contains(m.flash, "Autopilot ON") {
+		t.Errorf("flash should contain 'Autopilot ON', got %q", m.flash)
+	}
+}
+
+func TestAgent_ATogglesAutopilotOff(t *testing.T) {
+	s := makeSession("s-auto000000000", "AutoOn")
+	s.AutopilotEnabled = true
+	a := makeAgent("a1", "Alice", "senior-dev", "idle")
+	sessions := []tuiSession{s}
+	states := map[string]tuiState{s.ID: {Session: s, Agents: []tuiAgent{a}}}
+	fc := newFakeClient()
+	m := newTestModelWithClient(sessions, states, fc)
+
+	m = drive(m, keyRune('A'))
+
+	patchCalls := fc.callsForOp("autopilot")
+	if len(patchCalls) == 0 {
+		t.Fatal("expected autopilot PATCH call after A")
+	}
+	if !strings.Contains(m.flash, "Autopilot OFF") {
+		t.Errorf("flash should contain 'Autopilot OFF', got %q", m.flash)
 	}
 }

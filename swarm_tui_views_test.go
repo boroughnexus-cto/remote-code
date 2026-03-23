@@ -12,6 +12,13 @@
 //   US-V.9  C opens context picker; esc closes it
 //   US-V.10 Context picker renders title; esc sends no PATCH command
 //   US-V.11 Context picker Enter on items fires set-context PATCH
+//   US-V.12 Goal x cancels active goal; flash on non-active
+//   US-V.13 Goal u reactivates cancelled goal; flash on non-cancelled
+//   US-V.14 Event log f/F filter by agent / clear filter
+//   US-V.15 Work queue navigate and promote fires create-goal
+//   US-V.16 Triage view navigation
+//   US-V.17 Escalation view Enter → inputting mode; respond fires POST
+//   US-V.18 Notes a key opens AddNote modal
 
 package main
 
@@ -329,5 +336,265 @@ func TestViews_OpeningSecondViewClosesFirst(t *testing.T) {
 	}
 	if !m.evtLogView {
 		t.Error("evtLogView should be open after L")
+	}
+}
+
+// ─── US-V.12: Goal x/u actions ───────────────────────────────────────────────
+
+func TestViews_GoalXCancelsActiveGoal(t *testing.T) {
+	s := makeSession("s-gx000000000", "GoalX")
+	g := makeGoal("g1", "Active Goal", "active")
+	sessions := []tuiSession{s}
+	states := map[string]tuiState{s.ID: {Session: s, Goals: []tuiGoal{g}}}
+	fc := newFakeClient()
+	m := newTestModelWithClient(sessions, states, fc)
+
+	m = drive(m, keyRune('g'))
+	_, cmds := driveCapture(m, keyRune('x'))
+
+	cancelCalls := fc.callsForOp("cancel-goal")
+	if len(cancelCalls) > 0 {
+		return
+	}
+	for _, cmd := range cmds {
+		if cmd != nil {
+			if done, ok := cmd().(tuiDoneMsg); ok && done.op == "cancel-goal" {
+				return
+			}
+		}
+	}
+	t.Error("expected cancel-goal PATCH after x on active goal")
+}
+
+func TestViews_GoalXOnNonActiveShowsFlash(t *testing.T) {
+	s := makeSession("s-gxna00000000", "GoalXNA")
+	g := makeGoal("g1", "Done Goal", "complete")
+	sessions := []tuiSession{s}
+	states := map[string]tuiState{s.ID: {Session: s, Goals: []tuiGoal{g}}}
+	m := newTestModel(sessions, states)
+
+	m = drive(m, keyRune('g'), keyRune('x'))
+	if m.flash == "" {
+		t.Error("flash should be set after x on non-active goal")
+	}
+}
+
+func TestViews_GoalUReactivatesCancelledGoal(t *testing.T) {
+	s := makeSession("s-gu0000000000", "GoalU")
+	g := makeGoal("g1", "Cancelled Goal", "cancelled")
+	sessions := []tuiSession{s}
+	states := map[string]tuiState{s.ID: {Session: s, Goals: []tuiGoal{g}}}
+	fc := newFakeClient()
+	m := newTestModelWithClient(sessions, states, fc)
+
+	m = drive(m, keyRune('g'))
+	_, cmds := driveCapture(m, keyRune('u'))
+
+	reactivateCalls := fc.callsForOp("reactivate-goal")
+	if len(reactivateCalls) > 0 {
+		return
+	}
+	for _, cmd := range cmds {
+		if cmd != nil {
+			if done, ok := cmd().(tuiDoneMsg); ok && done.op == "reactivate-goal" {
+				return
+			}
+		}
+	}
+	t.Error("expected reactivate-goal PATCH after u on cancelled goal")
+}
+
+func TestViews_GoalUOnNonCancelledShowsFlash(t *testing.T) {
+	s := makeSession("s-gunc000000000", "GoalUNC")
+	g := makeGoal("g1", "Active Goal", "active")
+	sessions := []tuiSession{s}
+	states := map[string]tuiState{s.ID: {Session: s, Goals: []tuiGoal{g}}}
+	m := newTestModel(sessions, states)
+
+	m = drive(m, keyRune('g'), keyRune('u'))
+	if m.flash == "" {
+		t.Error("flash should be set after u on non-cancelled goal")
+	}
+}
+
+// ─── US-V.14: Event log f/F filter ───────────────────────────────────────────
+
+func TestViews_EventLogFilterByAgent(t *testing.T) {
+	s := makeSession("s-evtf000000000", "EvtFilter")
+	a := makeAgent("agent-aaa-111111", "Alice", "senior-dev", "idle")
+	// Single event — evtCursor = max(0, len-1) = 0, so cursor lands on this event.
+	evtA := tuiEvent{AgentID: a.ID, Type: "note", Payload: "Alice did stuff", Ts: 1000}
+	sessions := []tuiSession{s}
+	states := map[string]tuiState{
+		s.ID: {Session: s, Agents: []tuiAgent{a}, Events: []tuiEvent{evtA}},
+	}
+	m := newTestModel(sessions, states)
+
+	m = drive(m, keyRune('L')) // open event log; evtCursor = 0
+	m = drive(m, keyRune('f'))
+	if m.evtAgentFilter != "Alice" {
+		t.Errorf("evtAgentFilter after f: want 'Alice', got %q", m.evtAgentFilter)
+	}
+}
+
+func TestViews_EventLogClearFilter(t *testing.T) {
+	s := makeSession("s-evtcf00000000", "EvtClear")
+	a := makeAgent("agent-aaa-111111", "Alice", "senior-dev", "idle")
+	evtA := tuiEvent{AgentID: a.ID, Type: "note", Payload: "Alice note", Ts: 1000}
+	sessions := []tuiSession{s}
+	states := map[string]tuiState{
+		s.ID: {Session: s, Agents: []tuiAgent{a}, Events: []tuiEvent{evtA}},
+	}
+	m := newTestModel(sessions, states)
+
+	m = drive(m, keyRune('L'))
+	m = drive(m, keyRune('f')) // set filter
+	if m.evtAgentFilter == "" {
+		t.Skip("f produced no filter (no events at cursor or agent unknown)")
+	}
+	m = drive(m, keyRune('F'))
+	if m.evtAgentFilter != "" {
+		t.Errorf("evtAgentFilter after F: want '', got %q", m.evtAgentFilter)
+	}
+}
+
+// ─── US-V.15: Work queue navigate and promote ─────────────────────────────────
+
+func TestViews_WorkQueueNavigateDown(t *testing.T) {
+	sessions, states := stdSessions()
+	m := newTestModel(sessions, states)
+	m = drive(m, keyRune('W'))
+
+	// Inject two items so there is something to navigate between.
+	item1 := WorkQueueItem{PlaneIssueID: "PI-1", Title: "Fix login bug", Priority: "urgent"}
+	item2 := WorkQueueItem{PlaneIssueID: "PI-2", Title: "Add dark mode", Priority: "medium"}
+	m = drive(m, tuiWorkQueueMsg{items: []WorkQueueItem{item1, item2}})
+
+	initial := m.workQueueCursor
+	m = drive(m, keyDown())
+	if m.workQueueCursor != initial+1 {
+		t.Errorf("workQueueCursor after down: want %d, got %d", initial+1, m.workQueueCursor)
+	}
+}
+
+func TestViews_WorkQueuePromoteFiresCreateGoal(t *testing.T) {
+	sessions, states := stdSessions()
+	fc := newFakeClient()
+	m := newTestModelWithClient(sessions, states, fc)
+	m = drive(m, keyRune('W'))
+	m = drive(m, tuiWorkQueueMsg{items: []WorkQueueItem{
+		{PlaneIssueID: "PI-1", Title: "Implement search"},
+	}})
+
+	m2, cmds := driveCapture(m, keyRune('p'))
+
+	createCalls := fc.callsForOp("create-goal")
+	if len(createCalls) > 0 {
+		if !m2.workQueuePromoting {
+			t.Error("workQueuePromoting should be true after p")
+		}
+		return
+	}
+	for _, cmd := range cmds {
+		if cmd != nil {
+			if done, ok := cmd().(tuiDoneMsg); ok && done.op == "create-goal" {
+				return
+			}
+		}
+	}
+	t.Error("expected create-goal POST after p on work queue item")
+}
+
+// ─── US-V.16: Triage navigate ─────────────────────────────────────────────────
+
+func TestViews_TriageNavigateDown(t *testing.T) {
+	s := makeSession("s-triage000000000", "Triage")
+	// Two blocked tasks to ensure navigation is possible.
+	t1 := makeTask("task-001-triage00", "Blocked task 1", "blocked")
+	t2 := makeTask("task-002-triage00", "Blocked task 2", "blocked")
+	sessions := []tuiSession{s}
+	states := map[string]tuiState{
+		s.ID: {Session: s, Tasks: []tuiTask{t1, t2}},
+	}
+	m := newTestModel(sessions, states)
+
+	m = drive(m, keyRune('T'))
+	initial := m.triageCursor
+	m = drive(m, keyDown())
+	if m.triageCursor != initial+1 {
+		t.Errorf("triageCursor after down: want %d, got %d", initial+1, m.triageCursor)
+	}
+}
+
+// ─── US-V.17: Escalation respond ─────────────────────────────────────────────
+
+func makeEscalation(id, agentID, reason string) tuiEscalation {
+	return tuiEscalation{ID: id, AgentID: agentID, TaskID: "task-001", Reason: reason, Ts: 1000}
+}
+
+func TestViews_EscalationEnterStartsInputting(t *testing.T) {
+	s := makeSession("s-escr000000000", "EscResp")
+	esc := makeEscalation("esc-001", "agent-111-aabbcc", "Need help")
+	sessions := []tuiSession{s}
+	states := map[string]tuiState{
+		s.ID: {Session: s, Escalations: []tuiEscalation{esc}},
+	}
+	m := newTestModel(sessions, states)
+
+	m = drive(m, keyRune('e')) // open escalation view
+	m = drive(m, keyEnter())   // Enter on first item starts inputting
+	if !m.escInputting {
+		t.Error("escInputting should be true after Enter on escalation item")
+	}
+	if m.escActive == nil {
+		t.Error("escActive should be set after Enter on escalation item")
+	}
+}
+
+func TestViews_EscalationRespondFiresPost(t *testing.T) {
+	s := makeSession("s-escpost00000000", "EscPost")
+	esc := makeEscalation("esc-002", "agent-111-aabbcc", "Need help")
+	sessions := []tuiSession{s}
+	states := map[string]tuiState{
+		s.ID: {Session: s, Escalations: []tuiEscalation{esc}},
+	}
+	fc := newFakeClient()
+	m := newTestModelWithClient(sessions, states, fc)
+
+	m = drive(m, keyRune('e'))  // open view
+	m = drive(m, keyEnter())    // start inputting
+	m = drive(m, keyStr("Unblock it"))
+	_, cmds := driveCapture(m, keyEnter()) // submit response
+
+	respondCalls := fc.callsForOp("esc-respond")
+	if len(respondCalls) > 0 {
+		return
+	}
+	for _, cmd := range cmds {
+		if cmd != nil {
+			if done, ok := cmd().(tuiDoneMsg); ok && done.op == "esc-respond" {
+				return
+			}
+		}
+	}
+	t.Error("expected esc-respond POST after typing response and Enter")
+}
+
+// ─── US-V.18: Notes a key opens AddNote modal ────────────────────────────────
+
+func TestViews_NotesAOpensAddNoteModal(t *testing.T) {
+	sessions, states := stdSessions()
+	m := newTestModel(sessions, states)
+
+	if !navigateToAgent(&m) {
+		t.Fatal("no agent item in sidebar")
+	}
+	m = drive(m, keyRune('N'))           // open notes view
+	m = drive(m, keyRune('a'))           // press 'a' to add note
+	if m.modal == nil {
+		t.Fatal("expected modal to open after a in notes view")
+	}
+	if m.modal.kind != tuiModalAddNote {
+		t.Errorf("modal kind: want tuiModalAddNote, got %v", m.modal.kind)
 	}
 }

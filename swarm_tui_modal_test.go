@@ -310,3 +310,240 @@ func TestModal_NewTaskSubmitFiresCommand(t *testing.T) {
 		t.Errorf("done.op: want 'create-task', got %q", done.op)
 	}
 }
+
+// ─── US-M.10: E key opens edit modals ────────────────────────────────────────
+
+// navigateToTask sets the cursor to the first task item in the sidebar.
+func navigateToTask(m *tuiModel) bool {
+	for i, it := range m.items {
+		if it.kind == tuiItemTask {
+			m.cursor = i
+			return true
+		}
+	}
+	return false
+}
+
+func TestModal_EOnSessionOpensEditSession(t *testing.T) {
+	sessions, states := stdSessions()
+	m := newTestModel(sessions, states)
+
+	m = drive(m, keyDown()) // cursor → first session (Alpha)
+	m = drive(m, keyRune('E'))
+	if m.modal == nil {
+		t.Fatal("expected modal after E on session")
+	}
+	if m.modal.kind != tuiModalEditSession {
+		t.Errorf("modal kind: want tuiModalEditSession, got %v", m.modal.kind)
+	}
+}
+
+func TestModal_EOnAgentOpensEditAgent(t *testing.T) {
+	sessions, states := stdSessions()
+	m := newTestModel(sessions, states)
+
+	if !navigateToAgent(&m) {
+		t.Fatal("no agent item in sidebar")
+	}
+	m = drive(m, keyRune('E'))
+	if m.modal == nil {
+		t.Fatal("expected modal after E on agent")
+	}
+	if m.modal.kind != tuiModalEditAgent {
+		t.Errorf("modal kind: want tuiModalEditAgent, got %v", m.modal.kind)
+	}
+}
+
+func TestModal_EOnTaskOpensEditTask(t *testing.T) {
+	sessions, states := stdSessions()
+	m := newTestModel(sessions, states)
+
+	if !navigateToTask(&m) {
+		t.Fatal("no task item in sidebar")
+	}
+	m = drive(m, keyRune('E'))
+	if m.modal == nil {
+		t.Fatal("expected modal after E on task")
+	}
+	if m.modal.kind != tuiModalEditTask {
+		t.Errorf("modal kind: want tuiModalEditTask, got %v", m.modal.kind)
+	}
+}
+
+// ─── US-M.11: Edit session submit fires PATCH ─────────────────────────────────
+
+func TestModal_EditSessionSubmitFiresPatch(t *testing.T) {
+	sessions, states := stdSessions()
+	fc := newFakeClient()
+	m := newTestModelWithClient(sessions, states, fc)
+
+	m = drive(m, keyDown())    // cursor → first session
+	m = drive(m, keyRune('E')) // open EditSession modal (1 field, pre-filled "Alpha")
+
+	// Field is pre-filled; Enter submits directly (1-field modal).
+	_, cmd := m.Update(keyEnter())
+	if cmd == nil {
+		t.Fatal("expected command from edit-session submit")
+	}
+	msg := cmd()
+	done, ok := msg.(tuiDoneMsg)
+	if !ok {
+		t.Fatalf("expected tuiDoneMsg, got %T", msg)
+	}
+	if done.op != "edit-session" {
+		t.Errorf("done.op: want 'edit-session', got %q", done.op)
+	}
+}
+
+// ─── US-M.12: S on task opens SetStage modal ──────────────────────────────────
+
+func TestModal_SOnTaskOpensEditTaskStage(t *testing.T) {
+	sessions, states := stdSessions()
+	m := newTestModel(sessions, states)
+
+	if !navigateToTask(&m) {
+		t.Fatal("no task item in sidebar")
+	}
+	m = drive(m, keyRune('S'))
+	if m.modal == nil {
+		t.Fatal("expected modal after S on task")
+	}
+	if m.modal.kind != tuiModalEditTaskStage {
+		t.Errorf("modal kind: want tuiModalEditTaskStage, got %v", m.modal.kind)
+	}
+}
+
+func TestModal_EditTaskStageSubmitFiresPatch(t *testing.T) {
+	sessions, states := stdSessions()
+	fc := newFakeClient()
+	m := newTestModelWithClient(sessions, states, fc)
+
+	if !navigateToTask(&m) {
+		t.Fatal("no task item in sidebar")
+	}
+	m = drive(m, keyRune('S')) // open SetStage modal (1 field pre-filled with current stage)
+	// Clear pre-filled value and type a new stage.
+	m = drive(m, keyStr("done"))
+
+	_, cmd := m.Update(keyEnter())
+	if cmd == nil {
+		t.Fatal("expected command from edit-task-stage submit")
+	}
+	msg := cmd()
+	done, ok := msg.(tuiDoneMsg)
+	if !ok {
+		t.Fatalf("expected tuiDoneMsg, got %T", msg)
+	}
+	if done.op != "edit-task-stage" {
+		t.Errorf("done.op: want 'edit-task-stage', got %q", done.op)
+	}
+}
+
+// ─── US-M.13: + opens quick-agent modal ──────────────────────────────────────
+
+func TestModal_PlusOpensQuickAgent(t *testing.T) {
+	sessions, states := stdSessions()
+	m := newTestModel(sessions, states)
+
+	m = drive(m, keyRune('+'))
+	if m.modal == nil {
+		t.Fatal("expected modal after +")
+	}
+	if m.modal.kind != tuiModalQuickAgent {
+		t.Errorf("modal kind: want tuiModalQuickAgent, got %v", m.modal.kind)
+	}
+}
+
+func TestModal_QuickAgentSubmitFiresCreateAgent(t *testing.T) {
+	sessions, states := stdSessions()
+	fc := newFakeClient()
+	m := newTestModelWithClient(sessions, states, fc)
+
+	m = drive(m, keyRune('+'))
+	m = typeInModal(m, "Danika")
+
+	_, cmd := m.Update(keyEnter())
+	if cmd == nil {
+		t.Fatal("expected command from quick-agent submit")
+	}
+	msg := cmd()
+	done, ok := msg.(tuiDoneMsg)
+	if !ok {
+		t.Fatalf("expected tuiDoneMsg, got %T", msg)
+	}
+	if done.op != "create-agent" {
+		t.Errorf("done.op: want 'create-agent', got %q", done.op)
+	}
+	calls := fc.callsForOp("create-agent")
+	if len(calls) == 0 {
+		t.Error("fakeClient should have recorded a create-agent call")
+	}
+}
+
+// ─── US-M.14: X on session opens typed-confirm modal ─────────────────────────
+
+func TestModal_XOnSessionOpensConfirmModal(t *testing.T) {
+	sessions, states := stdSessions()
+	m := newTestModel(sessions, states)
+
+	m = drive(m, keyDown()) // cursor → first session (Alpha)
+	m = drive(m, keyRune('X'))
+	if m.modal == nil {
+		t.Fatal("expected modal after X on session")
+	}
+	if m.modal.kind != tuiModalConfirmTyped {
+		t.Errorf("modal kind: want tuiModalConfirmTyped, got %v", m.modal.kind)
+	}
+	if m.pendingConfirm == nil {
+		t.Error("pendingConfirm should be set after X on session")
+	}
+}
+
+func TestModal_XConfirmWrongNameShowsError(t *testing.T) {
+	sessions, states := stdSessions()
+	fc := newFakeClient()
+	m := newTestModelWithClient(sessions, states, fc)
+
+	m = drive(m, keyDown(), keyRune('X')) // open confirm modal for "Alpha"
+	m = typeInModal(m, "wrong-name")
+
+	callsBefore := len(fc.calls)
+	m = drive(m, keyEnter())
+
+	// Modal should stay open (validator failed) and show error.
+	if m.modal == nil {
+		t.Error("modal should stay open after wrong name")
+	}
+	if m.modal.err == "" {
+		t.Error("modal.err should be set after wrong name")
+	}
+	for _, c := range fc.calls[callsBefore:] {
+		if c.method == "DELETE" {
+			t.Errorf("should not DELETE with wrong name: %+v", c)
+		}
+	}
+}
+
+func TestModal_XConfirmCorrectNameFiresDelete(t *testing.T) {
+	sessions, states := stdSessions()
+	fc := newFakeClient()
+	m := newTestModelWithClient(sessions, states, fc)
+
+	m = drive(m, keyDown(), keyRune('X')) // open confirm modal for "Alpha"
+	m = typeInModal(m, "Alpha")
+
+	_, cmd := m.Update(keyEnter())
+
+	// Validator passes → submitModal fires pendingConfirm.onConfirm.
+	deleteCalls := fc.callsForOp("delete-session")
+	if len(deleteCalls) > 0 {
+		return
+	}
+	if cmd != nil {
+		msg := cmd()
+		if done, ok := msg.(tuiDoneMsg); ok && done.op == "delete-session" {
+			return
+		}
+	}
+	t.Error("expected delete-session after correct name confirm")
+}
