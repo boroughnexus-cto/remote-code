@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -38,7 +39,39 @@ func startTaskWatchdog() {
 			watchdogTickFull()
 		}
 	}()
-	log.Printf("swarm/watchdog: started (heartbeat_timeout=%s, absolute=%s)", watchdogHeartbeatTimeout, watchdogAbsoluteTimeout)
+	log.Printf("swarm/watchdog: started (timeouts configurable via swarm.watchdog_heartbeat_timeout / swarm.watchdog_absolute_timeout)")
+}
+
+// resolveWatchdogTimeouts reads heartbeat and absolute timeout from ConfigService
+// with validation and fallback to compiled constants. Called on each watchdog tick
+// to allow live tuning without a restart.
+func resolveWatchdogTimeouts() (heartbeat, absolute time.Duration) {
+	heartbeat = watchdogHeartbeatTimeout
+	absolute = watchdogAbsoluteTimeout
+	if globalConfigService == nil {
+		return
+	}
+	parseSeconds := func(key string, fallback time.Duration) time.Duration {
+		v := globalConfigService.GetString(key, "")
+		if v == "" {
+			return fallback
+		}
+		secs, err := strconv.Atoi(strings.TrimSpace(v))
+		if err != nil || secs <= 0 {
+			log.Printf("swarm/watchdog: invalid %s value %q — using default %s", key, v, fallback)
+			return fallback
+		}
+		return time.Duration(secs) * time.Second
+	}
+	heartbeat = parseSeconds("swarm.watchdog_heartbeat_timeout", watchdogHeartbeatTimeout)
+	absolute = parseSeconds("swarm.watchdog_absolute_timeout", watchdogAbsoluteTimeout)
+	// Sanity check: heartbeat should be less than absolute.
+	if heartbeat >= absolute {
+		log.Printf("swarm/watchdog: watchdog_heartbeat_timeout (%s) >= watchdog_absolute_timeout (%s) — using defaults", heartbeat, absolute)
+		heartbeat = watchdogHeartbeatTimeout
+		absolute = watchdogAbsoluteTimeout
+	}
+	return
 }
 
 type watchdogTask struct {
@@ -80,8 +113,9 @@ func watchdogTick() {
 		tasks = append(tasks, wt)
 	}
 
-	heartbeatCutoff := now - int64(watchdogHeartbeatTimeout.Seconds())
-	absoluteCutoff := now - int64(watchdogAbsoluteTimeout.Seconds())
+	heartbeatTimeout, absoluteTimeout := resolveWatchdogTimeouts()
+	heartbeatCutoff := now - int64(heartbeatTimeout.Seconds())
+	absoluteCutoff := now - int64(absoluteTimeout.Seconds())
 
 	// Build alive-session set once to avoid N subprocess calls per task
 	aliveSessions := listAliveTmuxSessions()

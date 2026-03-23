@@ -519,21 +519,31 @@ func (m tuiModel) viewWorkQueueScreen() string {
 	sb.WriteString(m.viewHUD() + "\n")
 
 	title := lipgloss.NewStyle().Foreground(colorTeal).Bold(true).Render("Work Queue — Plane Backlog")
+	filterBadge := ""
+	if m.workQueueFilter != "" {
+		filterBadge = "  " + lipgloss.NewStyle().Foreground(colorOrange).Render("["+m.workQueueFilter+"]") +
+			dimStyle.Render(" (f cycles)")
+	}
 	promotingBadge := ""
 	if m.workQueuePromoting {
 		promotingBadge = "  " + lipgloss.NewStyle().Foreground(colorYellow).Render("Promoting…")
 	}
-	sb.WriteString(title + promotingBadge + "\n\n")
+	sb.WriteString(title + filterBadge + promotingBadge + "\n\n")
 
+	filtered := m.filteredWorkQueueItems()
 	if m.workQueueItems == nil {
 		sb.WriteString(dimStyle.Render("  Loading…") + "\n")
-	} else if len(m.workQueueItems) == 0 {
-		sb.WriteString(dimStyle.Render("  No items in backlog or unstarted state.") + "\n")
+	} else if len(filtered) == 0 {
+		if m.workQueueFilter != "" {
+			sb.WriteString(dimStyle.Render(fmt.Sprintf("  No %s priority items in queue.", m.workQueueFilter)) + "\n")
+		} else {
+			sb.WriteString(dimStyle.Render("  No items in backlog or unstarted state.") + "\n")
+		}
 	} else {
 		priIcon := map[string]string{"urgent": "🔴", "high": "🟠", "medium": "🟡"}
 
 		// Sliding window around cursor
-		n := len(m.workQueueItems)
+		n := len(filtered)
 		visible := m.h - 8
 		if visible < 5 {
 			visible = 5
@@ -554,7 +564,7 @@ func (m tuiModel) viewWorkQueueScreen() string {
 		}
 
 		for i := start; i < end; i++ {
-			item := m.workQueueItems[i]
+			item := filtered[i]
 			icon := priIcon[item.Priority]
 			if icon == "" {
 				icon = "⚪"
@@ -575,7 +585,7 @@ func (m tuiModel) viewWorkQueueScreen() string {
 		}
 	}
 
-	sb.WriteString("\n" + dimStyle.Render("  j/k navigate  ·  Enter/p promote to goal  ·  g/G first/last  ·  q close"))
+	sb.WriteString("\n" + dimStyle.Render("  j/k navigate  ·  Enter/p promote to goal  ·  f filter priority  ·  g/G first/last  ·  q close"))
 	return sb.String()
 }
 
@@ -760,13 +770,27 @@ func (m tuiModel) viewEscalationScreen() string {
 
 func (m tuiModel) updateWorkQueueView(msg tea.KeyMsg) (tuiModel, []tea.Cmd) {
 	var cmds []tea.Cmd
-	n := len(m.workQueueItems)
+	filtered := m.filteredWorkQueueItems()
+	n := len(filtered)
 	switch msg.String() {
 	case "q", "esc":
 		m.workQueueView = false
 		m.workQueueItems = nil
 		m.workQueueCursor = 0
+		m.workQueueFilter = ""
 		m.workQueuePromoting = false
+	case "f":
+		// Cycle priority filter: "" → "urgent" → "high" → "medium" → "low" → ""
+		priorities := []string{"", "urgent", "high", "medium", "low"}
+		cur := 0
+		for i, p := range priorities {
+			if p == m.workQueueFilter {
+				cur = i
+				break
+			}
+		}
+		m.workQueueFilter = priorities[(cur+1)%len(priorities)]
+		m.workQueueCursor = 0
 	case "j", "down":
 		if m.workQueueCursor < n-1 {
 			m.workQueueCursor++
@@ -783,7 +807,7 @@ func (m tuiModel) updateWorkQueueView(msg tea.KeyMsg) (tuiModel, []tea.Cmd) {
 		// Promote selected item to a session goal.
 		// Keep the view open and mark in-flight — close only on tuiDoneMsg.
 		if !m.workQueuePromoting && m.workQueueCursor < n {
-			item := m.workQueueItems[m.workQueueCursor]
+			item := filtered[m.workQueueCursor]
 			path := "/api/swarm/sessions/" + m.workQueueSID + "/goals"
 			cmds = append(cmds, m.client.post("create-goal", path,
 				map[string]string{"description": item.Title}))
@@ -791,6 +815,21 @@ func (m tuiModel) updateWorkQueueView(msg tea.KeyMsg) (tuiModel, []tea.Cmd) {
 		}
 	}
 	return m, cmds
+}
+
+// filteredWorkQueueItems returns work queue items matching the current priority
+// filter. Returns all items when workQueueFilter is empty.
+func (m tuiModel) filteredWorkQueueItems() []WorkQueueItem {
+	if m.workQueueFilter == "" {
+		return m.workQueueItems
+	}
+	var out []WorkQueueItem
+	for _, item := range m.workQueueItems {
+		if item.Priority == m.workQueueFilter {
+			out = append(out, item)
+		}
+	}
+	return out
 }
 
 func (m tuiModel) updateGoalView(msg tea.KeyMsg) (tuiModel, []tea.Cmd) {

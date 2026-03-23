@@ -75,7 +75,8 @@ type tuiModel struct {
 	workQueueItems     []WorkQueueItem
 	workQueueSID       string
 	workQueueCursor    int
-	workQueuePromoting bool // true while create-goal POST is in-flight
+	workQueueFilter    string // priority filter: "" | "urgent" | "high" | "medium" | "low"
+	workQueuePromoting bool   // true while create-goal POST is in-flight
 
 	// Notes view (N key)
 	notesView    bool
@@ -483,6 +484,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			"esc-respond": "Escalation resolved",
 			"inject-agent": "Message injected", "edit-task-stage": "Stage updated",
 			"delete-agent": "Agent deleted", "delete-task": "Task deleted",
+			"delete-session": "Session deleted",
 			"cancel-goal": "Goal cancelled", "reactivate-goal": "Goal reactivated",
 			"add-note": "Note added", "set-context": "Context assigned",
 			"ctx-content": "Context content updated", "ctx-dynamic": "Dynamic context updated",

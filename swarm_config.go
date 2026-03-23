@@ -110,7 +110,9 @@ var configRegistry = map[string]configMeta{
 	"swarm.max_tasks":      {Default: "50", EnvVar: "SWARM_MAX_TASKS", DangerLevel: 0, Description: "Maximum tracked tasks", Validate: validatePositiveInt(1, 10000)},
 	"swarm.max_disk_mb":    {Default: "5000", EnvVar: "SWARM_MAX_DISK_MB", DangerLevel: 1, Description: "Max worktree disk usage (MB)", Validate: validatePositiveInt(100, 0)},
 	"swarm.cost_limit_usd": {Default: "5.0", EnvVar: "SWARM_COST_LIMIT_USD", DangerLevel: 1, Description: "Per-session cost limit (USD)", Validate: validatePositiveFloat(0)},
-	"swarm.stuck_timeout":  {Default: "120", EnvVar: "SWARM_STUCK_TIMEOUT", DangerLevel: 0, Description: "Seconds before agent marked stuck", Validate: validatePositiveInt(10, 0)},
+	"swarm.stuck_timeout":              {Default: "1800", EnvVar: "SWARM_STUCK_TIMEOUT", DangerLevel: 0, Description: "Seconds before agent marked stuck (0=disable)", Validate: validatePositiveInt(0, 0)},
+	"swarm.watchdog_heartbeat_timeout": {Default: "2700", EnvVar: "SWARM_WATCHDOG_HEARTBEAT_TIMEOUT", DangerLevel: 0, Description: "Seconds without heartbeat before agent is timed out (requires tmux dead)", Validate: validatePositiveInt(60, 0)},
+	"swarm.watchdog_absolute_timeout":  {Default: "7200", EnvVar: "SWARM_WATCHDOG_ABSOLUTE_TIMEOUT", DangerLevel: 0, Description: "Seconds hard cap regardless of heartbeat", Validate: validatePositiveInt(60, 0)},
 	// Budget
 	"swarm.budget_max_total":     {Default: "100.0", EnvVar: "SWARM_BUDGET_MAX_TOTAL", DangerLevel: 1, Description: "Total budget ceiling (USD)", Validate: validatePositiveFloat(0)},
 	"swarm.budget_autoraise_pct": {Default: "10", EnvVar: "SWARM_BUDGET_AUTORAISE_PCT", DangerLevel: 1, Description: "Auto-raise budget by this % when limit hit", Validate: validatePositiveInt(0, 100)},

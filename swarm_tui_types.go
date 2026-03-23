@@ -70,6 +70,7 @@ type tuiSession struct {
 	Name                  string  `json:"name"`
 	AutopilotEnabled      bool    `json:"autopilot_enabled"`
 	AutopilotPlaneProject *string `json:"autopilot_plane_project_id,omitempty"`
+	AutopilotLabelFilter  *string `json:"autopilot_label_filter,omitempty"`
 	ContextID             *string `json:"context_id,omitempty"`
 	ContextName           *string `json:"context_name,omitempty"`
 	ContextSummary        *string `json:"context_summary,omitempty"`

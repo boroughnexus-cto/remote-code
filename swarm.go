@@ -26,6 +26,7 @@ type SwarmSession struct {
 	Name                  string  `json:"name"`
 	AutopilotEnabled      bool    `json:"autopilot_enabled"`
 	AutopilotPlaneProject *string `json:"autopilot_plane_project_id,omitempty"`
+	AutopilotLabelFilter  *string `json:"autopilot_label_filter,omitempty"`
 	ContextID             *string `json:"context_id,omitempty"`
 	ContextName           *string `json:"context_name,omitempty"`
 	ContextSummary        *string `json:"context_summary,omitempty"`
@@ -302,10 +303,11 @@ func scanNullString(ns sql.NullString) *string {
 
 func getSwarmState(ctx context.Context, sessionID string) (*SwarmState, error) {
 	var session SwarmSession
-	var autopilotPlaneProject, contextID, contextName, contextSummary sql.NullString
+	var autopilotPlaneProject, autopilotLabelFilter, contextID, contextName, contextSummary sql.NullString
 	var autopilotEnabled, hasDynamic int
 	err := database.QueryRowContext(ctx,
 		`SELECT ss.id, ss.name, COALESCE(ss.autopilot_enabled,0), COALESCE(ss.autopilot_plane_project_id,''),
+		        COALESCE(ss.autopilot_label_filter,''),
 		        COALESCE(ss.token_budget,0), COALESCE(ss.tokens_used,0),
 		        ss.created_at, ss.updated_at,
 		        ss.context_id, sc.name, sc.summary,
@@ -315,12 +317,16 @@ func getSwarmState(ctx context.Context, sessionID string) (*SwarmState, error) {
 		 WHERE ss.id = ?`,
 		sessionID,
 	).Scan(&session.ID, &session.Name, &autopilotEnabled, &autopilotPlaneProject,
+		&autopilotLabelFilter,
 		&session.TokenBudget, &session.TokensUsed,
 		&session.CreatedAt, &session.UpdatedAt,
 		&contextID, &contextName, &contextSummary, &hasDynamic)
 	session.AutopilotEnabled = autopilotEnabled == 1
 	if autopilotPlaneProject.Valid && autopilotPlaneProject.String != "" {
 		session.AutopilotPlaneProject = &autopilotPlaneProject.String
+	}
+	if autopilotLabelFilter.Valid && autopilotLabelFilter.String != "" {
+		session.AutopilotLabelFilter = &autopilotLabelFilter.String
 	}
 	if contextID.Valid && contextID.String != "" {
 		session.ContextID = &contextID.String

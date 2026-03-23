@@ -490,15 +490,23 @@ func checkSessionCostLimit(ctx context.Context, sessionID string) error {
 }
 
 func swarmStuckTimeout() time.Duration {
-	if v := os.Getenv("SWARM_STUCK_TIMEOUT"); v != "" {
-		if d, err := time.ParseDuration(v); err == nil {
-			return d
-		}
-		if secs, err := strconv.Atoi(v); err == nil {
-			return time.Duration(secs) * time.Second
-		}
+	const fallback = 30 * time.Minute
+	if globalConfigService == nil {
+		return fallback
 	}
-	return 30 * time.Minute
+	v := globalConfigService.GetString("swarm.stuck_timeout", "")
+	if v == "" {
+		return fallback
+	}
+	// Accept Go duration strings ("15m") and plain integers (seconds).
+	if d, err := time.ParseDuration(v); err == nil {
+		return d
+	}
+	if secs, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
+		return time.Duration(secs) * time.Second
+	}
+	log.Printf("swarm: invalid swarm.stuck_timeout value %q — using default %s", v, fallback)
+	return fallback
 }
 
 func startSwarmMonitor() {

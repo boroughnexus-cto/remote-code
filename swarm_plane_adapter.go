@@ -71,6 +71,11 @@ type planeConfig struct {
 	projectID   string
 	sessionID   string
 	doneStateID string // resolved at startup
+	// LabelFilter is an optional Plane label ID. When set, only issues with
+	// this label are synced. NOTE: Plane API label filter param is "label_ids"
+	// (comma-separated UUIDs). Verify against your Plane instance if issues
+	// are not being filtered as expected.
+	LabelFilter string
 }
 
 func loadPlaneConfig() (*planeConfig, bool) {
@@ -143,6 +148,8 @@ func planeFetchDoneStateID(ctx context.Context, cfg *planeConfig) string {
 }
 
 // planeListStartedIssues returns issues in the "started" state group.
+// When cfg.LabelFilter is set it appends &label_ids=<id> to narrow results to
+// issues carrying that label. (Plane API param name verified as "label_ids".)
 func planeListStartedIssues(ctx context.Context, cfg *planeConfig) ([]struct {
 	ID          string `json:"id"`
 	Title       string `json:"name"`
@@ -150,6 +157,9 @@ func planeListStartedIssues(ctx context.Context, cfg *planeConfig) ([]struct {
 }, error) {
 	path := fmt.Sprintf("/api/v1/workspaces/%s/projects/%s/issues/?state_group=started&per_page=50",
 		cfg.workspace, cfg.projectID)
+	if cfg.LabelFilter != "" {
+		path += "&label_ids=" + cfg.LabelFilter
+	}
 	data, status, err := planeReq(ctx, cfg, "GET", path, nil)
 	if err != nil || status != 200 {
 		return nil, fmt.Errorf("plane list issues: status=%d err=%v", status, err)
@@ -417,7 +427,7 @@ func refreshWorkQueueCache(ctx context.Context, baseCfg *planeConfig) {
 // and syncs each with its configured Plane project.
 func syncAllAutopilotSessions(ctx context.Context, baseCfg *planeConfig) {
 	rows, err := database.QueryContext(ctx,
-		`SELECT id, COALESCE(autopilot_plane_project_id,'')
+		`SELECT id, COALESCE(autopilot_plane_project_id,''), COALESCE(autopilot_label_filter,'')
 		 FROM swarm_sessions
 		 WHERE autopilot_enabled=1 AND autopilot_plane_project_id IS NOT NULL AND autopilot_plane_project_id != ''`,
 	)
@@ -427,8 +437,8 @@ func syncAllAutopilotSessions(ctx context.Context, baseCfg *planeConfig) {
 	defer rows.Close()
 
 	for rows.Next() {
-		var sessionID, projectID string
-		if err := rows.Scan(&sessionID, &projectID); err != nil {
+		var sessionID, projectID, labelFilter string
+		if err := rows.Scan(&sessionID, &projectID, &labelFilter); err != nil {
 			continue
 		}
 		// Skip if this is the same as the env-var session (already synced above)
@@ -447,6 +457,7 @@ func syncAllAutopilotSessions(ctx context.Context, baseCfg *planeConfig) {
 			projectID:   projectID,
 			sessionID:   sessionID,
 			doneStateID: baseCfg.doneStateID,
+			LabelFilter: labelFilter,
 		}
 		planeSyncStartedIssues(ctx, cfg)
 	}
