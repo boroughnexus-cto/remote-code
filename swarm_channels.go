@@ -11,6 +11,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"sync"
 	"time"
@@ -428,35 +429,48 @@ func agentLaunchArgs(cfg AgentLaunchConfig) []string {
 	}
 	switch TransportMode(getEnvOrDefault("SWARMOPS_TRANSPORT", string(TransportTmux))) {
 	case TransportChannels, TransportShadow, TransportCanary:
-		// Write a per-agent MCP config so Claude can find the swarmops SSE endpoint.
+		// Write a per-agent .claude/settings.json into a temp directory and pass it
+		// via --add-dir so Claude treats it as a project-scope working directory.
+		// This is required because channels server validation checks
+		// ["enterprise","user","project","local"] config scopes — --mcp-config adds
+		// servers to a separate registry that channels validation never consults.
 		// --dangerously-load-development-channels is required because SwarmOps is not on
-		// Claude's built-in channels allowlist; --channels only works for allowlisted servers.
-		if cfgPath := writeMCPConfig(cfg.AgentID, cfg.RunID, cfg.RunToken); cfgPath != "" {
-			args = append(args, "--mcp-config", cfgPath, "--dangerously-load-development-channels", "server:swarmops")
+		// Claude's built-in channels allowlist.
+		if configDir := writeMCPConfig(cfg.AgentID, cfg.RunID, cfg.RunToken); configDir != "" {
+			args = append(args, "--add-dir", configDir, "--dangerously-load-development-channels", "server:swarmops")
 		}
 	}
 	return args
 }
 
-// writeMCPConfig writes a per-agent MCP config file and returns its path.
-// The file is cleaned up by closeAgentRun via cleanupMCPConfig.
+// writeMCPConfig writes the swarmops MCP server into a temp directory's
+// .claude/settings.json and returns the directory path (for --add-dir).
+// Claude treats --add-dir paths as project-scope working directories, so
+// the server appears in the "project" config scope that channels validation
+// checks.  The directory is cleaned up by closeAgentRun via cleanupMCPConfig.
 func writeMCPConfig(agentID, runID, runToken string) string {
 	sseURL := fmt.Sprintf("%s/mcp/channels/%s/%s?token=%s",
 		swarmAPIBase(), agentID, runID, runToken)
 	cfg := fmt.Sprintf(`{"mcpServers":{"swarmops":{"url":%s,"type":"sse"}}}`,
 		jsonStringLiteral(sseURL))
-	path := fmt.Sprintf("/tmp/swarmops-%s-%s.json", agentID, runID)
-	if err := os.WriteFile(path, []byte(cfg), 0600); err != nil {
+
+	dir := fmt.Sprintf("/tmp/swarmops-%s-%s", agentID, runID)
+	claudeDir := filepath.Join(dir, ".claude")
+	if err := os.MkdirAll(claudeDir, 0700); err != nil {
+		log.Printf("channels: failed to create config dir for %s: %v", agentID, err)
+		return ""
+	}
+	if err := os.WriteFile(filepath.Join(claudeDir, "settings.json"), []byte(cfg), 0600); err != nil {
 		log.Printf("channels: failed to write MCP config for %s: %v", agentID, err)
 		return ""
 	}
-	return path
+	return dir
 }
 
-// cleanupMCPConfig removes the per-agent MCP config file written by writeMCPConfig.
+// cleanupMCPConfig removes the per-agent temp config directory written by writeMCPConfig.
 func cleanupMCPConfig(agentID, runID string) {
-	path := fmt.Sprintf("/tmp/swarmops-%s-%s.json", agentID, runID)
-	os.Remove(path) //nolint:errcheck
+	dir := fmt.Sprintf("/tmp/swarmops-%s-%s", agentID, runID)
+	os.RemoveAll(dir) //nolint:errcheck
 }
 
 // jsonStringLiteral returns a JSON-encoded string literal (with double quotes).

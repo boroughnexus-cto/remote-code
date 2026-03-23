@@ -59,6 +59,10 @@ type tuiModel struct {
 	termContent  map[string]string
 	termFetching bool
 
+	// Terminal zoom view — full-screen agent terminal with HUD preserved
+	termZoomed  bool
+	zoomAgentID string // locked on entry; does not follow sidebar selection
+
 	// Escalation view
 	escView      bool
 	escCursor    int
@@ -567,6 +571,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case tuiAttachMsg:
+		m.termZoomed = false
 		if msg.err != nil {
 			m.setFlash("tmux switch failed: "+msg.err.Error(), true)
 		} else {
@@ -816,6 +821,8 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m, cmds = m.updateGoalView(msg)
 		} else if m.escView {
 			m, cmds = m.updateEscalation(msg)
+		} else if m.termZoomed {
+			m, cmds = m.updateTermZoom(msg)
 		} else if m.ctView {
 			m, cmds = m.updateControlTower(msg)
 		} else {
@@ -866,6 +873,40 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, tea.Batch(cmds...)
+}
+
+func (m tuiModel) updateTermZoom(msg tea.KeyMsg) (tuiModel, []tea.Cmd) {
+	switch msg.String() {
+	case "ctrl+c":
+		m.ws.closeAll()
+		return m, []tea.Cmd{tea.Quit}
+	case "esc", "q":
+		m.termZoomed = false
+	case "enter":
+		// Switch fully into the agent's tmux session for interactive control.
+		if os.Getenv("TMUX") != "" {
+			// Find the agent by locked zoom ID rather than current selection.
+			var sessionName string
+			for _, st := range m.states {
+				for _, a := range st.Agents {
+					if a.ID == m.zoomAgentID && a.TmuxSession != nil {
+						sessionName = *a.TmuxSession
+					}
+				}
+			}
+			if sessionName != "" {
+				name := sessionName
+				return m, []tea.Cmd{func() tea.Msg {
+					cmd := exec.Command("tmux", "switch-client", "-t", name)
+					cmd.Stdin = os.Stdin
+					return tuiAttachMsg{err: cmd.Run()}
+				}}
+			}
+		} else {
+			m.setFlash("Must be inside tmux to switch — use ctrl+b then select manually", false)
+		}
+	}
+	return m, nil
 }
 
 func (m tuiModel) updateInput(msg tea.KeyMsg) (tuiModel, []tea.Cmd) {

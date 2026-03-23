@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -207,26 +206,10 @@ func (m tuiModel) updateSidebar(msg tea.KeyMsg) (tuiModel, []tea.Cmd) {
 			case tuiItemAgent:
 				agent := m.lookupAgent(it.sid, it.eid)
 				if agent != nil && agent.TmuxSession != nil {
-					if os.Getenv("TMUX") != "" {
-						// Already inside tmux: switch-client is instantaneous (doesn't block),
-						// so ExecProcess would suspend the TUI, fire the switch, and immediately
-						// resume — the TUI would redraw before the user can do anything.
-						// Instead run it as a plain Cmd; the TUI keeps running in the swarmops
-						// session while the user is in the agent session.  ctrl+b,L returns them.
-						sessionName := *agent.TmuxSession
-						cmds = append(cmds, func() tea.Msg {
-							cmd := exec.Command("tmux", "switch-client", "-t", sessionName)
-							cmd.Stdin = os.Stdin // tmux uses ttyname(0) to identify current client; needed for ctrl+b L to work
-							err := cmd.Run()
-							return tuiAttachMsg{err: err}
-						})
-					} else {
-						// Not inside tmux: attach-session blocks until the user detaches.
-						cmd := exec.Command("tmux", "attach-session", "-t", *agent.TmuxSession)
-						cmds = append(cmds, tea.ExecProcess(cmd, func(err error) tea.Msg {
-							return tuiAttachMsg{err: err}
-						}))
-					}
+					// Zoom view: keeps HUD visible, shows live terminal capture.
+					// Press Enter again to switch into the tmux session; Esc to return.
+					m.termZoomed = true
+					m.zoomAgentID = agent.ID
 				} else {
 					m.setFlash("No tmux session — press s to spawn", false)
 				}

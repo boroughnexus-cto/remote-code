@@ -439,6 +439,9 @@ func (m tuiModel) View() string {
 	if m.ctView {
 		return m.viewControlTower()
 	}
+	if m.termZoomed {
+		return m.viewTermZoom()
+	}
 
 	bodyH := m.h - 3 - m.helpLineCount() - tuiInputH - 2 - 1 - 1 // hud(content+border+join-newline) + help + input borders + status bar + fleet bar
 	if bodyH < 5 {
@@ -592,6 +595,68 @@ func (m tuiModel) viewHUD() string {
 	}
 
 	return hudStyle.Width(m.w).Render(left)
+}
+
+// viewTermZoom renders the full-screen agent terminal zoom view.
+// The HUD is preserved at the top; the terminal capture fills the body;
+// Esc returns to normal SwarmOps.  Enter triggers tmux switch-client.
+func (m tuiModel) viewTermZoom() string {
+	// Resolve the locked zoom target (not the live selection).
+	var agentName, tmuxSession, statusLabel string
+	var statusColor lipgloss.Color
+	for _, st := range m.states {
+		for _, a := range st.Agents {
+			if a.ID == m.zoomAgentID {
+				agentName = a.Name
+				_, statusLabel, statusColor = tuiStatusConfig(a.Status, m.frame)
+				if a.TmuxSession != nil {
+					tmuxSession = *a.TmuxSession
+				}
+			}
+		}
+	}
+
+	// Subheader: name + status + session, capped to one line.
+	subContent := lipgloss.NewStyle().Foreground(colorTeal).Bold(true).Render(agentName) +
+		"  " + lipgloss.NewStyle().Foreground(statusColor).Render(statusLabel)
+	if tmuxSession != "" {
+		subContent += dimStyle.Render("  " + tmuxSession)
+	}
+	subContent += dimStyle.Render("  ↺ live")
+	sub := lipgloss.NewStyle().
+		Background(colorSubtle).
+		Width(m.w).MaxWidth(m.w).
+		PaddingLeft(2).PaddingRight(2).
+		Render(subContent)
+
+	help := dimStyle.Render("  Esc back  Enter switch to tmux session")
+
+	// Compute actual rendered heights so termH is reliable on any terminal size.
+	hudH := lipgloss.Height(m.viewHUD())
+	subH := lipgloss.Height(sub)
+	helpH := lipgloss.Height(help)
+	termH := m.h - hudH - subH - helpH
+	if termH < 1 {
+		termH = 1
+	}
+
+	// Render terminal snapshot: last termH lines, full width.
+	content := dimStyle.Render("  Fetching terminal…")
+	if c, ok := m.termContent[m.zoomAgentID]; ok && c != "" {
+		content = c
+	}
+	lines := strings.Split(content, "\n")
+	if len(lines) > termH {
+		lines = lines[len(lines)-termH:]
+	}
+	for len(lines) < termH {
+		lines = append(lines, "")
+	}
+	// Append ANSI reset so terminal colors don't bleed into the help bar.
+	terminal := lipgloss.NewStyle().Width(m.w).MaxWidth(m.w).
+		Render(strings.Join(lines, "\n")) + "\x1b[0m"
+
+	return strings.Join([]string{m.viewHUD(), sub, terminal, help}, "\n")
 }
 
 // viewAPIUsage renders Claude quota + Copilot usage from /api/swarm/usage.
