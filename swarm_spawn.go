@@ -52,8 +52,64 @@ func loadSessionContext(ctx context.Context, sessionID string) sessionContextDat
 	return d
 }
 
+// globalConstitutionFallback is used when the _global role prompt is absent from the DB.
+// It contains the minimum viable protocol so agents are never spawned without safety rules.
+const globalConstitutionFallback = `# ⚙ SwarmOps Global Constitution
+*Injected automatically — do not override.*
+
+## Communication Protocol
+All messages injected to the orchestrator MUST start with EXACTLY one of these prefixes (case-sensitive, at the start of the message):
+- ` + "`DONE:`" + ` — task complete
+- ` + "`BLOCKED:`" + ` — cannot proceed without help
+- ` + "`REVIEW REQUESTED:`" + ` — awaiting peer review
+- ` + "`CONTEXT NEAR LIMIT —`" + ` — context exhaustion, triggering handoff
+- ` + "`AGENT_ERROR:`" + ` — unexpected error requiring orchestrator attention
+- ` + "`PROGRESS:`" + ` — informational update (no response expected; max one per 5 minutes)
+- ` + "`QA FAILURE:`" + ` — QA failure notification routed to you by orchestrator
+
+Freeform injections are silently ignored by the orchestrator.
+
+## Context Exhaustion Protocol
+When Claude warns your context is nearly full:
+1. STOP at the next clean checkpoint
+2. Write ` + "`HANDOFF.md`" + ` to your working directory with exactly these sections:
+   ` + "```" + `
+   ## State
+   [What you were doing — one paragraph]
+   ## Completed
+   - [bullet list of finished work]
+   ## Next Steps
+   - [ordered list of remaining work]
+   ## Blockers
+   - [open questions or blockers — or "None"]
+   ` + "```" + `
+3. PATCH task to stage ` + "`handoff`" + `: POST to API base + ` + "`/api/swarm/sessions/{SWARM_SESSION_ID}/tasks/{taskID}`" + ` with ` + "`{\"stage\":\"handoff\"}`" + `
+4. Inject: ` + "`CONTEXT NEAR LIMIT — [task title]. HANDOFF.md written.`" + `
+5. Stop — do not start new work. (API base is in your Agent Instance Context below.)
+
+## Scope Discipline
+Never do work outside your mission scope. If you discover related work:
+- Document it; do NOT do it unless your mission explicitly covers it
+- Inject ` + "`BLOCKED: [discovered out-of-scope work]. Awaiting orchestrator guidance.`" + `
+
+## Escalation Chain
+Inject to orchestrator when:
+- Something required is outside your mission scope
+- Impact exceeds service-level (multiple services or hosts affected)
+- You have tried the same approach and failed twice
+- You find a security concern
+- You are blocked for > 15 minutes without a path forward
+
+## Shared Resource Advisory
+Before modifying a shared file or service, check if another agent is working on it:
+GET [API base]/api/swarm/sessions/{SWARM_SESSION_ID} — inspect ` + "`current_file`" + ` fields of other agents.
+⚠ This is advisory only — not an atomic lock. If a resource collision occurs:
+stop immediately, inject ` + "`BLOCKED: resource collision on [path/service]. Awaiting orchestrator arbitration.`" + ``
+
 // writeAgentCLAUDE writes the agent's role prompt + spawn context to CLAUDE.md
 // in the given workdir so Claude Code picks it up automatically on startup.
+// The global constitution (_global role prompt) is prepended to every agent regardless of role.
+// If _global is absent from the DB a hardcoded fallback is used — agents are never spawned without it.
 func writeAgentCLAUDE(workDir, sessionID, agentID, role, mission, prompt string) error {
 	apiBase := swarmAPIBase()
 	spawnType := "worktree"
@@ -61,7 +117,19 @@ func writeAgentCLAUDE(workDir, sessionID, agentID, role, mission, prompt string)
 		spawnType = "scratch (no git)"
 	}
 
+	// Load global constitution from DB; fall back to compile-time constant.
+	var globalConstitution string
+	database.QueryRowContext(context.Background(),
+		`SELECT prompt FROM swarm_role_prompts WHERE role = '_global'`,
+	).Scan(&globalConstitution) //nolint:errcheck
+	if globalConstitution == "" {
+		globalConstitution = globalConstitutionFallback
+		log.Printf("swarm: _global constitution not found in DB — using hardcoded fallback for agent %s", agentID)
+	}
+
 	var sb strings.Builder
+	sb.WriteString(globalConstitution)
+	sb.WriteString("\n\n---\n\n")
 	sb.WriteString(prompt)
 	sb.WriteString("\n\n---\n\n")
 
