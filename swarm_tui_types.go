@@ -45,6 +45,7 @@ type tuiAgent struct {
 	ModelName       string `json:"model_name,omitempty"`
 	TokensUsed      int64  `json:"tokens_used,omitempty"`
 	StatusChangedAt int64  `json:"status_changed_at,omitempty"`
+	SwarmMode       bool   `json:"swarm_mode"`
 }
 
 type tuiTask struct {

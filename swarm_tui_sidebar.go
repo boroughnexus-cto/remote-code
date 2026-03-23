@@ -492,6 +492,28 @@ func (m tuiModel) updateSidebar(msg tea.KeyMsg) (tuiModel, []tea.Cmd) {
 			cmds = append(cmds, m.client.get("workqueue", path))
 		}
 
+	case "M":
+		// Toggle swarm mode for the selected agent.
+		// Swarm mode passes --swarm to claude, enabling Claude's built-in sub-agent spawning.
+		// Takes effect on next spawn/relaunch.
+		it := m.selItem()
+		if it == nil || it.kind != tuiItemAgent {
+			m.setFlash("Select an agent to toggle swarm mode", false)
+			break
+		}
+		agent := m.lookupAgent(it.sid, it.eid)
+		if agent == nil {
+			break
+		}
+		newMode := !agent.SwarmMode
+		modeStr := "off"
+		if newMode {
+			modeStr = "on"
+		}
+		path := "/api/swarm/sessions/" + it.sid + "/agents/" + agent.ID
+		cmds = append(cmds, m.client.patch("swarm-mode-"+modeStr, path, map[string]interface{}{"swarm_mode": newMode}))
+		m.setFlash(fmt.Sprintf("Swarm mode %s for %s (takes effect on next spawn)", modeStr, agent.Name), false)
+
 	case "P":
 		// Open Settings → Agent Personas, pre-selecting the current agent's role.
 		role := "worker"
@@ -730,6 +752,9 @@ func (m tuiModel) viewSidebar(h int) string {
 				}
 				roleStr := truncStr(agent.Role, infoW/2)
 				infoLine3 = dimInfo.Render(roleStr) + "  " + branchBadge
+			}
+			if agent.SwarmMode {
+				infoLine3 += " " + lipgloss.NewStyle().Foreground(colorYellow).Render("⟲")
 			}
 
 			// Join sprite + info side by side, 4 rows each

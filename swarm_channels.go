@@ -403,6 +403,7 @@ type AgentLaunchConfig struct {
 	AllowedTools               string // comma-separated tool names; empty = no restriction
 	DisallowedTools            string // comma-separated tool names; empty = no restriction
 	DangerouslySkipPermissions bool   // when false, agent runs without --dangerously-skip-permissions
+	SwarmMode                  bool   // when true, passes --swarm to enable Claude's built-in sub-agent spawning
 }
 
 // -----------------
@@ -417,6 +418,9 @@ func agentLaunchArgs(cfg AgentLaunchConfig) []string {
 	args := []string{"claude"}
 	if cfg.DangerouslySkipPermissions {
 		args = append(args, "--dangerously-skip-permissions")
+	}
+	if cfg.SwarmMode {
+		args = append(args, "--swarm")
 	}
 	if cfg.ModelName != "" {
 		args = append(args, "--model", cfg.ModelName)

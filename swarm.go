@@ -67,6 +67,7 @@ type SwarmAgent struct {
 	AllowedTools               string   `json:"allowed_tools,omitempty"`
 	DisallowedTools            string   `json:"disallowed_tools,omitempty"`
 	DangerouslySkipPermissions bool     `json:"dangerously_skip_permissions"`
+	SwarmMode                  bool     `json:"swarm_mode"`
 	Capabilities               []string `json:"capabilities,omitempty"`
 	TokensUsed                 int64    `json:"tokens_used,omitempty"`
 	StatusChangedAt            int64  `json:"status_changed_at,omitempty"`
@@ -350,7 +351,8 @@ func getSwarmState(ctx context.Context, sessionID string) (*SwarmState, error) {
 		        COALESCE(a.model_name,''), COALESCE(a.allowed_tools,''), COALESCE(a.disallowed_tools,''),
 		        COALESCE(a.dangerously_skip_permissions,1),
 		        a.tokens_used, a.status_changed_at,
-		        COALESCE(a.capabilities,'')
+		        COALESCE(a.capabilities,''),
+		        COALESCE(a.swarm_mode,0)
 		 FROM swarm_agents a WHERE a.session_id = ?
 		 ORDER BY CASE WHEN a.role = 'orchestrator' THEN 0 ELSE 1 END, a.created_at ASC`,
 		sessionID,
@@ -364,7 +366,7 @@ func getSwarmState(ctx context.Context, sessionID string) (*SwarmState, error) {
 	for agentRows.Next() {
 		var a SwarmAgent
 		var worktreePath, tmuxSession, project, repoPath, currentFile, currentTaskID, mission, latestNote sql.NullString
-		var dangerouslySkip int
+		var dangerouslySkip, swarmModeVal int
 		var tokensUsed, statusChangedAt sql.NullInt64
 		var agentCaps string
 		if err := agentRows.Scan(&a.ID, &a.SessionID, &a.Name, &a.Role,
@@ -375,7 +377,8 @@ func getSwarmState(ctx context.Context, sessionID string) (*SwarmState, error) {
 			&a.ModelName, &a.AllowedTools, &a.DisallowedTools,
 			&dangerouslySkip,
 			&tokensUsed, &statusChangedAt,
-			&agentCaps); err != nil {
+			&agentCaps,
+			&swarmModeVal); err != nil {
 			return nil, err
 		}
 		a.WorktreePath = scanNullString(worktreePath)
@@ -387,6 +390,7 @@ func getSwarmState(ctx context.Context, sessionID string) (*SwarmState, error) {
 		a.Mission = scanNullString(mission)
 		a.LatestNote = scanNullString(latestNote)
 		a.DangerouslySkipPermissions = dangerouslySkip != 0
+		a.SwarmMode = swarmModeVal != 0
 		if agentCaps != "" {
 			for _, c := range strings.Split(agentCaps, ",") {
 				if c = strings.TrimSpace(strings.ToLower(c)); c != "" {
@@ -1611,6 +1615,14 @@ func handleSwarmAgentsAPI(w http.ResponseWriter, r *http.Request, ctx context.Co
 			}
 			database.ExecContext(ctx, "UPDATE swarm_agents SET dangerously_skip_permissions = ? WHERE id = ? AND session_id = ?", //nolint:errcheck
 				skip, agentID, sessionID)
+		}
+		if v, ok := req["swarm_mode"].(bool); ok {
+			mode := 0
+			if v {
+				mode = 1
+			}
+			database.ExecContext(ctx, "UPDATE swarm_agents SET swarm_mode = ? WHERE id = ? AND session_id = ?", //nolint:errcheck
+				mode, agentID, sessionID)
 		}
 		// capabilities: accepts a string (CSV) or null to clear.
 		// Normalised on write: lowercase, trimmed, deduplicated.

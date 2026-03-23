@@ -996,7 +996,12 @@ func (m tuiModel) viewAgentDetail(w *strings.Builder, sid, aid string, rightW in
 		if agent.TokensUsed > 0 {
 			metaParts = append(metaParts, lipgloss.NewStyle().Foreground(colorTeal).Render(formatTokensK(agent.TokensUsed)+" tok"))
 		}
+		if agent.SwarmMode {
+			metaParts = append(metaParts, lipgloss.NewStyle().Foreground(colorYellow).Render("⟲ swarm"))
+		}
 		info.WriteString(strings.Join(metaParts, "  ") + "\n")
+	} else if agent.SwarmMode {
+		info.WriteString(lipgloss.NewStyle().Foreground(colorYellow).Render("⟲ swarm") + "\n")
 	}
 
 	// ── Sprite card ───────────────────────────────────────────────────────────

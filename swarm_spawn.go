@@ -216,11 +216,11 @@ func spawnSwarmAgent(ctx context.Context, sessionID, agentID string) error {
 
 	// Fetch agent from DB
 	var repoPath, tmuxSession, existingWorktreePath, agentRole, agentModelName, agentAllowedTools, agentDisallowedTools string
-	var agentDangerouslySkip int
+	var agentDangerouslySkip, agentSwarmMode int
 	err := database.QueryRowContext(ctx,
-		"SELECT COALESCE(repo_path,''), COALESCE(tmux_session,''), COALESCE(worktree_path,''), role, COALESCE(model_name,''), COALESCE(allowed_tools,''), COALESCE(disallowed_tools,''), COALESCE(dangerously_skip_permissions,1) FROM swarm_agents WHERE id = ? AND session_id = ?",
+		"SELECT COALESCE(repo_path,''), COALESCE(tmux_session,''), COALESCE(worktree_path,''), role, COALESCE(model_name,''), COALESCE(allowed_tools,''), COALESCE(disallowed_tools,''), COALESCE(dangerously_skip_permissions,1), COALESCE(swarm_mode,0) FROM swarm_agents WHERE id = ? AND session_id = ?",
 		agentID, sessionID,
-	).Scan(&repoPath, &tmuxSession, &existingWorktreePath, &agentRole, &agentModelName, &agentAllowedTools, &agentDisallowedTools, &agentDangerouslySkip)
+	).Scan(&repoPath, &tmuxSession, &existingWorktreePath, &agentRole, &agentModelName, &agentAllowedTools, &agentDisallowedTools, &agentDangerouslySkip, &agentSwarmMode)
 	if err != nil {
 		return fmt.Errorf("agent not found: %v", err)
 	}
@@ -352,7 +352,7 @@ func spawnSwarmAgent(ctx context.Context, sessionID, agentID string) error {
 	}
 
 	// Launch claude
-	if out, err := exec.Command("tmux", "send-keys", "-t", tmuxName, agentLaunchCmd(AgentLaunchConfig{AgentID: agentID, RunID: runID, RunToken: runToken, ModelName: agentModelName, AllowedTools: agentAllowedTools, DisallowedTools: agentDisallowedTools, DangerouslySkipPermissions: agentDangerouslySkip != 0}), "Enter").CombinedOutput(); err != nil {
+	if out, err := exec.Command("tmux", "send-keys", "-t", tmuxName, agentLaunchCmd(AgentLaunchConfig{AgentID: agentID, RunID: runID, RunToken: runToken, ModelName: agentModelName, AllowedTools: agentAllowedTools, DisallowedTools: agentDisallowedTools, DangerouslySkipPermissions: agentDangerouslySkip != 0, SwarmMode: agentSwarmMode != 0}), "Enter").CombinedOutput(); err != nil {
 		log.Printf("swarm: warning — could not send claude command: %v: %s", err, out)
 	}
 
@@ -934,8 +934,8 @@ func spawnScratchAgent(ctx context.Context, sessionID, agentID string) error {
 
 	// Write role prompt as CLAUDE.md.
 	var agentRole, agentMission, agentModelName, agentAllowedTools, agentDisallowedTools string
-	var agentDangerouslySkipScratch int
-	database.QueryRowContext(ctx, "SELECT COALESCE(role,'worker'), COALESCE(mission,''), COALESCE(model_name,''), COALESCE(allowed_tools,''), COALESCE(disallowed_tools,''), COALESCE(dangerously_skip_permissions,1) FROM swarm_agents WHERE id = ?", agentID).Scan(&agentRole, &agentMission, &agentModelName, &agentAllowedTools, &agentDisallowedTools, &agentDangerouslySkipScratch) //nolint:errcheck
+	var agentDangerouslySkipScratch, agentSwarmModeScratch int
+	database.QueryRowContext(ctx, "SELECT COALESCE(role,'worker'), COALESCE(mission,''), COALESCE(model_name,''), COALESCE(allowed_tools,''), COALESCE(disallowed_tools,''), COALESCE(dangerously_skip_permissions,1), COALESCE(swarm_mode,0) FROM swarm_agents WHERE id = ?", agentID).Scan(&agentRole, &agentMission, &agentModelName, &agentAllowedTools, &agentDisallowedTools, &agentDangerouslySkipScratch, &agentSwarmModeScratch) //nolint:errcheck
 	rolePrompt, promptVersion := loadRolePrompt(ctx, agentRole)
 	if err := writeAgentCLAUDE(workDir, sessionID, agentID, agentRole, agentMission, rolePrompt); err != nil {
 		log.Printf("swarm: warning — could not write CLAUDE.md: %v", err)
@@ -948,7 +948,7 @@ func spawnScratchAgent(ctx context.Context, sessionID, agentID string) error {
 		ct.CreateQueue(agentID, runID)
 	}
 
-	if out, err := exec.Command("tmux", "send-keys", "-t", tmuxName, agentLaunchCmd(AgentLaunchConfig{AgentID: agentID, RunID: runID, RunToken: runToken, ModelName: agentModelName, AllowedTools: agentAllowedTools, DisallowedTools: agentDisallowedTools, DangerouslySkipPermissions: agentDangerouslySkipScratch != 0}), "Enter").CombinedOutput(); err != nil {
+	if out, err := exec.Command("tmux", "send-keys", "-t", tmuxName, agentLaunchCmd(AgentLaunchConfig{AgentID: agentID, RunID: runID, RunToken: runToken, ModelName: agentModelName, AllowedTools: agentAllowedTools, DisallowedTools: agentDisallowedTools, DangerouslySkipPermissions: agentDangerouslySkipScratch != 0, SwarmMode: agentSwarmModeScratch != 0}), "Enter").CombinedOutput(); err != nil {
 		log.Printf("swarm: warning — could not send claude command: %v: %s", err, out)
 	}
 
