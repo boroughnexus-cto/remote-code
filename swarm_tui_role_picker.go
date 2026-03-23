@@ -55,6 +55,9 @@ func fetchRolesForPicker(client TUIClient) tea.Cmd {
 		}
 		items := make([]rolePickerItem, 0, len(raw))
 		for _, r := range raw {
+			if strings.HasPrefix(r.Role, "_") {
+				continue
+			}
 			preview := ""
 			for _, line := range strings.SplitN(strings.TrimSpace(r.Prompt), "\n", 5) {
 				line = strings.TrimSpace(line)

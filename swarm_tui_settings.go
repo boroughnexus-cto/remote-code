@@ -294,6 +294,9 @@ func (s *personasSection) Init() tea.Cmd {
 		}
 		items := make([]personaItem, 0, len(raw))
 		for _, r := range raw {
+			if strings.HasPrefix(r.Role, "_") {
+				continue
+			}
 			items = append(items, personaItem{role: r.Role, prompt: r.Prompt, version: r.Version})
 		}
 		return personasLoadedMsg{items: items}
