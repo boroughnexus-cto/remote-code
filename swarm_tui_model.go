@@ -330,7 +330,9 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.WindowSizeMsg:
 		m.w, m.h = msg.Width, msg.Height
-		bodyH := m.h - 3 - 1 - tuiInputH - 2 - 1 - 1 // hud(content+border+join-newline) + help + input rows + input borders + status bar + fleet bar
+		// Must match the bodyH formula in View() exactly so the viewport is sized
+		// to fit the available space without pushing the HUD off-screen.
+		bodyH := m.h - 3 - m.helpLineCount() - tuiInputH - 2 - 1 - 1 // hud(content+border+join-newline) + help + input rows + input borders + status bar + fleet bar
 		if bodyH < 5 {
 			bodyH = 5
 		}
