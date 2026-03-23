@@ -106,6 +106,7 @@ func main() {
 	go startPlaneAdapter(context.Background())
 	go startTriagePoller(context.Background())
 	startAutoDispatchLoop(context.Background())
+	go InitDispatchWarm()
 
 	// Setup HTTP routes
 	http.HandleFunc("/", serveHome)

@@ -1,13 +1,13 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
+	"os/exec"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -109,21 +109,40 @@ func dispatchDefaultRoles() []string {
 	}
 }
 
-// llmSuggestDispatch calls claude-haiku to pick the best session + role for an alert.
-func llmSuggestDispatch(ctx context.Context, req dispatchSuggestReq, roles []string) (DispatchSuggestResp, error) {
-	apiKey := envOrDefault("ANTHROPIC_API_KEY", "")
-	if apiKey == "" {
-		return DispatchSuggestResp{}, fmt.Errorf("ANTHROPIC_API_KEY not set")
-	}
+// ─── Warm dispatch session ────────────────────────────────────────────────────
+//
+// dispatchWarm keeps the claude CLI binary warm in the OS page cache so the
+// first real dispatch call doesn't pay the full Node.js cold-start penalty.
+// It also acts as a semaphore so only one dispatch call runs at a time.
 
+var (
+	dispatchWarmOnce sync.Once
+	dispatchSem      = make(chan struct{}, 1) // one concurrent dispatch at a time
+)
+
+// InitDispatchWarm fires a lightweight `claude --version` at server startup to
+// load the Node.js runtime into the OS filesystem cache.  Call with `go`.
+func InitDispatchWarm() {
+	dispatchWarmOnce.Do(func() {
+		dispatchSem <- struct{}{}
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		exec.CommandContext(ctx, "claude", "--version").Run() //nolint:errcheck
+		<-dispatchSem
+	})
+}
+
+// llmSuggestDispatch uses the local `claude` CLI (free, uses subscription quota)
+// to pick the best session and role for an Icinga alert.
+func llmSuggestDispatch(ctx context.Context, req dispatchSuggestReq, roles []string) (DispatchSuggestResp, error) {
 	// Build sessions list for the prompt.
 	var sessLines []string
 	for _, s := range req.Sessions {
-		ctx := s.ContextName
-		if ctx == "" {
-			ctx = "(no context)"
+		ctxName := s.ContextName
+		if ctxName == "" {
+			ctxName = "(no context)"
 		}
-		sessLines = append(sessLines, fmt.Sprintf("  - id=%q  name=%q  context=%q", s.ID, s.Name, ctx))
+		sessLines = append(sessLines, fmt.Sprintf("  - id=%q  name=%q  context=%q", s.ID, s.Name, ctxName))
 	}
 
 	prompt := fmt.Sprintf(`You are routing an infrastructure alert to the right AI agent session.
@@ -160,50 +179,39 @@ Respond with ONLY a JSON object, no markdown, no explanation:
 		strings.Join(roles, ", "),
 	)
 
-	body, _ := json.Marshal(map[string]interface{}{
-		"model":      "claude-haiku-4-5-20251001",
-		"max_tokens": 256,
-		"messages":   []map[string]string{{"role": "user", "content": prompt}},
-	})
+	// Acquire semaphore so only one dispatch runs at a time.
+	select {
+	case dispatchSem <- struct{}{}:
+	case <-ctx.Done():
+		return DispatchSuggestResp{}, ctx.Err()
+	}
+	defer func() {
+		<-dispatchSem
+		// Re-warm immediately so the next call starts fast.
+		go func() {
+			wctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			exec.CommandContext(wctx, "claude", "--version").Run() //nolint:errcheck
+		}()
+	}()
 
-	apiReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		"https://api.anthropic.com/v1/messages", bytes.NewReader(body))
+	cmd := exec.CommandContext(ctx, "claude", "-p", prompt, "--model", "claude-haiku-4-5-20251001")
+	out, err := cmd.Output()
 	if err != nil {
-		return DispatchSuggestResp{}, fmt.Errorf("build request: %w", err)
-	}
-	apiReq.Header.Set("Content-Type", "application/json")
-	apiReq.Header.Set("x-api-key", apiKey)
-	apiReq.Header.Set("anthropic-version", "2023-06-01")
-
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(apiReq)
-	if err != nil {
-		return DispatchSuggestResp{}, fmt.Errorf("LLM request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
-	if err != nil {
-		return DispatchSuggestResp{}, fmt.Errorf("read response: %w", err)
+		return DispatchSuggestResp{}, fmt.Errorf("claude dispatch CLI: %w", err)
 	}
 
-	// Parse Anthropic response envelope.
-	var envelope struct {
-		Content []struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
-		} `json:"content"`
-	}
-	if err := json.Unmarshal(respBody, &envelope); err != nil || len(envelope.Content) == 0 {
-		return DispatchSuggestResp{}, fmt.Errorf("parse LLM response: %s", truncStr(string(respBody), 120))
-	}
-
-	text := strings.TrimSpace(envelope.Content[0].Text)
+	text := strings.TrimSpace(string(out))
 	// Strip any accidental markdown fences.
 	text = strings.TrimPrefix(text, "```json")
 	text = strings.TrimPrefix(text, "```")
 	text = strings.TrimSuffix(text, "```")
 	text = strings.TrimSpace(text)
+
+	// claude -p may include conversational text before the JSON; find the first '{'.
+	if idx := strings.Index(text, "{"); idx > 0 {
+		text = text[idx:]
+	}
 
 	var suggestion DispatchSuggestResp
 	if err := json.Unmarshal([]byte(text), &suggestion); err != nil {
