@@ -173,6 +173,10 @@ func AcceptTaskWithParams(ctx context.Context, taskID, messageID string, params 
 		return fmt.Errorf("repo lease: %w", err)
 	}
 
+	// SWM-14: create a per-task branch from current integrator HEAD and check it
+	// out in the agent worktree so each task starts on a clean isolated branch.
+	checkoutTaskBranchForTask(ctx, taskID)
+
 	if err := transitionTask(ctx, taskID, "accepted"); err != nil {
 		return err
 	}
@@ -181,6 +185,31 @@ func AcceptTaskWithParams(ctx context.Context, taskID, messageID string, params 
 		swarmNullStr(messageID), time.Now().Unix(), taskID,
 	)
 	return err
+}
+
+// checkoutTaskBranchForTask looks up the agent's repo/worktree paths and calls
+// checkoutTaskBranch. Non-fatal: errors are logged and silently skipped.
+func checkoutTaskBranchForTask(ctx context.Context, taskID string) {
+	var agentID sql.NullString
+	if err := database.QueryRowContext(ctx,
+		`SELECT agent_id FROM swarm_tasks WHERE id=?`, taskID,
+	).Scan(&agentID); err != nil || !agentID.Valid || agentID.String == "" {
+		return
+	}
+
+	var repoPath, worktreePath string
+	database.QueryRowContext(ctx,
+		`SELECT COALESCE(repo_path,''), COALESCE(worktree_path,'') FROM swarm_agents WHERE id=?`,
+		agentID.String,
+	).Scan(&repoPath, &worktreePath) //nolint:errcheck
+
+	if repoPath == "" || worktreePath == "" {
+		return
+	}
+
+	if err := checkoutTaskBranch(repoPath, worktreePath, taskID); err != nil {
+		log.Printf("swarm: checkoutTaskBranch task %s: %v", shortID(taskID), err)
+	}
 }
 
 // acquireRepoLeaseForTask looks up the task's session/goal/agent worktree and
@@ -236,6 +265,19 @@ func CompleteTask(ctx context.Context, sessionID, agentID, taskID string, h IPCH
 		// Tests didn't pass — still complete but flag for review
 		if newStage == "complete" {
 			newStage = "needs_review"
+		}
+	}
+
+	// SWM-14: merge the per-task branch into the integrator (main) before
+	// transitioning the task state. A merge conflict upgrades the stage to
+	// needs_human so the operator can resolve it.
+	if mergeErr := mergeTaskBranchForTask(ctx, agentID, taskID); mergeErr != nil {
+		if _, isConflict := mergeErr.(ErrMergeConflict); isConflict {
+			newStage = "needs_human"
+			h.OpenQuestions = append(h.OpenQuestions, "merge conflict: "+mergeErr.Error())
+		} else {
+			// Non-conflict git error — log and continue; work stays on task branch.
+			log.Printf("swarm: mergeTaskBranch task %s: %v", shortID(taskID), mergeErr)
 		}
 	}
 
@@ -309,6 +351,30 @@ func BlockTask(ctx context.Context, sessionID, agentID, taskID, reason string) e
 		}
 	}
 	return err
+}
+
+// ─── SWM-14: merge helper ─────────────────────────────────────────────────────
+
+// mergeTaskBranchForTask looks up the agent's repo/worktree paths and the task
+// title, then calls mergeTaskBranch. Used by CompleteTask.
+func mergeTaskBranchForTask(ctx context.Context, agentID, taskID string) error {
+	var repoPath, worktreePath string
+	database.QueryRowContext(ctx,
+		`SELECT COALESCE(repo_path,''), COALESCE(worktree_path,'') FROM swarm_agents WHERE id=?`,
+		agentID,
+	).Scan(&repoPath, &worktreePath) //nolint:errcheck
+
+	if repoPath == "" {
+		return nil // scratch agent
+	}
+
+	var taskTitle string
+	database.QueryRowContext(ctx,
+		`SELECT COALESCE(title,'') FROM swarm_tasks WHERE id=?`, taskID,
+	).Scan(&taskTitle) //nolint:errcheck
+
+	agentBranchName := swarmBranchName(agentID)
+	return mergeTaskBranch(ctx, repoPath, worktreePath, agentBranchName, taskID, taskTitle)
 }
 
 // ─── Escalation ───────────────────────────────────────────────────────────────

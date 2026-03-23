@@ -262,6 +262,12 @@ func spawnSwarmAgent(ctx context.Context, sessionID, agentID string) error {
 		}
 	}
 
+	// SWM-14: ensure the shared integrator worktree exists for this repo.
+	// Non-fatal — if it fails, merge operations fall back to skipping the merge.
+	if err := ensureIntegratorWorktree(repoPath); err != nil {
+		log.Printf("swarm: ensureIntegratorWorktree %s: %v", repoPath, err)
+	}
+
 	// If DB had a different worktree_path recorded, use the computed path (they should match)
 	_ = existingWorktreePath
 
