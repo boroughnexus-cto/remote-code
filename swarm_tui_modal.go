@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textinput"
@@ -164,6 +165,43 @@ func (mo *tuiModal) value(i int) string {
 		return ""
 	}
 	return strings.TrimSpace(mo.fields[i].ti.Value())
+}
+
+// newIcingaAgentModal creates a pre-filled tuiModalNewAgent modal for investigating
+// a specific Icinga alert. Role defaults to homelab-agent; mission is auto-generated
+// from the alert details. The user still fills in the agent name before submitting.
+func newIcingaAgentModal(sid string, svc IcingaService) *tuiModal {
+	stateLabel := map[int]string{0: "OK", 1: "WARNING", 2: "CRITICAL", 3: "UNKNOWN"}
+	state := stateLabel[svc.State]
+	mission := fmt.Sprintf("Investigate and resolve Icinga alert: %s / %s is %s — %s",
+		svc.Host, svc.Service, state, truncStr(svc.Output, 120))
+
+	type spec struct {
+		label, placeholder, value string
+	}
+	specs := []spec{
+		{"Name", "e.g. monitor-1", ""},
+		{"Role", "homelab-agent / devops-agent / worker", "homelab-agent"},
+		{"Mission", "", mission},
+		{"Project", "project name (optional)", ""},
+		{"Repo Path", "/absolute/path/to/repo (optional)", ""},
+	}
+	fields := make([]tuiModalField, len(specs))
+	for i, s := range specs {
+		ti := textinput.New()
+		ti.Placeholder = s.placeholder
+		ti.CharLimit = 500
+		if s.value != "" {
+			ti.SetValue(s.value)
+			ti.CursorEnd()
+		}
+		if i == 0 {
+			ti.Focus()
+		}
+		fields[i] = tuiModalField{label: s.label, ti: ti}
+	}
+	title := fmt.Sprintf("Spawn Agent — %s / %s", svc.Host, svc.Service)
+	return &tuiModal{kind: tuiModalNewAgent, title: title, fields: fields, sid: sid}
 }
 
 // newTUIConfirmModal opens a typed-name confirmation modal. The title is the

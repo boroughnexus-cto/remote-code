@@ -250,6 +250,32 @@ func (m tuiModel) updateIcingaView(msg tea.KeyMsg) (tuiModel, []tea.Cmd) {
 		m.icingaFocus = 1 - m.icingaFocus
 	case "r", "R":
 		return m, []tea.Cmd{m.client.get("icinga", "/api/icinga/services")}
+	case "s":
+		// Spawn a homelab-agent in the best matching session to investigate the selected alert.
+		var svc *IcingaService
+		if m.icingaFocus == 0 {
+			if m.icingaTopCur < len(m.icingaServices) {
+				s := m.icingaServices[m.icingaTopCur]
+				svc = &s
+			}
+		} else {
+			alerts := icingaNonOK(m.icingaServices)
+			if m.icingaBotCur < len(alerts) {
+				s := alerts[m.icingaBotCur]
+				svc = &s
+			}
+		}
+		if svc == nil {
+			m.setFlash("No service selected", false)
+			break
+		}
+		sid := icingaBestSessionID(m.sessions, m.states)
+		if sid == "" {
+			m.setFlash("No active session — create one first (N)", true)
+			break
+		}
+		m.modal = newIcingaAgentModal(sid, *svc)
+		m.focus = tuiFocusModal
 	case "j", "down":
 		if m.icingaFocus == 0 {
 			if m.icingaTopCur < n-1 {
@@ -312,6 +338,35 @@ func (m tuiModel) updateIcingaView(msg tea.KeyMsg) (tuiModel, []tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+// icingaBestSessionID picks the most appropriate session for an Icinga investigation agent.
+// Priority: session whose name matches homelab/monitoring keywords, then one whose context
+// name matches, then the first available session.
+func icingaBestSessionID(sessions []tuiSession, states map[string]tuiState) string {
+	keywords := []string{"homelab", "monitoring", "infra", "ops"}
+	for _, sess := range sessions {
+		nameLow := strings.ToLower(sess.Name)
+		for _, kw := range keywords {
+			if strings.Contains(nameLow, kw) {
+				return sess.ID
+			}
+		}
+	}
+	for _, sess := range sessions {
+		if st, ok := states[sess.ID]; ok && st.Session.ContextName != nil {
+			ctxLow := strings.ToLower(*st.Session.ContextName)
+			for _, kw := range keywords {
+				if strings.Contains(ctxLow, kw) {
+					return sess.ID
+				}
+			}
+		}
+	}
+	if len(sessions) > 0 {
+		return sessions[0].ID
+	}
+	return ""
 }
 
 // icingaNonOK returns non-OK services sorted by last_change descending (most recent alert first).
@@ -510,7 +565,7 @@ func (m tuiModel) viewIcingaScreen() string {
 		}
 	}
 
-	sb.WriteString("\n" + dimStyle.Render("  Tab switch-pane  ·  j/k navigate  ·  PgUp/PgDn page  ·  g/G first/last  ·  r refresh  ·  q close"))
+	sb.WriteString("\n" + dimStyle.Render("  Tab switch-pane  ·  j/k navigate  ·  PgUp/PgDn page  ·  g/G first/last  ·  s spawn agent  ·  r refresh  ·  q close"))
 	return sb.String()
 }
 
