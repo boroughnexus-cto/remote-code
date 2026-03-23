@@ -579,88 +579,34 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		cmds = append(cmds, m.client.fetchAll())
 
-	case tuiRolePromptEditMsg:
-		// Phase 2: open $EDITOR (suspends TUI), then PUT result on close.
-		role := msg.role
-		tmpPath := msg.tmpPath
-		client := m.client
-		cmd := exec.Command(msg.editor, append(msg.editorArgs, tmpPath)...)
-		cmds = append(cmds, tea.ExecProcess(cmd, func(err error) tea.Msg {
-			defer os.Remove(tmpPath) //nolint:errcheck
-			if err != nil {
-				return tuiErrMsg{op: "role-prompts", text: err.Error()}
+	case personaSavedMsg:
+		if msg.err != nil {
+			m.setFlash("Error saving persona: "+msg.err.Error(), true)
+		} else {
+			m.setFlash("Persona saved: "+msg.role, false)
+			// Reload the personas list in settings.
+			if m.settings != nil {
+				for _, sec := range m.settings.sections {
+					if ps, ok := sec.(*personasSection); ok {
+						cmds = append(cmds, ps.Init())
+					}
+				}
 			}
-			newPrompt, err := os.ReadFile(tmpPath)
-			if err != nil || len(newPrompt) == 0 {
-				return tuiErrMsg{op: "role-prompts", text: "empty prompt — not saved"}
-			}
-			body, _ := json.Marshal(map[string]string{"prompt": string(newPrompt)})
-			if putErr := client.putSync("/api/swarm/role-prompts/"+role, body); putErr != nil {
-				return tuiErrMsg{op: "role-prompts", text: putErr.Error()}
-			}
-			return tuiRolePromptSavedMsg{role: role}
-		}))
+		}
 
-	case tuiRolePromptSavedMsg:
-		m.setFlash("Role prompt updated: "+msg.role, false)
-
-	case tuiCtxContentEditMsg:
-		// Open $EDITOR for static context content, then PUT on close.
-		ctxID := msg.ctxID
-		ctxName := msg.ctxName
-		ctxDesc := msg.ctxDesc
-		ctxSummary := msg.ctxSummary
-		ctxTags := msg.ctxTags
-		tmpPath := msg.tmpPath
-		client := m.client
-		cmd := exec.Command(msg.editor, append(msg.editorArgs, tmpPath)...)
-		cmds = append(cmds, tea.ExecProcess(cmd, func(err error) tea.Msg {
-			defer os.Remove(tmpPath) //nolint:errcheck
-			if err != nil {
-				return tuiErrMsg{op: "ctx-content", text: err.Error()}
+	case personaDeletedMsg:
+		if msg.err != nil {
+			m.setFlash("Error deleting persona: "+msg.err.Error(), true)
+		} else {
+			m.setFlash("Persona deleted: "+msg.role, false)
+			if m.settings != nil {
+				for _, sec := range m.settings.sections {
+					if ps, ok := sec.(*personasSection); ok {
+						cmds = append(cmds, ps.Init())
+					}
+				}
 			}
-			newContent, readErr := os.ReadFile(tmpPath)
-			if readErr != nil {
-				return tuiErrMsg{op: "ctx-content", text: "could not read temp file: " + readErr.Error()}
-			}
-			body, _ := json.Marshal(map[string]string{
-				"name": ctxName, "description": ctxDesc,
-				"summary": ctxSummary, "content": string(newContent), "tags": ctxTags,
-			})
-			if putErr := client.putSync("/api/swarm/contexts/"+ctxID, body); putErr != nil {
-				return tuiErrMsg{op: "ctx-content", text: putErr.Error()}
-			}
-			return tuiDoneMsg{op: "ctx-content"}
-		}))
-
-	case tuiCtxDynamicEditMsg:
-		// Open $EDITOR for dynamic context instructions, then PUT on close.
-		ctxID := msg.ctxID
-		ctxName := msg.ctxName
-		ctxDesc := msg.ctxDesc
-		ctxSummary := msg.ctxSummary
-		ctxTags := msg.ctxTags
-		tmpPath := msg.tmpPath
-		client := m.client
-		cmd := exec.Command(msg.editor, append(msg.editorArgs, tmpPath)...)
-		cmds = append(cmds, tea.ExecProcess(cmd, func(err error) tea.Msg {
-			defer os.Remove(tmpPath) //nolint:errcheck
-			if err != nil {
-				return tuiErrMsg{op: "ctx-dynamic", text: err.Error()}
-			}
-			newDynamic, readErr := os.ReadFile(tmpPath)
-			if readErr != nil {
-				return tuiErrMsg{op: "ctx-dynamic", text: "could not read temp file: " + readErr.Error()}
-			}
-			body, _ := json.Marshal(map[string]string{
-				"name": ctxName, "description": ctxDesc,
-				"summary": ctxSummary, "dynamic_context": string(newDynamic), "tags": ctxTags,
-			})
-			if putErr := client.putSync("/api/swarm/contexts/"+ctxID, body); putErr != nil {
-				return tuiErrMsg{op: "ctx-dynamic", text: putErr.Error()}
-			}
-			return tuiDoneMsg{op: "ctx-dynamic"}
-		}))
+		}
 
 	case tuiVersionMsg:
 		m.updateAvailable = msg.updateAvail

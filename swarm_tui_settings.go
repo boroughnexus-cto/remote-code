@@ -5,9 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"os"
 	"strings"
 
+	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -43,6 +43,9 @@ type SettingsSectionModel interface {
 	Commit() tea.Cmd
 	// Discard drops unsaved changes.
 	Discard()
+	// ConsumesEsc returns true when the section wants to handle Esc itself
+	// (e.g., to exit a sub-edit mode) rather than letting the shell close.
+	ConsumesEsc() bool
 }
 
 // ─── Shell model ──────────────────────────────────────────────────────────────
@@ -90,6 +93,13 @@ func (m tuiModel) updateSettings(msg tea.KeyMsg) (tuiModel, []tea.Cmd) {
 
 	switch msg.String() {
 	case "esc", "q":
+		// If the active section is in a sub-edit mode, let it handle Esc first.
+		if sec := st.activeSection(); sec != nil && sec.ConsumesEsc() {
+			newSec, secCmds := sec.Update(msg)
+			st.sections[st.active] = newSec
+			cmds = append(cmds, secCmds...)
+			return m, cmds
+		}
 		m.settings = nil
 		return m, nil
 
@@ -191,6 +201,21 @@ type personasSection struct {
 	cursor  int
 	loading bool
 	err     string
+
+	// Edit state (existing or new persona)
+	editing      bool
+	editIsNew    bool            // true when creating a new persona
+	editRole     string          // role being edited (empty for new)
+	roleInput    textinput.Model // role name input (new personas only)
+	promptTA     textarea.Model  // prompt text editor
+	newFocusRole bool            // true = focus on roleInput (new flow only)
+
+	// Delete confirm
+	confirmDelete bool
+	deleteTarget  string
+
+	// Pending: auto-open this role for editing once items finish loading
+	pendingRole string
 }
 
 type personaItem struct {
@@ -206,12 +231,50 @@ type personasLoadedMsg struct {
 }
 
 func newPersonasSection(client TUIClient) *personasSection {
-	return &personasSection{client: client, loading: true}
+	ri := textinput.New()
+	ri.CharLimit = 50
+	ri.Placeholder = "role name (e.g. worker, architect)"
+
+	ta := textarea.New()
+	ta.Placeholder = "Enter the system prompt for this role…"
+	ta.CharLimit = 0
+	ta.ShowLineNumbers = false
+	ta.SetWidth(76)
+	ta.SetHeight(15)
+
+	return &personasSection{client: client, loading: true, roleInput: ri, promptTA: ta}
 }
+
 func (s *personasSection) Title() string   { return "Agent Personas" }
-func (s *personasSection) IsDirty() bool   { return false }
-func (s *personasSection) Commit() tea.Cmd { return nil }
-func (s *personasSection) Discard()        {}
+func (s *personasSection) IsDirty() bool   { return s.editing }
+func (s *personasSection) Commit() tea.Cmd { return nil } // handled internally via doSave
+func (s *personasSection) Discard() {
+	s.editing = false
+	s.confirmDelete = false
+	s.promptTA.Blur()
+	s.roleInput.Blur()
+}
+func (s *personasSection) ConsumesEsc() bool { return s.editing || s.confirmDelete }
+
+func (s *personasSection) startEdit(item personaItem) {
+	s.editRole = item.role
+	s.editIsNew = false
+	s.newFocusRole = false
+	s.promptTA.SetValue(item.prompt)
+	s.promptTA.Focus()
+	s.editing = true
+}
+
+func (s *personasSection) startNew() {
+	s.editRole = ""
+	s.editIsNew = true
+	s.newFocusRole = true
+	s.roleInput.SetValue("")
+	s.roleInput.Focus()
+	s.promptTA.SetValue("")
+	s.promptTA.Blur()
+	s.editing = true
+}
 
 func (s *personasSection) Init() tea.Cmd {
 	s.loading = true
@@ -238,6 +301,12 @@ func (s *personasSection) Init() tea.Cmd {
 }
 
 func (s *personasSection) Update(msg tea.KeyMsg) (SettingsSectionModel, []tea.Cmd) {
+	if s.editing {
+		return s.updateEditing(msg)
+	}
+	if s.confirmDelete {
+		return s.updateConfirmDelete(msg)
+	}
 	switch msg.String() {
 	case "up", "k":
 		if s.cursor > 0 {
@@ -247,24 +316,86 @@ func (s *personasSection) Update(msg tea.KeyMsg) (SettingsSectionModel, []tea.Cm
 		if s.cursor < len(s.items)-1 {
 			s.cursor++
 		}
-	case "e":
+	case "e", "enter":
 		if s.cursor < len(s.items) {
-			item := s.items[s.cursor]
-			roleCapture := item.role
-			promptCapture := item.prompt
-			cmd := func() tea.Msg {
-				f, err := os.CreateTemp("", "swarmops-prompt-*.md")
-				if err != nil {
-					return tuiErrMsg{op: "role-prompts", text: err.Error()}
-				}
-				tmpPath := f.Name()
-				f.WriteString(promptCapture) //nolint:errcheck
-				f.Close()
-				editorBin, editorArgs := resolveEditor()
-				return tuiRolePromptEditMsg{role: roleCapture, tmpPath: tmpPath, editor: editorBin, editorArgs: editorArgs}
-			}
+			s.startEdit(s.items[s.cursor])
+		}
+	case "n":
+		s.startNew()
+	case "d", "delete":
+		if s.cursor < len(s.items) {
+			s.confirmDelete = true
+			s.deleteTarget = s.items[s.cursor].role
+		}
+	}
+	return s, nil
+}
+
+func (s *personasSection) updateEditing(msg tea.KeyMsg) (SettingsSectionModel, []tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		s.editing = false
+		s.promptTA.Blur()
+		s.roleInput.Blur()
+	case "ctrl+s":
+		return s.doSave()
+	case "tab":
+		if s.editIsNew && s.newFocusRole {
+			s.roleInput.Blur()
+			s.newFocusRole = false
+			s.promptTA.Focus()
+		}
+	default:
+		if s.editIsNew && s.newFocusRole {
+			var cmd tea.Cmd
+			s.roleInput, cmd = s.roleInput.Update(msg)
 			return s, []tea.Cmd{cmd}
 		}
+		var cmd tea.Cmd
+		s.promptTA, cmd = s.promptTA.Update(msg)
+		return s, []tea.Cmd{cmd}
+	}
+	return s, nil
+}
+
+func (s *personasSection) doSave() (SettingsSectionModel, []tea.Cmd) {
+	role := s.editRole
+	if s.editIsNew {
+		role = strings.TrimSpace(s.roleInput.Value())
+	}
+	if role == "" {
+		return s, nil // can't save without a role name
+	}
+	prompt := s.promptTA.Value()
+	s.editing = false
+	s.promptTA.Blur()
+	s.roleInput.Blur()
+	client := s.client
+	return s, []tea.Cmd{func() tea.Msg {
+		body, _ := json.Marshal(map[string]string{"prompt": prompt})
+		if err := client.putSync("/api/swarm/role-prompts/"+role, body); err != nil {
+			return personaSavedMsg{role: role, err: err}
+		}
+		return personaSavedMsg{role: role}
+	}}
+}
+
+func (s *personasSection) updateConfirmDelete(msg tea.KeyMsg) (SettingsSectionModel, []tea.Cmd) {
+	switch msg.String() {
+	case "y", "Y":
+		role := s.deleteTarget
+		s.confirmDelete = false
+		s.deleteTarget = ""
+		client := s.client
+		return s, []tea.Cmd{func() tea.Msg {
+			if err := client.deleteSync("/api/swarm/role-prompts/" + role); err != nil {
+				return personaDeletedMsg{role: role, err: err}
+			}
+			return personaDeletedMsg{role: role}
+		}}
+	default:
+		s.confirmDelete = false
+		s.deleteTarget = ""
 	}
 	return s, nil
 }
@@ -276,13 +407,22 @@ func (s *personasSection) View(w, h int) string {
 	if s.err != "" {
 		return lipgloss.NewStyle().Foreground(colorRed).Render("  Error: " + s.err)
 	}
+	if s.editing {
+		s.promptTA.SetWidth(w - 4)
+		s.promptTA.SetHeight(max(5, h-10))
+		return s.viewEditing()
+	}
+	if s.confirmDelete {
+		return s.viewConfirmDelete()
+	}
 	if len(s.items) == 0 {
 		return dimStyle.Render("  No personas defined.") +
-			"\n\n" + dimStyle.Render("  Add roles via the API: PUT /api/swarm/role-prompts/{role}")
+			"\n\n" + dimStyle.Render("  Press 'n' to create a new persona.") +
+			"\n\n" + dimStyle.Render("  n new  (changes take effect immediately)")
 	}
 
 	var sb strings.Builder
-	sb.WriteString(dimStyle.Render(fmt.Sprintf("  %d personas  ·  press 'e' on selected to edit in $EDITOR\n\n", len(s.items))))
+	sb.WriteString(dimStyle.Render(fmt.Sprintf("  %d personas  ·  n new  e edit  d delete  ↑/↓ navigate\n\n", len(s.items))))
 
 	maxRows := max(3, h-6)
 	start := 0
@@ -310,8 +450,37 @@ func (s *personasSection) View(w, h int) string {
 		sb.WriteString(line + "\n")
 	}
 
-	sb.WriteString("\n" + dimStyle.Render("↑/↓ navigate  e edit in $EDITOR  (changes take effect immediately)"))
+	sb.WriteString("\n" + dimStyle.Render("↑/↓ navigate  e/Enter edit  n new  d delete"))
 	return sb.String()
+}
+
+func (s *personasSection) viewEditing() string {
+	var sb strings.Builder
+	if s.editIsNew {
+		sb.WriteString(lipgloss.NewStyle().Foreground(colorTeal).Bold(true).Render("New Persona") + "\n\n")
+		cursor := "  "
+		if s.newFocusRole {
+			cursor = lipgloss.NewStyle().Foreground(colorTeal).Render("▶ ")
+		}
+		sb.WriteString(cursor + dimStyle.Render("Role name:") + "\n")
+		sb.WriteString("  " + s.roleInput.View() + "\n\n")
+	} else {
+		sb.WriteString(lipgloss.NewStyle().Foreground(colorTeal).Bold(true).Render("Edit: "+s.editRole) + "\n\n")
+	}
+	sb.WriteString(dimStyle.Render("Prompt:") + "\n")
+	sb.WriteString(s.promptTA.View() + "\n\n")
+
+	if s.editIsNew && s.newFocusRole {
+		sb.WriteString(dimStyle.Render("Tab switch to prompt  Esc cancel"))
+	} else {
+		sb.WriteString(dimStyle.Render("Ctrl+S save  Esc cancel"))
+	}
+	return sb.String()
+}
+
+func (s *personasSection) viewConfirmDelete() string {
+	return lipgloss.NewStyle().Foreground(colorRed).Bold(true).Render("Delete persona: "+s.deleteTarget+"?") +
+		"\n\n" + dimStyle.Render("y confirm  n/Esc cancel")
 }
 
 // applyPersonasLoaded is called from the main Update loop to push loaded data
@@ -328,6 +497,17 @@ func applyPersonasLoaded(m *tuiModel, msg personasLoadedMsg) {
 			} else {
 				ps.items = msg.items
 				ps.err = ""
+				// Auto-open edit for a pending role (triggered by sidebar P key).
+				if ps.pendingRole != "" {
+					for i, item := range ps.items {
+						if item.role == ps.pendingRole {
+							ps.cursor = i
+							ps.startEdit(item)
+							break
+						}
+					}
+					ps.pendingRole = ""
+				}
 			}
 			return
 		}
@@ -353,13 +533,19 @@ type sessionContextsSection struct {
 	loading bool
 	err     string
 
-	// Edit state
+	// Metadata edit state
 	editing   bool
-	editIdx   int // index in items being edited
+	editIdx   int // index in items being edited (-1 for new)
 	editField int // 0=name,1=description,2=summary,3=tags
 	fields    [4]textinput.Model
 	draft     sessionContext
 	dirty     bool
+
+	// Large-text editing (content and dynamic_context)
+	contentTA      textarea.Model
+	dynamicTA      textarea.Model
+	editingContent bool
+	editingDynamic bool
 }
 
 type sessionContextsLoadedMsg struct {
@@ -383,14 +569,34 @@ func newSessionContextsSection(client TUIClient) *sessionContextsSection {
 	s.fields[1].Placeholder = "one-line description"
 	s.fields[2].Placeholder = "1-2 line summary shown in picker and right panel"
 	s.fields[3].Placeholder = "tags (comma-separated)"
+
+	s.contentTA = textarea.New()
+	s.contentTA.Placeholder = "Static context content (markdown, injected verbatim into agent prompts)…"
+	s.contentTA.CharLimit = 0
+	s.contentTA.ShowLineNumbers = false
+	s.contentTA.SetWidth(76)
+	s.contentTA.SetHeight(20)
+
+	s.dynamicTA = textarea.New()
+	s.dynamicTA.Placeholder = "Dynamic context instructions (shell command or template to generate context at spawn)…"
+	s.dynamicTA.CharLimit = 0
+	s.dynamicTA.ShowLineNumbers = false
+	s.dynamicTA.SetWidth(76)
+	s.dynamicTA.SetHeight(20)
+
 	return s
 }
 
 func (s *sessionContextsSection) Title() string { return "Session Contexts" }
 func (s *sessionContextsSection) IsDirty() bool { return s.dirty }
+func (s *sessionContextsSection) ConsumesEsc() bool {
+	return s.editing || s.editingContent || s.editingDynamic
+}
 func (s *sessionContextsSection) Discard() {
 	s.dirty = false
 	s.editing = false
+	s.editingContent = false
+	s.editingDynamic = false
 }
 
 func (s *sessionContextsSection) Init() tea.Cmd {
@@ -509,9 +715,17 @@ func (s *sessionContextsSection) Update(msg tea.KeyMsg) (SettingsSectionModel, [
 }
 
 func (s *sessionContextsSection) updateEditing(msg tea.KeyMsg) (SettingsSectionModel, []tea.Cmd) {
+	// Nested content/dynamic textarea editing — intercept all keys.
+	if s.editingContent || s.editingDynamic {
+		return s.updateContentEdit(msg)
+	}
+
 	switch msg.String() {
 	case "esc":
 		s.editing = false
+		for i := range s.fields {
+			s.fields[i].Blur()
+		}
 	case "tab", "down":
 		s.fields[s.editField].Blur()
 		s.editField = (s.editField + 1) % len(s.fields)
@@ -521,73 +735,25 @@ func (s *sessionContextsSection) updateEditing(msg tea.KeyMsg) (SettingsSectionM
 		s.editField = (s.editField - 1 + len(s.fields)) % len(s.fields)
 		s.fields[s.editField].Focus()
 	case "ctrl+e":
-		// Open static content in $EDITOR — only for existing (saved) contexts
+		// Open static content in the in-TUI textarea editor.
 		if s.draft.id == "" {
-			break // must save metadata first
+			break // save metadata first
 		}
-		f, err := os.CreateTemp("", "swarm-ctx-*.md")
-		if err != nil {
-			break
-		}
-		f.WriteString(s.draft.content) //nolint:errcheck
-		f.Close()
-		tmpPath := f.Name()
-		ctxID := s.draft.id
-		ctxName := strings.TrimSpace(s.fields[0].Value())
-		ctxDesc := strings.TrimSpace(s.fields[1].Value())
-		ctxSummary := strings.TrimSpace(s.fields[2].Value())
-		ctxTags := strings.TrimSpace(s.fields[3].Value())
-		if ctxName == "" {
-			ctxName = s.draft.name
-		}
-		editorBin, editorArgs := resolveEditor()
-		return s, []tea.Cmd{func() tea.Msg {
-			return tuiCtxContentEditMsg{
-				ctxID:      ctxID,
-				ctxName:    ctxName,
-				ctxDesc:    ctxDesc,
-				ctxSummary: ctxSummary,
-				ctxTags:    ctxTags,
-				tmpPath:    tmpPath,
-				editor:     editorBin,
-				editorArgs: editorArgs,
-			}
-		}}
-
+		s.contentTA.SetWidth(76)
+		s.contentTA.SetHeight(20)
+		s.contentTA.SetValue(s.draft.content)
+		s.contentTA.Focus()
+		s.editingContent = true
 	case "ctrl+d":
-		// Open dynamic_context in $EDITOR — only for existing (saved) contexts
+		// Open dynamic_context in the in-TUI textarea editor.
 		if s.draft.id == "" {
-			break // must save metadata first
+			break // save metadata first
 		}
-		f, err := os.CreateTemp("", "swarm-ctx-dyn-*.md")
-		if err != nil {
-			break
-		}
-		f.WriteString(s.draft.dynamicContext) //nolint:errcheck
-		f.Close()
-		tmpPath := f.Name()
-		ctxID := s.draft.id
-		ctxName := strings.TrimSpace(s.fields[0].Value())
-		ctxDesc := strings.TrimSpace(s.fields[1].Value())
-		ctxSummary := strings.TrimSpace(s.fields[2].Value())
-		ctxTags := strings.TrimSpace(s.fields[3].Value())
-		if ctxName == "" {
-			ctxName = s.draft.name
-		}
-		editorBin, editorArgs := resolveEditor()
-		return s, []tea.Cmd{func() tea.Msg {
-			return tuiCtxDynamicEditMsg{
-				ctxID:      ctxID,
-				ctxName:    ctxName,
-				ctxDesc:    ctxDesc,
-				ctxSummary: ctxSummary,
-				ctxTags:    ctxTags,
-				tmpPath:    tmpPath,
-				editor:     editorBin,
-				editorArgs: editorArgs,
-			}
-		}}
-
+		s.dynamicTA.SetWidth(76)
+		s.dynamicTA.SetHeight(20)
+		s.dynamicTA.SetValue(s.draft.dynamicContext)
+		s.dynamicTA.Focus()
+		s.editingDynamic = true
 	case "enter":
 		if s.editField < len(s.fields)-1 {
 			s.fields[s.editField].Blur()
@@ -609,6 +775,39 @@ func (s *sessionContextsSection) updateEditing(msg tea.KeyMsg) (SettingsSectionM
 	default:
 		var cmd tea.Cmd
 		s.fields[s.editField], cmd = s.fields[s.editField].Update(msg)
+		return s, []tea.Cmd{cmd}
+	}
+	return s, nil
+}
+
+// updateContentEdit handles keys while editing content or dynamic_context in a textarea.
+func (s *sessionContextsSection) updateContentEdit(msg tea.KeyMsg) (SettingsSectionModel, []tea.Cmd) {
+	switch msg.String() {
+	case "ctrl+s":
+		if s.editingContent {
+			s.draft.content = s.contentTA.Value()
+			s.contentTA.Blur()
+			s.editingContent = false
+		} else {
+			s.draft.dynamicContext = s.dynamicTA.Value()
+			s.dynamicTA.Blur()
+			s.editingDynamic = false
+		}
+		s.dirty = true
+		cmd := s.Commit()
+		return s, []tea.Cmd{cmd}
+	case "esc":
+		s.contentTA.Blur()
+		s.dynamicTA.Blur()
+		s.editingContent = false
+		s.editingDynamic = false
+	default:
+		var cmd tea.Cmd
+		if s.editingContent {
+			s.contentTA, cmd = s.contentTA.Update(msg)
+		} else {
+			s.dynamicTA, cmd = s.dynamicTA.Update(msg)
+		}
 		return s, []tea.Cmd{cmd}
 	}
 	return s, nil
@@ -679,6 +878,11 @@ func (s *sessionContextsSection) View(w, h int) string {
 }
 
 func (s *sessionContextsSection) viewEditing(w int) string {
+	// If editing content or dynamic_context, show the full textarea.
+	if s.editingContent || s.editingDynamic {
+		return s.viewContentEdit(w)
+	}
+
 	var sb strings.Builder
 	isNew := s.draft.id == ""
 	if isNew {
@@ -698,12 +902,31 @@ func (s *sessionContextsSection) viewEditing(w int) string {
 	}
 
 	if s.draft.id != "" {
-		sb.WriteString(dimStyle.Render("Ctrl+E  edit static content in $EDITOR") + "\n")
-		sb.WriteString(dimStyle.Render("Ctrl+D  edit dynamic context in $EDITOR") + "\n\n")
+		sb.WriteString(dimStyle.Render("Ctrl+E  edit static content  ·  Ctrl+D  edit dynamic context") + "\n\n")
 	} else {
 		sb.WriteString(dimStyle.Render("Save metadata first, then Ctrl+E/Ctrl+D to edit content") + "\n\n")
 	}
 	sb.WriteString(dimStyle.Render("Tab/↑↓ next field  Enter save (on last field)  Esc cancel"))
+	return sb.String()
+}
+
+func (s *sessionContextsSection) viewContentEdit(w int) string {
+	var title string
+	var ta *textarea.Model
+	if s.editingContent {
+		title = "Edit Static Content"
+		ta = &s.contentTA
+	} else {
+		title = "Edit Dynamic Context"
+		ta = &s.dynamicTA
+	}
+	ta.SetWidth(w - 4)
+	ta.SetHeight(20)
+
+	var sb strings.Builder
+	sb.WriteString(lipgloss.NewStyle().Foreground(colorTeal).Bold(true).Render(title) + "\n\n")
+	sb.WriteString(ta.View() + "\n\n")
+	sb.WriteString(dimStyle.Render("Ctrl+S save  Esc cancel (unsaved changes discarded)"))
 	return sb.String()
 }
 

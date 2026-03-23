@@ -48,8 +48,9 @@ func newSwarmConfigSection() *swarmConfigSection {
 	return &swarmConfigSection{loading: true, editTI: ti}
 }
 
-func (s *swarmConfigSection) Title() string { return "Swarm Config" }
-func (s *swarmConfigSection) IsDirty() bool { return s.editDirty }
+func (s *swarmConfigSection) Title() string        { return "Swarm Config" }
+func (s *swarmConfigSection) IsDirty() bool        { return s.editDirty }
+func (s *swarmConfigSection) ConsumesEsc() bool    { return s.editing }
 func (s *swarmConfigSection) Commit() tea.Cmd {
 	key := s.editKey
 	val := strings.TrimSpace(s.editTI.Value())
@@ -318,6 +319,7 @@ type integrationsSection struct{}
 func newIntegrationsSection() *integrationsSection { return &integrationsSection{} }
 func (s *integrationsSection) Title() string        { return "Integrations" }
 func (s *integrationsSection) IsDirty() bool        { return false }
+func (s *integrationsSection) ConsumesEsc() bool    { return false }
 func (s *integrationsSection) Commit() tea.Cmd      { return nil }
 func (s *integrationsSection) Discard()              {}
 func (s *integrationsSection) Init() tea.Cmd         { return nil }

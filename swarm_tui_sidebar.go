@@ -1,9 +1,7 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
-	"os"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -495,46 +493,23 @@ func (m tuiModel) updateSidebar(msg tea.KeyMsg) (tuiModel, []tea.Cmd) {
 		}
 
 	case "P":
-		// Edit role prompts in $EDITOR.
-		// Phase 1: fetch current prompt, write to temp file → tuiRolePromptEditMsg.
-		// Phase 2: handled below — opens $EDITOR via tea.ExecProcess.
+		// Open Settings → Agent Personas, pre-selecting the current agent's role.
 		role := "worker"
 		if it := m.selItem(); it != nil && it.kind == tuiItemAgent {
 			if ag := m.lookupAgent(it.sid, it.eid); ag != nil {
 				role = ag.Role
 			}
 		}
-		roleCapture := role
-		cmds = append(cmds, func() tea.Msg {
-			resp, err := m.client.getSync("/api/swarm/role-prompts")
-			if err != nil {
-				return tuiErrMsg{op: "role-prompts", text: err.Error()}
+		if m.settings == nil {
+			m.settings = newTUISettings(m.client)
+		}
+		m.settings.active = 0 // Personas tab is always index 0
+		for _, sec := range m.settings.sections {
+			if ps, ok := sec.(*personasSection); ok {
+				ps.pendingRole = role
+				cmds = append(cmds, ps.Init())
 			}
-			type rp struct {
-				Role   string `json:"role"`
-				Prompt string `json:"prompt"`
-			}
-			var all []rp
-			if err := json.Unmarshal(resp, &all); err != nil {
-				return tuiErrMsg{op: "role-prompts", text: err.Error()}
-			}
-			currentPrompt := ""
-			for _, r := range all {
-				if r.Role == roleCapture {
-					currentPrompt = r.Prompt
-					break
-				}
-			}
-			f, err := os.CreateTemp("", "swarmops-prompt-*.md")
-			if err != nil {
-				return tuiErrMsg{op: "role-prompts", text: err.Error()}
-			}
-			tmpPath := f.Name()
-			f.WriteString(currentPrompt) //nolint:errcheck
-			f.Close()
-			editorBin, editorArgs := resolveEditor()
-			return tuiRolePromptEditMsg{role: roleCapture, tmpPath: tmpPath, editor: editorBin, editorArgs: editorArgs}
-		})
+		}
 
 	case "C":
 		// Open context picker for the selected session

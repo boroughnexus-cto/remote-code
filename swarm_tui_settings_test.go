@@ -194,34 +194,55 @@ func TestSettings_PersonasRendersNames(t *testing.T) {
 	assertView(t, m, "qa-agent")
 }
 
-// ─── US-ST.9: personas 'e' key fires editor cmd ───────────────────────────
+// ─── US-ST.9: personas 'e' key opens in-TUI editor ───────────────────────
 
-func TestSettings_PersonasEKeyFiresEditorCmd(t *testing.T) {
+func TestSettings_PersonasEKeyOpensInTUIEditor(t *testing.T) {
 	sessions, states := stdSessions()
 	m := newTestModel(sessions, states)
 
 	m = openSettings(m)
 	m = injectPersonas(m, personaItem{role: "dev-role", prompt: "The developer prompt"})
 
-	// 'e' should return a cmd that produces tuiRolePromptEditMsg.
-	_, cmds := driveCapture(m, keyRune('e'))
-	if len(cmds) == 0 {
-		t.Fatal("'e' on persona should return a cmd")
+	// 'e' should switch the section into in-TUI editing mode.
+	m = drive(m, keyRune('e'))
+
+	ps, ok := m.settings.sections[0].(*personasSection)
+	if !ok {
+		t.Fatal("expected personasSection as first settings section")
 	}
-	found := false
-	for _, cmd := range cmds {
-		if cmd == nil {
-			continue
-		}
-		msg := cmd()
-		if edit, ok := msg.(tuiRolePromptEditMsg); ok {
-			if edit.role != "dev-role" {
-				t.Errorf("edit.role: want %q, got %q", "dev-role", edit.role)
-			}
-			found = true
-		}
+	if !ps.editing {
+		t.Error("expected editing=true after pressing 'e' on a persona")
 	}
-	if !found {
-		t.Error("expected tuiRolePromptEditMsg from 'e' key on persona item")
+	if ps.editRole != "dev-role" {
+		t.Errorf("editRole: want %q, got %q", "dev-role", ps.editRole)
+	}
+	// Settings overlay should remain open.
+	if m.settings == nil {
+		t.Error("settings should remain open while in edit mode")
+	}
+}
+
+// ─── US-ST.10: esc in persona edit exits edit mode, not settings ──────────
+
+func TestSettings_EscInPersonaEditExitsEditNotSettings(t *testing.T) {
+	sessions, states := stdSessions()
+	m := newTestModel(sessions, states)
+
+	m = openSettings(m)
+	m = injectPersonas(m, personaItem{role: "dev-role", prompt: "The developer prompt"})
+	m = drive(m, keyRune('e')) // enter edit mode
+
+	ps := m.settings.sections[0].(*personasSection)
+	if !ps.editing {
+		t.Fatal("expected editing=true before testing esc")
+	}
+
+	m = drive(m, keyEsc()) // esc should exit edit mode, not close settings
+	if m.settings == nil {
+		t.Error("settings should remain open after esc exits edit mode")
+	}
+	ps = m.settings.sections[0].(*personasSection)
+	if ps.editing {
+		t.Error("expected editing=false after esc")
 	}
 }

@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"os"
-	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -194,53 +193,21 @@ func fetchAPIUsage(c TUIClient) tea.Cmd {
 
 type tuiAnimTickMsg struct{}
 type tuiSlowTickMsg struct{}
-type tuiRolePromptSavedMsg struct{ role string }
-type tuiRolePromptEditMsg struct {
-	role       string
-	tmpPath    string
-	editor     string
-	editorArgs []string
+
+// personaSavedMsg is returned after a PUT /api/swarm/role-prompts/{role} call.
+type personaSavedMsg struct {
+	role string
+	err  error
 }
 
-type tuiCtxContentEditMsg struct {
-	ctxID      string
-	ctxName    string
-	ctxDesc    string
-	ctxSummary string
-	ctxTags    string
-	tmpPath    string
-	editor     string
-	editorArgs []string
-}
-
-type tuiCtxDynamicEditMsg struct {
-	ctxID      string
-	ctxName    string
-	ctxDesc    string
-	ctxSummary string
-	ctxTags    string
-	tmpPath    string
-	editor     string
-	editorArgs []string
+// personaDeletedMsg is returned after a DELETE /api/swarm/role-prompts/{role} call.
+type personaDeletedMsg struct {
+	role string
+	err  error
 }
 
 // tuiAutoOpenCtxPickerMsg triggers the context picker on the newest session after creation.
 type tuiAutoOpenCtxPickerMsg struct{}
-
-// resolveEditor reads $VISUAL then $EDITOR, splits into binary + pre-file args.
-// Supports common forms like "code --wait" or "emacsclient -c".
-// Falls back to "vi" when neither variable is set.
-func resolveEditor() (bin string, args []string) {
-	raw := os.Getenv("VISUAL")
-	if raw == "" {
-		raw = os.Getenv("EDITOR")
-	}
-	parts := strings.Fields(raw)
-	if len(parts) == 0 {
-		return "vi", nil
-	}
-	return parts[0], parts[1:]
-}
 type tuiTermMsg struct {
 	agentID string
 	content string

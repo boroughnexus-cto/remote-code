@@ -654,8 +654,13 @@ func handleSwarmRolePromptsAPI(w http.ResponseWriter, r *http.Request, ctx conte
 		return
 	}
 
-	// PUT /api/swarm/role-prompts/:role
+	// PUT or DELETE /api/swarm/role-prompts/:role
 	role := pathParts[0]
+	if r.Method == http.MethodDelete {
+		database.ExecContext(ctx, "DELETE FROM swarm_role_prompts WHERE role=?", role) //nolint:errcheck
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 	if r.Method != http.MethodPut {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
