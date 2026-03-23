@@ -615,6 +615,23 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.setFlash(fmt.Sprintf("⬆ SwarmOps update available (remote: %s) — git pull && make backend", msg.remote), false)
 		}
 
+	case tuiDispatchSuggestMsg:
+		if msg.err != nil {
+			// Fallback was used server-side — still open modal with whatever came back.
+			if msg.sessionID != "" {
+				m.modal = newIcingaAgentModal(msg.sessionID, msg.svc)
+				overrideIcingaModalFields(m.modal, msg.role, msg.mission)
+				m.focus = tuiFocusModal
+				m.setFlash("LLM unavailable — used keyword fallback", false)
+			} else {
+				m.setFlash("Dispatch suggest failed: "+msg.err.Error(), true)
+			}
+		} else {
+			m.modal = newIcingaAgentModal(msg.sessionID, msg.svc)
+			overrideIcingaModalFields(m.modal, msg.role, msg.mission)
+			m.focus = tuiFocusModal
+		}
+
 	case tuiFeedbackResultMsg:
 		m.feedbackSubmitting = false
 		m.feedbackCapture = nil

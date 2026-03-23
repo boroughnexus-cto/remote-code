@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -251,7 +252,8 @@ func (m tuiModel) updateIcingaView(msg tea.KeyMsg) (tuiModel, []tea.Cmd) {
 	case "r", "R":
 		return m, []tea.Cmd{m.client.get("icinga", "/api/icinga/services")}
 	case "s":
-		// Spawn a homelab-agent in the best matching session to investigate the selected alert.
+		// Ask the LLM to pick the best session + role for the selected alert,
+		// then open a pre-filled New Agent modal.
 		var svc *IcingaService
 		if m.icingaFocus == 0 {
 			if m.icingaTopCur < len(m.icingaServices) {
@@ -269,13 +271,56 @@ func (m tuiModel) updateIcingaView(msg tea.KeyMsg) (tuiModel, []tea.Cmd) {
 			m.setFlash("No service selected", false)
 			break
 		}
-		sid := icingaBestSessionID(m.sessions, m.states)
-		if sid == "" {
+		if len(m.sessions) == 0 {
 			m.setFlash("No active session — create one first (N)", true)
 			break
 		}
-		m.modal = newIcingaAgentModal(sid, *svc)
-		m.focus = tuiFocusModal
+		captured := *svc
+		client := m.client
+		sessions := make([]dispatchSession, 0, len(m.sessions))
+		for _, sess := range m.sessions {
+			ds := dispatchSession{ID: sess.ID, Name: sess.Name}
+			if st, ok := m.states[sess.ID]; ok && st.Session.ContextName != nil {
+				ds.ContextName = *st.Session.ContextName
+			}
+			sessions = append(sessions, ds)
+		}
+		stateLabel := map[int]string{0: "OK", 1: "WARNING", 2: "CRITICAL", 3: "UNKNOWN"}
+		alert := dispatchAlert{
+			Host:       captured.Host,
+			Service:    captured.Service,
+			State:      captured.State,
+			StateLabel: stateLabel[captured.State],
+			Output:     captured.Output,
+		}
+		m.setFlash("Picking best agent…", false)
+		return m, []tea.Cmd{func() tea.Msg {
+			body, _ := json.Marshal(dispatchSuggestReq{Alert: alert, Sessions: sessions})
+			raw, err := client.postSync("/api/swarm/suggest-dispatch", body)
+			if err != nil {
+				return tuiDispatchSuggestMsg{svc: captured, err: err}
+			}
+			var resp DispatchSuggestResp
+			if err := json.Unmarshal(raw, &resp); err != nil {
+				return tuiDispatchSuggestMsg{svc: captured, err: err}
+			}
+			if resp.Error != "" {
+				// Server returned a fallback with a warning — still usable.
+				return tuiDispatchSuggestMsg{
+					sessionID: resp.SessionID,
+					role:      resp.Role,
+					mission:   resp.Mission,
+					svc:       captured,
+					err:       fmt.Errorf("LLM unavailable, used fallback: %s", resp.Error),
+				}
+			}
+			return tuiDispatchSuggestMsg{
+				sessionID: resp.SessionID,
+				role:      resp.Role,
+				mission:   resp.Mission,
+				svc:       captured,
+			}
+		}}
 	case "j", "down":
 		if m.icingaFocus == 0 {
 			if m.icingaTopCur < n-1 {

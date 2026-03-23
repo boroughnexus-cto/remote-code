@@ -228,6 +228,16 @@ type agentNote struct {
 	CreatedAt int64  `json:"created_at"`
 }
 
+// tuiDispatchSuggestMsg is returned after a POST /api/swarm/suggest-dispatch call.
+// It carries the LLM-chosen session ID, role, and pre-written mission for the Icinga spawn modal.
+type tuiDispatchSuggestMsg struct {
+	sessionID string
+	role      string
+	mission   string
+	svc       IcingaService // the alert that triggered the suggestion
+	err       error
+}
+
 type tuiErrMsg       struct{ op, text string }
 type tuiDoneMsg      struct{ op string }
 type tuiAttachMsg    struct{ err error }

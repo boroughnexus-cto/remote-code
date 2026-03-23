@@ -204,6 +204,21 @@ func newIcingaAgentModal(sid string, svc IcingaService) *tuiModal {
 	return &tuiModal{kind: tuiModalNewAgent, title: title, fields: fields, sid: sid}
 }
 
+// overrideIcingaModalFields sets the Role (field 1) and Mission (field 2) values
+// on a tuiModalNewAgent modal created by newIcingaAgentModal, replacing the defaults
+// with LLM-chosen values. Safe to call with empty strings (leaves field unchanged).
+func overrideIcingaModalFields(mo *tuiModal, role, mission string) {
+	if mo == nil || mo.kind != tuiModalNewAgent {
+		return
+	}
+	if role != "" && len(mo.fields) > 1 {
+		mo.fields[1].ti.SetValue(role)
+	}
+	if mission != "" && len(mo.fields) > 2 {
+		mo.fields[2].ti.SetValue(mission)
+	}
+}
+
 // newTUIConfirmModal opens a typed-name confirmation modal. The title is the
 // prompt shown above the input. validator returns true iff the typed value
 // should enable the submit button. The caller stores onConfirm in pendingConfirm.
