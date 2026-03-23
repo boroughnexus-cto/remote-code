@@ -102,11 +102,15 @@ func main() {
 	startOrphanSweeper()
 	startDiskUsagePoller()
 	validateIntegrationConfig()
-	go startCIPoller(context.Background())
-	go startPlaneAdapter(context.Background())
-	go startTriagePoller(context.Background())
-	startAutoDispatchLoop(context.Background())
-	go InitDispatchWarm()
+	// Server-level context cancelled on SIGINT/SIGTERM (used by long-running background workers).
+	serverCtx, serverCancel := context.WithCancel(context.Background())
+	defer serverCancel()
+
+	go startCIPoller(serverCtx)
+	go startPlaneAdapter(serverCtx)
+	go startTriagePoller(serverCtx)
+	startAutoDispatchLoop(serverCtx)
+	go InitDispatchWarm(serverCtx)
 
 	// Setup HTTP routes
 	http.HandleFunc("/", serveHome)
