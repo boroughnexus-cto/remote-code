@@ -577,18 +577,106 @@ func (m tuiModel) viewHUD() string {
 
 	left := strings.Join(parts, "  ")
 
-	// Right-align operator's own CC session stats if available.
-	right := m.viewCCUsage()
+	// Right-align usage stats (API-sourced preferred; fall back to statusline CC data).
+	right := m.viewAPIUsage()
+	if right == "" {
+		right = m.viewCCUsage()
+	}
 	if right != "" {
 		leftW := lipgloss.Width(left)
 		rightW := lipgloss.Width(right)
-		gap := m.w - leftW - rightW - 2
+		gap := m.w - leftW - rightW - 4
 		if gap > 0 {
 			left = left + strings.Repeat(" ", gap) + right
 		}
 	}
 
 	return hudStyle.Width(m.w).Render(left)
+}
+
+// viewAPIUsage renders Claude quota + Copilot usage from /api/swarm/usage.
+// Returns empty string if no data has been fetched yet.
+func (m tuiModel) viewAPIUsage() string {
+	u := m.apiUsage
+	// Guard: no data yet (zero-value percent on both with empty fetched_at).
+	if u.FetchedAt == "" {
+		return ""
+	}
+
+	usagePctStyle := func(pct int) lipgloss.Style {
+		switch {
+		case pct >= 80:
+			return lipgloss.NewStyle().Foreground(colorRed).Bold(true)
+		case pct >= 50:
+			return lipgloss.NewStyle().Foreground(colorOrange)
+		default:
+			return dimStyle
+		}
+	}
+	usagePctStyleF := func(pct float64) lipgloss.Style {
+		return usagePctStyle(int(pct))
+	}
+
+	// fmtReset formats a RFC3339 reset time as a compact relative label:
+	//   < 1h  → "45m"
+	//   < 24h → "3h"
+	//   < 7d  → "Mon" (weekday abbreviation)
+	//   else  → "Apr 1"
+	fmtReset := func(ts string) string {
+		if ts == "" {
+			return ""
+		}
+		t, err := time.Parse(time.RFC3339, ts)
+		if err != nil {
+			return ""
+		}
+		dur := time.Until(t)
+		if dur < 0 {
+			return ""
+		}
+		switch {
+		case dur < time.Hour:
+			return fmt.Sprintf("%dm", int(dur.Minutes()))
+		case dur < 24*time.Hour:
+			return fmt.Sprintf("%dh", int(dur.Hours()))
+		case dur < 7*24*time.Hour:
+			return t.In(time.Local).Weekday().String()[:3]
+		default:
+			return t.In(time.Local).Format("Jan 2")
+		}
+	}
+
+	var parts []string
+
+	// Claude section: "cc 10%↺2h  wk 14%↺Thu"
+	sessPct := u.Claude.Session.PercentUsed
+	wkPct := u.Claude.Weekly.PercentUsed
+	sessReset := fmtReset(u.Claude.Session.ResetsAt)
+	wkReset := fmtReset(u.Claude.Weekly.ResetsAt)
+
+	sessStr := usagePctStyle(sessPct).Render(fmt.Sprintf("%d%%", sessPct))
+	if sessReset != "" {
+		sessStr += dimStyle.Render(" ↺ "+sessReset)
+	}
+
+	wkStr := usagePctStyle(wkPct).Render(fmt.Sprintf("%d%%", wkPct))
+	if wkReset != "" {
+		wkStr += dimStyle.Render(" ↺ "+wkReset)
+	}
+
+	ccLabel := dimStyle.Render("cc ")
+	parts = append(parts, ccLabel+sessStr+dimStyle.Render("  wk ")+wkStr)
+
+	// Copilot section: "gh 65.9%↺Apr 1"
+	ghPct := u.Copilot.PremiumPct
+	ghReset := fmtReset(u.Copilot.ResetsAt)
+	ghStr := usagePctStyleF(ghPct).Render(fmt.Sprintf("%.0f%%", ghPct))
+	if ghReset != "" {
+		ghStr += dimStyle.Render(" ↺ "+ghReset)
+	}
+	parts = append(parts, dimStyle.Render("gh ")+ghStr)
+
+	return strings.Join(parts, dimStyle.Render("  "))
 }
 
 // viewCCUsage renders the operator's own Claude Code session stats for the HUD.

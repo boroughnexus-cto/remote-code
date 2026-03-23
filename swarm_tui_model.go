@@ -152,6 +152,9 @@ type tuiModel struct {
 	// Operator's own Claude Code session stats (from ~/.claude/.swarmops-statusline.json)
 	ccUsage tuiCCUsage
 
+	// API-sourced usage stats (Claude quota + Copilot) from /api/swarm/usage
+	apiUsage tuiAPIUsageStats
+
 	// Clients
 	client TUIClient
 	ws     *tuiWSManager
@@ -296,6 +299,7 @@ func (m tuiModel) Init() tea.Cmd {
 		m.client.fetchAll(),
 		m.client.get("icinga", "/api/icinga/services"),
 		fetchCCUsage(),
+		fetchAPIUsage(m.client),
 		waitForWS(m.ws.ch),
 		checkVersionCmd(m.client),
 	)
@@ -381,10 +385,17 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.ccUsage = msg.usage
 		}
 
+	case tuiAPIUsageMsg:
+		if msg.err == nil {
+			m.apiUsage = msg.stats
+		}
+
 	case tuiSlowTickMsg:
 		cmds = append(cmds, tuiSlowTick())
 		// Read operator's own CC session stats from statusline cache.
 		cmds = append(cmds, fetchCCUsage())
+		// Refresh API usage stats every slow tick (~30s), server caches at 5min.
+		cmds = append(cmds, fetchAPIUsage(m.client))
 		// Always refresh Icinga in the background so data is ready when the view opens.
 		cmds = append(cmds, m.client.get("icinga", "/api/icinga/services"))
 		// Background Plane fetch: use the work queue session if open, otherwise the selected session.

@@ -96,14 +96,29 @@ func writeAgentCLAUDE(workDir, sessionID, agentID, role, mission, prompt string)
 
 // waitForClaudeReady polls the tmux pane until Claude Code's prompt is visible
 // (indicated by the ╭ box-drawing character of the welcome UI) or timeout.
+// It also auto-confirms the --dangerously-load-development-channels trust prompt
+// so agents don't stall waiting for human input.
 func waitForClaudeReady(tmuxName string, timeout time.Duration) {
 	deadline := time.Now().Add(timeout)
+	channelsConfirmed := false
 	for time.Now().Before(deadline) {
 		out, err := exec.Command("tmux", "capture-pane", "-t", tmuxName, "-p", "-S", "-10").Output()
 		if err == nil {
 			s := string(out)
 			if strings.Contains(s, "╭") || strings.Contains(s, "> ") || strings.Contains(s, "Welcome to Claude") {
 				return
+			}
+			// Auto-confirm the channels trust prompt that appears with
+			// --dangerously-load-development-channels.  One-shot: only send
+			// Enter once per spawn so we don't spam the pane on every poll.
+			if !channelsConfirmed && (strings.Contains(s, "I am using this for local development") ||
+				(strings.Contains(s, "Enter to confirm") && strings.Contains(s, "Channels:"))) {
+				if err := exec.Command("tmux", "send-keys", "-t", tmuxName, "", "Enter").Run(); err != nil {
+					log.Printf("swarm: channels confirm send-keys %s: %v", tmuxName, err)
+				} else {
+					log.Printf("swarm: auto-confirmed channels trust prompt for %s", tmuxName)
+					channelsConfirmed = true
+				}
 			}
 		}
 		time.Sleep(500 * time.Millisecond)

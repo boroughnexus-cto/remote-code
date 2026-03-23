@@ -113,7 +113,7 @@ type tuiState struct {
 	Escalations []tuiEscalation `json:"escalations"`
 }
 
-// ─── CC Usage ─────────────────────────────────────────────────────────────────
+// ─── CC Usage (statusline cache — kept for backward compat) ───────────────────
 
 // tuiCCUsage holds the operator's own Claude Code session stats, read from
 // ~/.claude/.swarmops-statusline.json (written by the statusline script).
@@ -138,7 +138,6 @@ func fetchCCUsage() tea.Cmd {
 	return func() tea.Msg {
 		data, err := os.ReadFile(ccUsageCacheFile)
 		if err != nil {
-			// File may not exist yet (statusline not triggered); preserve existing state.
 			return tuiCCUsageMsg{err: err}
 		}
 		var u tuiCCUsage
@@ -146,6 +145,48 @@ func fetchCCUsage() tea.Cmd {
 			return tuiCCUsageMsg{err: err}
 		}
 		return tuiCCUsageMsg{usage: u}
+	}
+}
+
+// ─── API Usage Stats ──────────────────────────────────────────────────────────
+
+// tuiAPIQuota mirrors the server-side usageQuotaEntry struct.
+type tuiAPIQuota struct {
+	PercentUsed int    `json:"percent_used"`
+	ResetsAt    string `json:"resets_at"` // RFC3339
+}
+
+// tuiAPIUsageStats mirrors SwarmUsageStats from swarm_usage_stats.go.
+type tuiAPIUsageStats struct {
+	Claude struct {
+		Session tuiAPIQuota `json:"session"`
+		Weekly  tuiAPIQuota `json:"weekly"`
+	} `json:"claude"`
+	Copilot struct {
+		PremiumPct float64 `json:"premium_pct"`
+		ResetsAt   string  `json:"resets_at"`
+		Plan       string  `json:"plan"`
+	} `json:"copilot"`
+	FetchedAt string `json:"fetched_at"`
+	Error     string `json:"error,omitempty"`
+}
+
+type tuiAPIUsageMsg struct {
+	stats tuiAPIUsageStats
+	err   error
+}
+
+func fetchAPIUsage(c TUIClient) tea.Cmd {
+	return func() tea.Msg {
+		data, err := c.getSync("/api/swarm/usage")
+		if err != nil {
+			return tuiAPIUsageMsg{err: err}
+		}
+		var s tuiAPIUsageStats
+		if err := json.Unmarshal(data, &s); err != nil {
+			return tuiAPIUsageMsg{err: err}
+		}
+		return tuiAPIUsageMsg{stats: s}
 	}
 }
 
