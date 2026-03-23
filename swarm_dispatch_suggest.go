@@ -5,10 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"os/exec"
 	"strings"
-	"sync"
-	"time"
 )
 
 // ─── Dispatch suggestion via LLM ──────────────────────────────────────────────
@@ -17,10 +14,12 @@ import (
 // Given an Icinga alert + list of available sessions, asks claude-haiku to pick
 // the most appropriate session and agent role to investigate the alert.
 //
-// Required env var: ANTHROPIC_API_KEY
+// LLM calls are routed through the warm dispatch worker (swarm_dispatch_worker.go)
+// which keeps a persistent `claude --output-format stream-json` process alive
+// between calls and clears its context after each use.
 
 type dispatchSuggestReq struct {
-	Alert    dispatchAlert    `json:"alert"`
+	Alert    dispatchAlert     `json:"alert"`
 	Sessions []dispatchSession `json:"sessions"`
 }
 
@@ -65,12 +64,10 @@ func handleDispatchSuggestAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Query available roles from DB.
 	roles := loadDispatchRoles(r.Context())
 
 	suggestion, err := llmSuggestDispatch(r.Context(), req, roles)
 	if err != nil {
-		// Graceful degradation: return a best-guess rather than an error.
 		suggestion = dispatchFallback(req)
 		suggestion.Error = err.Error()
 	}
@@ -109,33 +106,8 @@ func dispatchDefaultRoles() []string {
 	}
 }
 
-// ─── Warm dispatch session ────────────────────────────────────────────────────
-//
-// dispatchWarm keeps the claude CLI binary warm in the OS page cache so the
-// first real dispatch call doesn't pay the full Node.js cold-start penalty.
-// It also acts as a semaphore so only one dispatch call runs at a time.
-
-var (
-	dispatchWarmOnce sync.Once
-	dispatchSem      = make(chan struct{}, 1) // one concurrent dispatch at a time
-)
-
-// InitDispatchWarm fires a lightweight `claude --version` at server startup to
-// load the Node.js runtime into the OS filesystem cache.  Call with `go`.
-func InitDispatchWarm() {
-	dispatchWarmOnce.Do(func() {
-		dispatchSem <- struct{}{}
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		exec.CommandContext(ctx, "claude", "--version").Run() //nolint:errcheck
-		<-dispatchSem
-	})
-}
-
-// llmSuggestDispatch uses the local `claude` CLI (free, uses subscription quota)
-// to pick the best session and role for an Icinga alert.
+// llmSuggestDispatch routes an Icinga alert to the warm dispatch worker.
 func llmSuggestDispatch(ctx context.Context, req dispatchSuggestReq, roles []string) (DispatchSuggestResp, error) {
-	// Build sessions list for the prompt.
 	var sessLines []string
 	for _, s := range req.Sessions {
 		ctxName := s.ContextName
@@ -179,36 +151,19 @@ Respond with ONLY a JSON object, no markdown, no explanation:
 		strings.Join(roles, ", "),
 	)
 
-	// Acquire semaphore so only one dispatch runs at a time.
-	select {
-	case dispatchSem <- struct{}{}:
-	case <-ctx.Done():
-		return DispatchSuggestResp{}, ctx.Err()
-	}
-	defer func() {
-		<-dispatchSem
-		// Re-warm immediately so the next call starts fast.
-		go func() {
-			wctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			exec.CommandContext(wctx, "claude", "--version").Run() //nolint:errcheck
-		}()
-	}()
-
-	cmd := exec.CommandContext(ctx, "claude", "-p", prompt, "--model", "claude-haiku-4-5-20251001")
-	out, err := cmd.Output()
+	text, err := warmDispatchQuery(ctx, prompt)
 	if err != nil {
-		return DispatchSuggestResp{}, fmt.Errorf("claude dispatch CLI: %w", err)
+		return DispatchSuggestResp{}, err
 	}
 
-	text := strings.TrimSpace(string(out))
 	// Strip any accidental markdown fences.
+	text = strings.TrimSpace(text)
 	text = strings.TrimPrefix(text, "```json")
 	text = strings.TrimPrefix(text, "```")
 	text = strings.TrimSuffix(text, "```")
 	text = strings.TrimSpace(text)
 
-	// claude -p may include conversational text before the JSON; find the first '{'.
+	// Find the first '{' in case there's leading prose.
 	if idx := strings.Index(text, "{"); idx > 0 {
 		text = text[idx:]
 	}
@@ -218,7 +173,7 @@ Respond with ONLY a JSON object, no markdown, no explanation:
 		return DispatchSuggestResp{}, fmt.Errorf("parse suggestion JSON %q: %w", truncStr(text, 80), err)
 	}
 
-	// Validate session_id is one we actually sent.
+	// Validate session_id is one we actually provided.
 	validSession := false
 	for _, s := range req.Sessions {
 		if s.ID == suggestion.SessionID {
