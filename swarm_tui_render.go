@@ -588,7 +588,7 @@ func (m tuiModel) viewHUD() string {
 		}
 	}
 
-	return hudStyle.Width(m.w).Inline(true).Render(left)
+	return hudStyle.Width(m.w).Render(left)
 }
 
 // viewCCUsage renders the operator's own Claude Code session stats for the HUD.

@@ -48,21 +48,16 @@ func startVersionCheck() {
 func checkRemoteVersion() {
 	repoDir := repoDirectory()
 
-	// Fast path: local reflog already knows fork/main or origin/main
-	for _, ref := range []string{"fork/main", "origin/main"} {
-		out, _, err := runGit(repoDir, "rev-parse", "--short", ref)
-		if err == nil && len(strings.TrimSpace(out)) > 0 {
-			setRemoteHead(strings.TrimSpace(out))
-			return
-		}
+	// Fast path: local reflog already knows fork/main
+	out, _, err := runGit(repoDir, "rev-parse", "--short", "fork/main")
+	if err == nil && len(strings.TrimSpace(out)) > 0 {
+		setRemoteHead(strings.TrimSpace(out))
+		return
 	}
 
-	// Slow path: ask the remote (network call, ~1–2 s)
-	for _, remote := range []string{"fork", "origin"} {
-		out, _, err := runGit(repoDir, "ls-remote", remote, "HEAD")
-		if err != nil {
-			continue
-		}
+	// Slow path: ask the fork remote (network call, ~1–2 s)
+	out, _, err = runGit(repoDir, "ls-remote", "fork", "HEAD")
+	if err == nil {
 		// format: "<sha>\tHEAD"
 		if sha, _, ok := strings.Cut(out, "\t"); ok && len(sha) >= 7 {
 			setRemoteHead(sha[:7])
