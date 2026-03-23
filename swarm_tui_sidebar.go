@@ -215,7 +215,9 @@ func (m tuiModel) updateSidebar(msg tea.KeyMsg) (tuiModel, []tea.Cmd) {
 						// session while the user is in the agent session.  ctrl+b,L returns them.
 						sessionName := *agent.TmuxSession
 						cmds = append(cmds, func() tea.Msg {
-							err := exec.Command("tmux", "switch-client", "-t", sessionName).Run()
+							cmd := exec.Command("tmux", "switch-client", "-t", sessionName)
+							cmd.Stdin = os.Stdin // tmux uses ttyname(0) to identify current client; needed for ctrl+b L to work
+							err := cmd.Run()
 							return tuiAttachMsg{err: err}
 						})
 					} else {
