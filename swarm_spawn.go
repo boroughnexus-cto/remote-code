@@ -33,19 +33,23 @@ func loadRolePrompt(ctx context.Context, role string) (prompt string, version in
 	return
 }
 
-// loadSessionContextContent fetches the content of the context assigned to a session.
-// Returns "" if no context is assigned or on any error.
-func loadSessionContextContent(ctx context.Context, sessionID string) string {
-	var content string
-	err := database.QueryRowContext(ctx,
-		`SELECT sc.content FROM session_contexts sc
+type sessionContextData struct {
+	content        string
+	dynamicContext string
+}
+
+// loadSessionContext fetches the static content and dynamic context instructions
+// for the context assigned to the given session. Returns zero-value struct if
+// no context is assigned or on any error. Uses a single SELECT to avoid
+// reading inconsistent versions under concurrent edits.
+func loadSessionContext(ctx context.Context, sessionID string) sessionContextData {
+	var d sessionContextData
+	database.QueryRowContext(ctx,
+		`SELECT sc.content, sc.dynamic_context FROM session_contexts sc
 		 JOIN swarm_sessions ss ON ss.context_id = sc.id
 		 WHERE ss.id = ?`, sessionID,
-	).Scan(&content)
-	if err != nil {
-		return ""
-	}
-	return content
+	).Scan(&d.content, &d.dynamicContext) //nolint:errcheck
+	return d
 }
 
 // writeAgentCLAUDE writes the agent's role prompt + spawn context to CLAUDE.md
@@ -61,10 +65,20 @@ func writeAgentCLAUDE(workDir, sessionID, agentID, role, mission, prompt string)
 	sb.WriteString(prompt)
 	sb.WriteString("\n\n---\n\n")
 
-	// Inject session context if one is assigned.
-	if ctxContent := loadSessionContextContent(context.Background(), sessionID); ctxContent != "" {
+	// Inject session context (static and/or dynamic) if one is assigned.
+	ctx := loadSessionContext(context.Background(), sessionID)
+	if ctx.content != "" {
 		sb.WriteString("## Session Context\n\n")
-		sb.WriteString(ctxContent)
+		sb.WriteString(ctx.content)
+		sb.WriteString("\n\n")
+	}
+	if ctx.content != "" && ctx.dynamicContext != "" {
+		sb.WriteString("---\n\n")
+	}
+	if ctx.dynamicContext != "" {
+		sb.WriteString("## Dynamic Context Instructions\n\n")
+		sb.WriteString("Before starting your primary task, execute the following steps to load up-to-date context. Do not skip these even if the task looks simple:\n\n")
+		sb.WriteString(ctx.dynamicContext)
 		sb.WriteString("\n\n---\n\n")
 	}
 
@@ -1003,6 +1017,7 @@ func ensureSwarmHookScript() {
 func writeAgentClaudeSettings(worktreePath string) error {
 	hookScript := filepath.Join(swarmBaseDir(), "hooks", "agent-stop.sh")
 	settings := map[string]interface{}{
+		"hasTrustDialogAccepted": true,
 		"hooks": map[string]interface{}{
 			"Stop": []map[string]interface{}{
 				{

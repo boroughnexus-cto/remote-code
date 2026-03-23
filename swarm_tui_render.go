@@ -388,6 +388,9 @@ func (m tuiModel) View() string {
 	if m.w == 0 {
 		return "Loading…"
 	}
+	if m.w < tuiSidebarW+12 || m.h < tuiDetailH+tuiInputH+7 {
+		return "Terminal too small — please resize"
+	}
 	if m.helpVisible {
 		return m.viewHelpScreen()
 	}
@@ -399,6 +402,9 @@ func (m tuiModel) View() string {
 	}
 	if m.ctxPicker != nil {
 		return m.viewCtxPicker()
+	}
+	if m.rolePicker != nil {
+		return m.viewRolePicker()
 	}
 	if m.settings != nil {
 		return m.viewSettings()
@@ -568,7 +574,70 @@ func (m tuiModel) viewHUD() string {
 		}
 		parts = append(parts, updateStyle.Render("⬆ update"))
 	}
-	return hudStyle.Width(m.w).Inline(true).Render(strings.Join(parts, "  "))
+
+	left := strings.Join(parts, "  ")
+
+	// Right-align operator's own CC session stats if available.
+	right := m.viewCCUsage()
+	if right != "" {
+		leftW := lipgloss.Width(left)
+		rightW := lipgloss.Width(right)
+		gap := m.w - leftW - rightW - 2
+		if gap > 0 {
+			left = left + strings.Repeat(" ", gap) + right
+		}
+	}
+
+	return hudStyle.Width(m.w).Inline(true).Render(left)
+}
+
+// viewCCUsage renders the operator's own Claude Code session stats for the HUD.
+// Returns empty string if no data is available yet.
+func (m tuiModel) viewCCUsage() string {
+	u := m.ccUsage
+	if u.Model == "" {
+		return ""
+	}
+	var parts []string
+
+	// Model name
+	parts = append(parts, dimStyle.Render("["+u.Model+"]"))
+
+	// Context bar: "ctx ▓▓▒▒▒▒▒▒ 25%"
+	ctxPct := u.ContextPct
+	if ctxPct < 0 {
+		ctxPct = 0
+	}
+	if ctxPct > 100 {
+		ctxPct = 100
+	}
+	filled := ctxPct * 8 / 100
+	bar := strings.Repeat("▓", filled) + strings.Repeat("░", 8-filled)
+	var ctxColor lipgloss.Color
+	switch {
+	case ctxPct >= 90:
+		ctxColor = colorRed
+	case ctxPct >= 70:
+		ctxColor = colorOrange
+	default:
+		ctxColor = colorDim
+	}
+	ctxStr := dimStyle.Render("ctx ") +
+		lipgloss.NewStyle().Foreground(ctxColor).Render(bar) +
+		dimStyle.Render(fmt.Sprintf(" %d%%", ctxPct))
+	parts = append(parts, ctxStr)
+
+	// Tokens
+	if u.Tokens > 0 {
+		parts = append(parts, dimStyle.Render(formatTokensK(u.Tokens)+"tok"))
+	}
+
+	// Cost
+	if u.Cost > 0 {
+		parts = append(parts, dimStyle.Render(formatCostUSD(u.Cost)))
+	}
+
+	return strings.Join(parts, " ")
 }
 
 func (m tuiModel) viewDetail(bodyH int) string {
@@ -644,6 +713,20 @@ func (m tuiModel) viewSessionDetail(w *strings.Builder, sid string, rightW int) 
 			Render(fmt.Sprintf("  %d active goal(s) — /goal <desc> to add more", activeGoals)) + "\n")
 	} else {
 		w.WriteString(dimStyle.Render("  No active goals — /goal <desc> to set one") + "\n")
+	}
+	if sess.ContextName != nil {
+		ctxLine := lipgloss.NewStyle().Foreground(colorTeal).Render("  @"+*sess.ContextName)
+		if sess.ContextHasDynamic {
+			ctxLine += "  " + lipgloss.NewStyle().Foreground(colorOrange).Render("⚡")
+		}
+		w.WriteString(ctxLine + "\n")
+		if sess.ContextSummary != nil {
+			sumLine := *sess.ContextSummary
+			if len(sumLine) > rightW-4 {
+				sumLine = sumLine[:rightW-4] + "…"
+			}
+			w.WriteString(dimStyle.Render("  "+sumLine) + "\n")
+		}
 	}
 	w.WriteString(dimStyle.Render("  n=agent  t=task  r=resume  e=escalations  R=refresh") + "\n")
 }
@@ -1021,8 +1104,9 @@ func (m tuiModel) viewStatusBar() string {
 var keyHelpItems = []string{
 	"↑↓/jk nav", "Enter attach/collapse", "Tab// input", "s spawn", "d stop",
 	"i inject", "N notes", "D delete", "S stage", "+ quick-agent", "n agent",
-	"t task", "c session", "E edit", "T triage", "I icinga", "L log",
-	"e esc", "g goals", "R refresh", "q quit",
+	"t task", "c session", "E edit", "A autopilot", "C context", ": palette",
+	"T triage", "I icinga", "L log", "W queue", "e esc", "g goals",
+	"ctrl+x×2 HALT", "R refresh", "q quit",
 }
 
 // wrapHelpItems packs key hint items into lines that fit within width,
@@ -1149,9 +1233,12 @@ func (m tuiModel) viewHelpScreen() string {
 	sb.WriteString(key("I", "Icinga monitor — services + recent alerts") + "\n")
 	sb.WriteString(key("L", "Event log — full retrospective, agent filter, detail") + "\n")
 	sb.WriteString(key("e", "Escalations — pending human-in-the-loop requests") + "\n")
-	sb.WriteString(key("g", "Goals — goal status + budget tracking") + "\n")
+	sb.WriteString(key("g  G", "Goals — goal status + budget tracking (g=top, G=bottom)") + "\n")
 	sb.WriteString(key("W", "Work queue — Plane backlog") + "\n")
+	sb.WriteString(key("C", "Assign session context (on session item)") + "\n")
+	sb.WriteString(key(":", "Command palette — fuzzy-search all actions") + "\n")
 	sb.WriteString(key("R", "Refresh all data") + "\n")
+	sb.WriteString(key("ctrl+x  (×2)", "Emergency HALT — fleet enters CONTAIN mode (press twice)") + "\n")
 	sb.WriteString(key("Alt+F", "Submit feedback / bug report to Plane (snapshot auto-attached)") + "\n\n")
 
 	sb.WriteString(dim("  Hold ? to keep this screen open · release to dismiss"))

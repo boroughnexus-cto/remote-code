@@ -28,6 +28,8 @@ type SwarmSession struct {
 	AutopilotPlaneProject *string `json:"autopilot_plane_project_id,omitempty"`
 	ContextID             *string `json:"context_id,omitempty"`
 	ContextName           *string `json:"context_name,omitempty"`
+	ContextSummary        *string `json:"context_summary,omitempty"`
+	ContextHasDynamic     bool    `json:"context_has_dynamic,omitempty"`
 	TokenBudget           int64   `json:"token_budget"`
 	TokensUsed            int64   `json:"tokens_used"`
 	CreatedAt             int64   `json:"created_at"`
@@ -300,13 +302,14 @@ func scanNullString(ns sql.NullString) *string {
 
 func getSwarmState(ctx context.Context, sessionID string) (*SwarmState, error) {
 	var session SwarmSession
-	var autopilotPlaneProject, contextID, contextName sql.NullString
-	var autopilotEnabled int
+	var autopilotPlaneProject, contextID, contextName, contextSummary sql.NullString
+	var autopilotEnabled, hasDynamic int
 	err := database.QueryRowContext(ctx,
 		`SELECT ss.id, ss.name, COALESCE(ss.autopilot_enabled,0), COALESCE(ss.autopilot_plane_project_id,''),
 		        COALESCE(ss.token_budget,0), COALESCE(ss.tokens_used,0),
 		        ss.created_at, ss.updated_at,
-		        ss.context_id, sc.name
+		        ss.context_id, sc.name, sc.summary,
+		        CASE WHEN sc.dynamic_context IS NOT NULL AND sc.dynamic_context != '' THEN 1 ELSE 0 END
 		 FROM swarm_sessions ss
 		 LEFT JOIN session_contexts sc ON sc.id = ss.context_id
 		 WHERE ss.id = ?`,
@@ -314,7 +317,7 @@ func getSwarmState(ctx context.Context, sessionID string) (*SwarmState, error) {
 	).Scan(&session.ID, &session.Name, &autopilotEnabled, &autopilotPlaneProject,
 		&session.TokenBudget, &session.TokensUsed,
 		&session.CreatedAt, &session.UpdatedAt,
-		&contextID, &contextName)
+		&contextID, &contextName, &contextSummary, &hasDynamic)
 	session.AutopilotEnabled = autopilotEnabled == 1
 	if autopilotPlaneProject.Valid && autopilotPlaneProject.String != "" {
 		session.AutopilotPlaneProject = &autopilotPlaneProject.String
@@ -325,6 +328,10 @@ func getSwarmState(ctx context.Context, sessionID string) (*SwarmState, error) {
 	if contextName.Valid && contextName.String != "" {
 		session.ContextName = &contextName.String
 	}
+	if contextSummary.Valid && contextSummary.String != "" {
+		session.ContextSummary = &contextSummary.String
+	}
+	session.ContextHasDynamic = hasDynamic == 1
 	if err != nil {
 		return nil, err
 	}
@@ -674,7 +681,8 @@ func handleSwarmSessionsAPI(w http.ResponseWriter, r *http.Request, ctx context.
 		case http.MethodGet:
 			rows, err := database.QueryContext(ctx,
 				`SELECT ss.id, ss.name, ss.created_at, ss.updated_at,
-				        ss.context_id, sc.name
+				        ss.context_id, sc.name, sc.summary,
+				        CASE WHEN sc.dynamic_context IS NOT NULL AND sc.dynamic_context != '' THEN 1 ELSE 0 END
 				 FROM swarm_sessions ss
 				 LEFT JOIN session_contexts sc ON sc.id = ss.context_id
 				 ORDER BY ss.created_at DESC`)
@@ -687,27 +695,46 @@ func handleSwarmSessionsAPI(w http.ResponseWriter, r *http.Request, ctx context.
 			sessions := []SwarmSession{}
 			for rows.Next() {
 				var s SwarmSession
-				var ctxID, ctxName sql.NullString
-				rows.Scan(&s.ID, &s.Name, &s.CreatedAt, &s.UpdatedAt, &ctxID, &ctxName)
+				var ctxID, ctxName, ctxSummary sql.NullString
+				var hasDyn int
+				rows.Scan(&s.ID, &s.Name, &s.CreatedAt, &s.UpdatedAt, &ctxID, &ctxName, &ctxSummary, &hasDyn)
 				if ctxID.Valid && ctxID.String != "" {
 					s.ContextID = &ctxID.String
 				}
 				if ctxName.Valid && ctxName.String != "" {
 					s.ContextName = &ctxName.String
 				}
+				if ctxSummary.Valid && ctxSummary.String != "" {
+					s.ContextSummary = &ctxSummary.String
+				}
+				s.ContextHasDynamic = hasDyn == 1
 				sessions = append(sessions, s)
 			}
 			json.NewEncoder(w).Encode(sessions)
 
 		case http.MethodPost:
 			var req struct {
-				Name     string `json:"name"`
-				Template string `json:"template"` // optional: blank/dev/research/fullstack/devops
+				Name      string `json:"name"`
+				Template  string `json:"template"`   // optional: blank/dev/research/fullstack/devops
+				ContextID string `json:"context_id"` // optional: assign a session context on create
 			}
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
 				w.WriteHeader(http.StatusBadRequest)
 				json.NewEncoder(w).Encode(map[string]string{"error": "name required"})
 				return
+			}
+			// Validate context_id if provided.
+			var contextIDVal interface{}
+			if req.ContextID != "" {
+				var exists int
+				if err := database.QueryRowContext(ctx,
+					"SELECT COUNT(*) FROM session_contexts WHERE id=?", req.ContextID,
+				).Scan(&exists); err != nil || exists == 0 {
+					w.WriteHeader(http.StatusBadRequest)
+					json.NewEncoder(w).Encode(map[string]string{"error": "context_id not found"})
+					return
+				}
+				contextIDVal = req.ContextID
 			}
 			id := generateSwarmID()
 			now := time.Now().Unix()
@@ -720,8 +747,8 @@ func handleSwarmSessionsAPI(w http.ResponseWriter, r *http.Request, ctx context.
 			}
 			defer tx.Rollback() //nolint:errcheck — no-op after Commit
 			if _, err := tx.ExecContext(ctx,
-				"INSERT INTO swarm_sessions (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)",
-				id, req.Name, now, now); err != nil {
+				"INSERT INTO swarm_sessions (id, name, context_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+				id, req.Name, contextIDVal, now, now); err != nil {
 				w.WriteHeader(http.StatusInternalServerError)
 				json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 				return

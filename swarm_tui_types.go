@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"strings"
 	"time"
@@ -11,9 +12,9 @@ import (
 // ─── Layout ───────────────────────────────────────────────────────────────────
 
 const (
-	tuiSidebarW = 32 // left column width
+	tuiSidebarW = 26 // left column width
 	tuiInputH   = 3  // textarea row height
-	tuiDetailH  = 11 // agent/session detail rows in right pane
+	tuiDetailH  = 9  // agent/session detail rows in right pane
 )
 
 // ─── Focus / modal kinds ──────────────────────────────────────────────────────
@@ -71,6 +72,8 @@ type tuiSession struct {
 	AutopilotPlaneProject *string `json:"autopilot_plane_project_id,omitempty"`
 	ContextID             *string `json:"context_id,omitempty"`
 	ContextName           *string `json:"context_name,omitempty"`
+	ContextSummary        *string `json:"context_summary,omitempty"`
+	ContextHasDynamic     bool    `json:"context_has_dynamic,omitempty"`
 }
 
 type tuiEvent struct {
@@ -109,6 +112,42 @@ type tuiState struct {
 	Escalations []tuiEscalation `json:"escalations"`
 }
 
+// ─── CC Usage ─────────────────────────────────────────────────────────────────
+
+// tuiCCUsage holds the operator's own Claude Code session stats, read from
+// ~/.claude/.swarmops-statusline.json (written by the statusline script).
+type tuiCCUsage struct {
+	Model        string  `json:"model"`
+	ContextPct   int     `json:"ctx_pct"`
+	Tokens       int64   `json:"tokens"`
+	Cost         float64 `json:"cost"`
+	LinesAdded   int     `json:"lines_added"`
+	LinesRemoved int     `json:"lines_removed"`
+}
+
+type tuiCCUsageMsg struct {
+	usage tuiCCUsage
+	err   error
+}
+
+// ccUsageCacheFile is the path written by statusline.sh.
+var ccUsageCacheFile = os.ExpandEnv("$HOME/.claude/.swarmops-statusline.json")
+
+func fetchCCUsage() tea.Cmd {
+	return func() tea.Msg {
+		data, err := os.ReadFile(ccUsageCacheFile)
+		if err != nil {
+			// File may not exist yet (statusline not triggered); preserve existing state.
+			return tuiCCUsageMsg{err: err}
+		}
+		var u tuiCCUsage
+		if err := json.Unmarshal(data, &u); err != nil {
+			return tuiCCUsageMsg{err: err}
+		}
+		return tuiCCUsageMsg{usage: u}
+	}
+}
+
 // ─── Messages ─────────────────────────────────────────────────────────────────
 
 type tuiAnimTickMsg struct{}
@@ -125,11 +164,26 @@ type tuiCtxContentEditMsg struct {
 	ctxID      string
 	ctxName    string
 	ctxDesc    string
+	ctxSummary string
 	ctxTags    string
 	tmpPath    string
 	editor     string
 	editorArgs []string
 }
+
+type tuiCtxDynamicEditMsg struct {
+	ctxID      string
+	ctxName    string
+	ctxDesc    string
+	ctxSummary string
+	ctxTags    string
+	tmpPath    string
+	editor     string
+	editorArgs []string
+}
+
+// tuiAutoOpenCtxPickerMsg triggers the context picker on the newest session after creation.
+type tuiAutoOpenCtxPickerMsg struct{}
 
 // resolveEditor reads $VISUAL then $EDITOR, splits into binary + pre-file args.
 // Supports common forms like "code --wait" or "emacsclient -c".

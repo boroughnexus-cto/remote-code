@@ -282,6 +282,34 @@ func (m tuiModel) updateIcingaView(msg tea.KeyMsg) (tuiModel, []tea.Cmd) {
 		} else {
 			m.icingaBotCur = max(0, nb-1)
 		}
+	case "pgup", "ctrl+b":
+		bodyH := m.h - 6
+		if bodyH < 8 {
+			bodyH = 8
+		}
+		topH := bodyH * 60 / 100
+		botH := bodyH - topH
+		if m.icingaFocus == 0 {
+			page := max(1, topH-1)
+			m.icingaTopCur = max(0, m.icingaTopCur-page)
+		} else {
+			page := max(1, botH-1)
+			m.icingaBotCur = max(0, m.icingaBotCur-page)
+		}
+	case "pgdown", "ctrl+f":
+		bodyH := m.h - 6
+		if bodyH < 8 {
+			bodyH = 8
+		}
+		topH := bodyH * 60 / 100
+		botH := bodyH - topH
+		if m.icingaFocus == 0 {
+			page := max(1, topH-1)
+			m.icingaTopCur = min(max(0, n-1), m.icingaTopCur+page)
+		} else {
+			page := max(1, botH-1)
+			m.icingaBotCur = min(max(0, nb-1), m.icingaBotCur+page)
+		}
 	}
 	return m, nil
 }
@@ -482,7 +510,7 @@ func (m tuiModel) viewIcingaScreen() string {
 		}
 	}
 
-	sb.WriteString("\n" + dimStyle.Render("  Tab switch-pane  ·  j/k navigate  ·  g/G first/last  ·  r refresh  ·  q close"))
+	sb.WriteString("\n" + dimStyle.Render("  Tab switch-pane  ·  j/k navigate  ·  PgUp/PgDn page  ·  g/G first/last  ·  r refresh  ·  q close"))
 	return sb.String()
 }
 
@@ -770,8 +798,14 @@ func (m tuiModel) updateGoalView(msg tea.KeyMsg) (tuiModel, []tea.Cmd) {
 	goals := m.states[sid].Goals
 	var cmds []tea.Cmd
 	switch msg.String() {
-	case "g", "esc", "q":
+	case "esc", "q":
 		m.goalView = false
+	case "g":
+		m.goalCursor = 0
+	case "G":
+		if len(goals) > 0 {
+			m.goalCursor = len(goals) - 1
+		}
 	case "up", "k":
 		if m.goalCursor > 0 {
 			m.goalCursor--

@@ -164,7 +164,7 @@ func (m tuiModel) updateSidebar(msg tea.KeyMsg) (tuiModel, []tea.Cmd) {
 	case "esc":
 		// Open settings overlay when no other overlay is active
 		if m.modal == nil && m.settings == nil && !m.opsView && m.cmdPalette == nil {
-			st := newTUISettings()
+			st := newTUISettings(m.client)
 			m.settings = st
 			// Kick off data load for the first active section
 			if st.activeSection() != nil {
@@ -397,8 +397,8 @@ func (m tuiModel) updateSidebar(msg tea.KeyMsg) (tuiModel, []tea.Cmd) {
 	case "n":
 		sid := m.selSessionID()
 		if sid != "" {
-			m.modal = newTUIModal(tuiModalNewAgent, sid)
-			m.focus = tuiFocusModal
+			m.rolePicker = newRolePicker(sid, false)
+			cmds = append(cmds, fetchRolesForPicker(m.client))
 		}
 
 	case "t":
@@ -558,7 +558,7 @@ func (m tuiModel) updateSidebar(msg tea.KeyMsg) (tuiModel, []tea.Cmd) {
 		}
 		if sid != "" {
 			m.ctxPicker = newCtxPicker(sid)
-			cmds = append(cmds, fetchContextsForPicker())
+			cmds = append(cmds, fetchContextsForPicker(m.client))
 		}
 
 	case "o", "O":
@@ -804,8 +804,8 @@ func (m tuiModel) viewSidebar(h int) string {
 			stageStr := lipgloss.NewStyle().Foreground(stageC).Render(fmt.Sprintf("[%-6s]", stageTag))
 			dot, dotStyle := ciDot(task)
 			dotStr := dotStyle.Render(dot)
-			title := truncStr(task.Title, tuiSidebarW-13)
-			row := fmt.Sprintf("  %s %-*s %s", dotStr, tuiSidebarW-13, title, stageStr)
+			title := truncStr(task.Title, tuiSidebarW-12)
+			row := fmt.Sprintf("  %s%-*s %s", dotStr, tuiSidebarW-12, title, stageStr)
 			base := lipgloss.NewStyle().Foreground(colorDim)
 			if sel {
 				base = base.Background(colorSubtle).Foreground(colorText)

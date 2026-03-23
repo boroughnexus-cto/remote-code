@@ -87,6 +87,9 @@ type tuiModel struct {
 	// Generic two-press confirmation (replaces pendingDespawn + pendingDeleteSession)
 	pendingConfirm *pendingConfirmAction
 
+	// ctrl+x requires a second press within one tick to fire the fleet HALT
+	pendingHalt bool
+
 	// Collapsed sessions (sid → true means agents/tasks hidden)
 	collapsedSessions map[string]bool
 
@@ -130,6 +133,11 @@ type tuiModel struct {
 	// Context picker overlay (C on a session)
 	ctxPicker *tuiCtxPickerModel
 
+	// Role picker overlay ('n' new agent; auto after session creation)
+	rolePicker *tuiRolePickerModel
+	// postSessionSID: when set, open role picker after ctx picker closes
+	postSessionSID string
+
 	// Command Palette (: key)
 	cmdPalette *cmdPaletteModel
 
@@ -139,6 +147,9 @@ type tuiModel struct {
 	// Git status cache (agentID → last fetched status)
 	gitStatus    map[string]tuiGitStatus
 	gitFetching  bool
+
+	// Operator's own Claude Code session stats (from ~/.claude/.swarmops-statusline.json)
+	ccUsage tuiCCUsage
 
 	// Clients
 	client TUIClient
@@ -283,6 +294,7 @@ func (m tuiModel) Init() tea.Cmd {
 		tuiSlowTick(),
 		m.client.fetchAll(),
 		m.client.get("icinga", "/api/icinga/services"),
+		fetchCCUsage(),
 		waitForWS(m.ws.ch),
 		checkVersionCmd(m.client),
 	)
@@ -361,8 +373,15 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+	case tuiCCUsageMsg:
+		if msg.err == nil {
+			m.ccUsage = msg.usage
+		}
+
 	case tuiSlowTickMsg:
 		cmds = append(cmds, tuiSlowTick())
+		// Read operator's own CC session stats from statusline cache.
+		cmds = append(cmds, fetchCCUsage())
 		// Always refresh Icinga in the background so data is ready when the view opens.
 		cmds = append(cmds, m.client.get("icinga", "/api/icinga/services"))
 		// Background Plane fetch: use the work queue session if open, otherwise the selected session.
@@ -439,8 +458,8 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.op == "add-note" && m.notesView {
 			cmds = append(cmds, m.client.fetchNotes(m.notesSID, m.notesAgentID))
 		}
-		if (msg.op == "ctx-content" || msg.op == "delete-context") && m.settings != nil {
-			// Reload the Session Contexts settings tab after content edit or delete.
+		if (msg.op == "ctx-content" || msg.op == "ctx-dynamic" || msg.op == "delete-context") && m.settings != nil {
+			// Reload the Session Contexts settings tab after content/dynamic edit or delete.
 			for _, sec := range m.settings.sections {
 				if sc, ok := sec.(*sessionContextsSection); ok {
 					sc.loading = true
@@ -448,6 +467,13 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					break
 				}
 			}
+		}
+		// After session creation, auto-open context picker so user can optionally assign one.
+		if msg.op == "create-session" {
+			// Find the newly created session (first in list after reload)
+			cmds = append(cmds, func() tea.Msg {
+				return tuiAutoOpenCtxPickerMsg{}
+			})
 		}
 		labels := map[string]string{
 			"spawn": "Agent spawned", "despawn": "Agent stopped",
@@ -459,7 +485,8 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			"delete-agent": "Agent deleted", "delete-task": "Task deleted",
 			"cancel-goal": "Goal cancelled", "reactivate-goal": "Goal reactivated",
 			"add-note": "Note added", "set-context": "Context assigned",
-			"ctx-content": "Context content updated", "delete-context": "Context deleted",
+			"ctx-content": "Context content updated", "ctx-dynamic": "Dynamic context updated",
+			"delete-context": "Context deleted",
 		}
 		label := labels[msg.op]
 		if label == "" {
@@ -492,6 +519,13 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.ctxPicker.cursor = 0
 		}
 
+	case tuiRolePickerMsg:
+		if m.rolePicker != nil {
+			m.rolePicker.items = msg.items
+			m.rolePicker.ready = true
+			m.rolePicker.cursor = 0
+		}
+
 	case tuiWorkQueueMsg:
 		m.workQueueItems = msg.items
 		m.workQueueCursor = 0
@@ -500,8 +534,29 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.statusBar.planeReady = true
 		m.updateVP()
 
+	case tuiAutoOpenCtxPickerMsg:
+		// Open the context picker on the most recently created session (first in list).
+		// Fires after fetchAll completes on session create, so m.sessions is populated.
+		if len(m.sessions) > 0 {
+			newest := m.sessions[0]
+			if newest.ContextID == nil {
+				// Context not yet assigned — open ctx picker, then role picker after
+				m.ctxPicker = newCtxPicker(newest.ID)
+				cmds = append(cmds, fetchContextsForPicker(m.client))
+				m.postSessionSID = newest.ID
+			} else {
+				// Already has a context — skip ctx picker, go straight to role picker
+				m.rolePicker = newRolePicker(newest.ID, true)
+				cmds = append(cmds, fetchRolesForPicker(m.client))
+			}
+		}
+
 	case tuiAttachMsg:
-		m.setFlash("Returned from tmux session", false)
+		if msg.err != nil {
+			m.setFlash("tmux switch failed: "+msg.err.Error(), true)
+		} else {
+			m.setFlash("Returned from tmux session", false)
+		}
 		cmds = append(cmds, m.client.fetchAll())
 
 	case tuiRolePromptEditMsg:
@@ -530,10 +585,11 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.setFlash("Role prompt updated: "+msg.role, false)
 
 	case tuiCtxContentEditMsg:
-		// Open $EDITOR for context content, then PUT updated content on close.
+		// Open $EDITOR for static context content, then PUT on close.
 		ctxID := msg.ctxID
 		ctxName := msg.ctxName
 		ctxDesc := msg.ctxDesc
+		ctxSummary := msg.ctxSummary
 		ctxTags := msg.ctxTags
 		tmpPath := msg.tmpPath
 		client := m.client
@@ -549,12 +605,41 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			body, _ := json.Marshal(map[string]string{
 				"name": ctxName, "description": ctxDesc,
-				"content": string(newContent), "tags": ctxTags,
+				"summary": ctxSummary, "content": string(newContent), "tags": ctxTags,
 			})
 			if putErr := client.putSync("/api/swarm/contexts/"+ctxID, body); putErr != nil {
 				return tuiErrMsg{op: "ctx-content", text: putErr.Error()}
 			}
 			return tuiDoneMsg{op: "ctx-content"}
+		}))
+
+	case tuiCtxDynamicEditMsg:
+		// Open $EDITOR for dynamic context instructions, then PUT on close.
+		ctxID := msg.ctxID
+		ctxName := msg.ctxName
+		ctxDesc := msg.ctxDesc
+		ctxSummary := msg.ctxSummary
+		ctxTags := msg.ctxTags
+		tmpPath := msg.tmpPath
+		client := m.client
+		cmd := exec.Command(msg.editor, append(msg.editorArgs, tmpPath)...)
+		cmds = append(cmds, tea.ExecProcess(cmd, func(err error) tea.Msg {
+			defer os.Remove(tmpPath) //nolint:errcheck
+			if err != nil {
+				return tuiErrMsg{op: "ctx-dynamic", text: err.Error()}
+			}
+			newDynamic, readErr := os.ReadFile(tmpPath)
+			if readErr != nil {
+				return tuiErrMsg{op: "ctx-dynamic", text: "could not read temp file: " + readErr.Error()}
+			}
+			body, _ := json.Marshal(map[string]string{
+				"name": ctxName, "description": ctxDesc,
+				"summary": ctxSummary, "dynamic_context": string(newDynamic), "tags": ctxTags,
+			})
+			if putErr := client.putSync("/api/swarm/contexts/"+ctxID, body); putErr != nil {
+				return tuiErrMsg{op: "ctx-dynamic", text: putErr.Error()}
+			}
+			return tuiDoneMsg{op: "ctx-dynamic"}
 		}))
 
 	case tuiVersionMsg:
@@ -629,6 +714,10 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case tea.KeyMsg:
+		// Any key other than ctrl+x cancels the pending-halt confirmation.
+		if msg.String() != "ctrl+x" {
+			m.pendingHalt = false
+		}
 		// : opens command palette from anywhere (except when typing in a text field)
 		if msg.String() == ":" && m.focus != tuiFocusInput && m.cmdPalette == nil &&
 			m.modal == nil && !m.opsView {
@@ -640,11 +729,17 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.cmdPalette = nil
 			break
 		}
-		// ctrl+x global halt — works from anywhere, no menu navigation required
-		if msg.String() == "ctrl+x" {
-			m.opsView = false
-			cmds = append(cmds, postFleetHalt("user"))
-			m.setFlash("⚠ HALT — fleet entering CONTAIN mode", true)
+		// ctrl+x global halt — requires double-press; ignored when typing in input
+		if msg.String() == "ctrl+x" && m.focus != tuiFocusInput {
+			if m.pendingHalt {
+				m.pendingHalt = false
+				m.opsView = false
+				cmds = append(cmds, postFleetHalt("user"))
+				m.setFlash("⚠ HALT — fleet entering CONTAIN mode", true)
+			} else {
+				m.pendingHalt = true
+				m.setFlash("⚠ Press ctrl+x again to HALT the fleet", true)
+			}
 			break
 		}
 		// ? shows hold-to-view help from anywhere; each press resets the hide timer.
@@ -671,6 +766,15 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.ctxPicker != nil {
 			m, cmds = m.updateCtxPicker(msg)
+			// After ctx picker closes, offer role picker if in post-session flow
+			if m.ctxPicker == nil && m.postSessionSID != "" {
+				sid := m.postSessionSID
+				m.postSessionSID = ""
+				m.rolePicker = newRolePicker(sid, true)
+				cmds = append(cmds, fetchRolesForPicker(m.client))
+			}
+		} else if m.rolePicker != nil {
+			m, cmds = m.updateRolePicker(msg)
 		} else if m.cmdPalette != nil {
 			m, cmds = m.updateCmdPalette(msg)
 		} else if m.settings != nil {

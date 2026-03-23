@@ -102,7 +102,15 @@ func (f *fakeClient) putSync(path string, body []byte) error {
 }
 func (f *fakeClient) getSync(path string) ([]byte, error) {
 	f.calls = append(f.calls, fakeCall{method: "GET", path: path})
-	return []byte(`{}`), nil
+	return []byte(`[]`), nil
+}
+func (f *fakeClient) postSync(path string, body []byte) ([]byte, error) {
+	f.calls = append(f.calls, fakeCall{method: "POST", path: path, body: body})
+	return []byte(`{"id":"fake-id"}`), nil
+}
+func (f *fakeClient) deleteSync(path string) error {
+	f.calls = append(f.calls, fakeCall{method: "DELETE", path: path})
+	return nil
 }
 
 // ─── ANSI stripping ───────────────────────────────────────────────────────────
@@ -191,11 +199,13 @@ func keyRune(r rune) tea.KeyMsg     { return tea.KeyMsg{Type: tea.KeyRunes, Rune
 func keyStr(s string) tea.KeyMsg    { return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)} }
 func keyAltRune(r rune) tea.KeyMsg  { return tea.KeyMsg{Type: tea.KeyRunes, Alt: true, Runes: []rune{r}} }
 
-func keyUp() tea.KeyMsg    { return tea.KeyMsg{Type: tea.KeyUp} }
-func keyDown() tea.KeyMsg  { return tea.KeyMsg{Type: tea.KeyDown} }
-func keyEnter() tea.KeyMsg { return tea.KeyMsg{Type: tea.KeyEnter} }
-func keyEsc() tea.KeyMsg   { return tea.KeyMsg{Type: tea.KeyEsc} }
-func keyTab() tea.KeyMsg   { return tea.KeyMsg{Type: tea.KeyTab} }
+func keyUp() tea.KeyMsg       { return tea.KeyMsg{Type: tea.KeyUp} }
+func keyDown() tea.KeyMsg     { return tea.KeyMsg{Type: tea.KeyDown} }
+func keyEnter() tea.KeyMsg    { return tea.KeyMsg{Type: tea.KeyEnter} }
+func keyEsc() tea.KeyMsg      { return tea.KeyMsg{Type: tea.KeyEsc} }
+func keyTab() tea.KeyMsg      { return tea.KeyMsg{Type: tea.KeyTab} }
+func keyShiftTab() tea.KeyMsg { return tea.KeyMsg{Type: tea.KeyShiftTab} }
+func keyCtrlX() tea.KeyMsg    { return tea.KeyMsg{Type: tea.KeyCtrlX} }
 
 // ─── View assertion helpers ───────────────────────────────────────────────────
 

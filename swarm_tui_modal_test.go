@@ -35,6 +35,26 @@ func openModal(t *testing.T, m tuiModel, key rune) tuiModel {
 	return m
 }
 
+// openAgentModal presses 'n' (opens role picker) then Enter (selects Custom…)
+// to open the new-agent modal. Use this instead of openModal(t, m, 'n') since
+// 'n' now routes through the role picker before opening the modal.
+func openAgentModal(t *testing.T, m tuiModel) tuiModel {
+	t.Helper()
+	m = drive(m, keyRune('n'))
+	if m.rolePicker == nil {
+		t.Fatal("expected role picker to open after 'n'")
+	}
+	// Press Enter with empty items list → Custom… → opens modal
+	m = drive(m, keyEnter())
+	if m.modal == nil {
+		t.Fatalf("expected modal to open after Enter in role picker, got nil")
+	}
+	if m.focus != tuiFocusModal {
+		t.Fatalf("focus should be tuiFocusModal, got %v", m.focus)
+	}
+	return m
+}
+
 // typeInModal sends a string to the currently focused modal field.
 func typeInModal(m tuiModel, text string) tuiModel {
 	return drive(m, keyStr(text))
@@ -141,14 +161,14 @@ func TestModal_EmptyNameBlocksSubmit(t *testing.T) {
 	_ = cmd // don't care about focus cmds
 }
 
-// ─── US-M.4: n opens new-agent modal ─────────────────────────────────────────
+// ─── US-M.4: n opens role picker then new-agent modal ────────────────────────
 
 func TestModal_NewAgentOpens(t *testing.T) {
 	sessions, states := stdSessions()
 	m := newTestModel(sessions, states)
 
 	// Cursor starts at the first session — valid context for new agent.
-	m = openModal(t, m, 'n')
+	m = openAgentModal(t, m)
 	if m.modal.kind != tuiModalNewAgent {
 		t.Errorf("modal kind: want tuiModalNewAgent, got %v", m.modal.kind)
 	}
@@ -161,7 +181,7 @@ func TestModal_NewAgentSubmitFiresCommand(t *testing.T) {
 	fc := newFakeClient()
 	m := newTestModelWithClient(sessions, states, fc)
 
-	m = openModal(t, m, 'n')
+	m = openAgentModal(t, m)
 	m = typeInModal(m, "Charlie")
 
 	// New-agent has 5 fields (Name, Role, Mission, Project, RepoPath).
@@ -249,7 +269,7 @@ func TestModal_TabAdvancesField(t *testing.T) {
 	sessions, states := stdSessions()
 	m := newTestModel(sessions, states)
 
-	m = openModal(t, m, 'n') // 5-field new-agent modal
+	m = openAgentModal(t, m) // role picker → 5-field new-agent modal
 	initialCursor := m.modal.cursor // should be 0
 
 	m = drive(m, keyTab())

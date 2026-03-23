@@ -30,6 +30,8 @@ type TUIClient interface {
 	deleteItem(op, path string) tea.Cmd
 	putSync(path string, body []byte) error
 	getSync(path string) ([]byte, error)
+	postSync(path string, body []byte) ([]byte, error)
+	deleteSync(path string) error
 }
 
 // ─── API client ───────────────────────────────────────────────────────────────
@@ -72,6 +74,30 @@ func (c *swarmClient) do(method, path string, body interface{}) ([]byte, int, er
 func (c *swarmClient) getSync(path string) ([]byte, error) {
 	b, _, err := c.do("GET", path, nil)
 	return b, err
+}
+
+// postSync performs a synchronous POST and returns the response body.
+func (c *swarmClient) postSync(path string, body []byte) ([]byte, error) {
+	b, status, err := c.do("POST", path, json.RawMessage(body))
+	if err != nil {
+		return nil, err
+	}
+	if status >= 400 {
+		return nil, fmt.Errorf("POST %s: %d %s", path, status, string(b))
+	}
+	return b, nil
+}
+
+// deleteSync performs a synchronous DELETE.
+func (c *swarmClient) deleteSync(path string) error {
+	b, status, err := c.do("DELETE", path, nil)
+	if err != nil {
+		return err
+	}
+	if status >= 400 {
+		return fmt.Errorf("DELETE %s: %d %s", path, status, string(b))
+	}
+	return nil
 }
 
 // putSync performs a synchronous PUT with a raw JSON body.

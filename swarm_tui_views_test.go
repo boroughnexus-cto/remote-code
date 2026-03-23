@@ -7,8 +7,11 @@
 //   US-V.4  L opens event log view; q closes it
 //   US-V.5  T opens triage view; q closes it
 //   US-V.6  N opens notes view when an agent is selected; q closes it
-//   US-V.7  Escalation view opens on E key (agent selected); q closes it
+//   US-V.7  e opens escalation view; q/esc closes it
 //   US-V.8  Only one overlay is open at a time
+//   US-V.9  C opens context picker; esc closes it
+//   US-V.10 Context picker renders title; esc sends no PATCH command
+//   US-V.11 Context picker Enter on items fires set-context PATCH
 
 package main
 
@@ -170,7 +173,123 @@ func TestViews_NotesViewClosesOnQ(t *testing.T) {
 	}
 }
 
-// ─── US-V.7: Icinga view ──────────────────────────────────────────────────────
+// ─── US-V.7: Escalation view ─────────────────────────────────────────────────
+
+func TestViews_EscalationViewOpens(t *testing.T) {
+	sessions, states := stdSessions()
+	m := newTestModel(sessions, states)
+
+	m = drive(m, keyRune('e'))
+	if !m.escView {
+		t.Error("escView should be true after e")
+	}
+}
+
+func TestViews_EscalationViewClosesOnQ(t *testing.T) {
+	sessions, states := stdSessions()
+	m := newTestModel(sessions, states)
+
+	m = drive(m, keyRune('e'), keyRune('q'))
+	if m.escView {
+		t.Error("escView should be false after q")
+	}
+}
+
+func TestViews_EscalationViewClosesOnEsc(t *testing.T) {
+	sessions, states := stdSessions()
+	m := newTestModel(sessions, states)
+
+	m = drive(m, keyRune('e'))
+	m = drive(m, keyEsc())
+	if m.escView {
+		t.Error("escView should be false after esc")
+	}
+}
+
+// ─── US-V.9: Context picker ───────────────────────────────────────────────────
+
+// openCtxPicker navigates to a session item then presses C to open the picker.
+// The Control Tower is always at cursor 0; cursor 1 is the first session.
+func openCtxPicker(m tuiModel) tuiModel {
+	return drive(m, keyDown(), keyRune('C'))
+}
+
+func TestViews_CtxPickerOpens(t *testing.T) {
+	sessions, states := stdSessions()
+	m := newTestModel(sessions, states)
+
+	m = openCtxPicker(m)
+	if m.ctxPicker == nil {
+		t.Error("ctxPicker should open after navigating to session and pressing C")
+	}
+}
+
+func TestViews_CtxPickerClosesOnEsc(t *testing.T) {
+	sessions, states := stdSessions()
+	m := newTestModel(sessions, states)
+
+	m = openCtxPicker(m)
+	m = drive(m, keyEsc())
+	if m.ctxPicker != nil {
+		t.Error("ctxPicker should be nil after esc")
+	}
+}
+
+func TestViews_CtxPickerRendersTitle(t *testing.T) {
+	sessions, states := stdSessions()
+	m := newTestModel(sessions, states)
+
+	m = openCtxPicker(m)
+	assertView(t, m, "Assign Session Context")
+}
+
+func TestViews_CtxPickerEscNoPatch(t *testing.T) {
+	sessions, states := stdSessions()
+	fc := newFakeClient()
+	m := newTestModelWithClient(sessions, states, fc)
+
+	callsBefore := len(fc.calls)
+	m = openCtxPicker(m)
+	m = drive(m, keyEsc())
+	for _, c := range fc.calls[callsBefore:] {
+		if c.method == "PATCH" {
+			t.Errorf("unexpected PATCH after esc: %+v", c)
+		}
+	}
+}
+
+// ─── US-V.11: Context picker Enter fires set-context PATCH ───────────────────
+
+func TestViews_CtxPickerEnterFiresPatch(t *testing.T) {
+	sessions, states := stdSessions()
+	fc := newFakeClient()
+	m := newTestModelWithClient(sessions, states, fc)
+
+	m = openCtxPicker(m)
+	// Inject one context item.
+	m = drive(m, tuiCtxPickerMsg{items: []ctxPickerItem{
+		{id: "ctx-001", name: "Production", description: "Prod context"},
+	}})
+	_, cmds := driveCapture(m, keyEnter())
+
+	// The PATCH call should be recorded in fakeClient.
+	patchCalls := fc.callsForOp("set-context")
+	if len(patchCalls) > 0 {
+		return // recorded synchronously — pass
+	}
+	// Or returned as a cmd.
+	for _, cmd := range cmds {
+		if cmd != nil {
+			msg := cmd()
+			if done, ok := msg.(tuiDoneMsg); ok && done.op == "set-context" {
+				return
+			}
+		}
+	}
+	t.Error("expected set-context PATCH after Enter on context item")
+}
+
+// ─── US-V.7 (Icinga): Icinga view ─────────────────────────────────────────────
 
 func TestViews_IcingaViewOpens(t *testing.T) {
 	sessions, states := stdSessions()

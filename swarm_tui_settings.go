@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -13,6 +12,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
+
 
 // ─── Settings Overlay ─────────────────────────────────────────────────────────
 //
@@ -52,11 +52,11 @@ type tuiSettingsModel struct {
 	active   int // index of active section
 }
 
-func newTUISettings() *tuiSettingsModel {
+func newTUISettings(client TUIClient) *tuiSettingsModel {
 	return &tuiSettingsModel{
 		sections: []SettingsSectionModel{
-			newPersonasSection(),
-			newSessionContextsSection(),
+			newPersonasSection(client),
+			newSessionContextsSection(client),
 			newSwarmConfigSection(),
 			newIntegrationsSection(),
 		},
@@ -186,6 +186,7 @@ func (m tuiModel) viewSettings() string {
 // ─── Section: Agent Personas ──────────────────────────────────────────────────
 
 type personasSection struct {
+	client  TUIClient
 	items   []personaItem
 	cursor  int
 	loading bool
@@ -204,7 +205,9 @@ type personasLoadedMsg struct {
 	err   error
 }
 
-func newPersonasSection() *personasSection { return &personasSection{loading: true} }
+func newPersonasSection(client TUIClient) *personasSection {
+	return &personasSection{client: client, loading: true}
+}
 func (s *personasSection) Title() string   { return "Agent Personas" }
 func (s *personasSection) IsDirty() bool   { return false }
 func (s *personasSection) Commit() tea.Cmd { return nil }
@@ -212,20 +215,23 @@ func (s *personasSection) Discard()        {}
 
 func (s *personasSection) Init() tea.Cmd {
 	s.loading = true
+	client := s.client
 	return func() tea.Msg {
-		rows, err := database.QueryContext(context.Background(),
-			"SELECT role, prompt, version FROM swarm_role_prompts ORDER BY role")
+		b, err := client.getSync("/api/swarm/role-prompts")
 		if err != nil {
 			return personasLoadedMsg{err: err}
 		}
-		defer rows.Close()
-		var items []personaItem
-		for rows.Next() {
-			var pi personaItem
-			if err := rows.Scan(&pi.role, &pi.prompt, &pi.version); err != nil {
-				return personasLoadedMsg{err: err}
-			}
-			items = append(items, pi)
+		var raw []struct {
+			Role    string `json:"role"`
+			Prompt  string `json:"prompt"`
+			Version int    `json:"version"`
+		}
+		if err := json.Unmarshal(b, &raw); err != nil {
+			return personasLoadedMsg{err: err}
+		}
+		items := make([]personaItem, 0, len(raw))
+		for _, r := range raw {
+			items = append(items, personaItem{role: r.Role, prompt: r.Prompt, version: r.Version})
 		}
 		return personasLoadedMsg{items: items}
 	}
@@ -240,6 +246,24 @@ func (s *personasSection) Update(msg tea.KeyMsg) (SettingsSectionModel, []tea.Cm
 	case "down", "j":
 		if s.cursor < len(s.items)-1 {
 			s.cursor++
+		}
+	case "e":
+		if s.cursor < len(s.items) {
+			item := s.items[s.cursor]
+			roleCapture := item.role
+			promptCapture := item.prompt
+			cmd := func() tea.Msg {
+				f, err := os.CreateTemp("", "swarmops-prompt-*.md")
+				if err != nil {
+					return tuiErrMsg{op: "role-prompts", text: err.Error()}
+				}
+				tmpPath := f.Name()
+				f.WriteString(promptCapture) //nolint:errcheck
+				f.Close()
+				editorBin, editorArgs := resolveEditor()
+				return tuiRolePromptEditMsg{role: roleCapture, tmpPath: tmpPath, editor: editorBin, editorArgs: editorArgs}
+			}
+			return s, []tea.Cmd{cmd}
 		}
 	}
 	return s, nil
@@ -313,14 +337,17 @@ func applyPersonasLoaded(m *tuiModel, msg personasLoadedMsg) {
 // ─── Section: Session Contexts ────────────────────────────────────────────────
 
 type sessionContext struct {
-	id          string
-	name        string
-	description string
-	content     string
-	tags        string
+	id             string
+	name           string
+	description    string
+	summary        string
+	content        string
+	dynamicContext string
+	tags           string
 }
 
 type sessionContextsSection struct {
+	client  TUIClient
 	items   []sessionContext
 	cursor  int
 	loading bool
@@ -329,8 +356,8 @@ type sessionContextsSection struct {
 	// Edit state
 	editing   bool
 	editIdx   int // index in items being edited
-	editField int // 0=name,1=description,2=tags
-	fields    [3]textinput.Model
+	editField int // 0=name,1=description,2=summary,3=tags
+	fields    [4]textinput.Model
 	draft     sessionContext
 	dirty     bool
 }
@@ -345,8 +372,8 @@ type sessionContextSavedMsg struct {
 	err error
 }
 
-func newSessionContextsSection() *sessionContextsSection {
-	s := &sessionContextsSection{loading: true}
+func newSessionContextsSection(client TUIClient) *sessionContextsSection {
+	s := &sessionContextsSection{client: client, loading: true}
 	for i := range s.fields {
 		ti := textinput.New()
 		ti.CharLimit = 300
@@ -354,7 +381,8 @@ func newSessionContextsSection() *sessionContextsSection {
 	}
 	s.fields[0].Placeholder = "context name"
 	s.fields[1].Placeholder = "one-line description"
-	s.fields[2].Placeholder = "tags (comma-separated)"
+	s.fields[2].Placeholder = "1-2 line summary shown in picker and right panel"
+	s.fields[3].Placeholder = "tags (comma-separated)"
 	return s
 }
 
@@ -367,23 +395,31 @@ func (s *sessionContextsSection) Discard() {
 
 func (s *sessionContextsSection) Init() tea.Cmd {
 	s.loading = true
+	client := s.client
 	return func() tea.Msg {
-		rows, err := database.QueryContext(context.Background(),
-			"SELECT id, name, description, content, tags FROM session_contexts ORDER BY name")
+		b, err := client.getSync("/api/swarm/contexts")
 		if err != nil {
 			return sessionContextsLoadedMsg{err: err}
 		}
-		defer rows.Close()
-		var items []sessionContext
-		for rows.Next() {
-			var sc sessionContext
-			var desc, tags sql.NullString
-			if err := rows.Scan(&sc.id, &sc.name, &desc, &sc.content, &tags); err != nil {
-				return sessionContextsLoadedMsg{err: err}
-			}
-			sc.description = desc.String
-			sc.tags = tags.String
-			items = append(items, sc)
+		var raw []struct {
+			ID             string `json:"id"`
+			Name           string `json:"name"`
+			Description    string `json:"description"`
+			Summary        string `json:"summary"`
+			Content        string `json:"content"`
+			DynamicContext string `json:"dynamic_context"`
+			Tags           string `json:"tags"`
+		}
+		if err := json.Unmarshal(b, &raw); err != nil {
+			return sessionContextsLoadedMsg{err: err}
+		}
+		items := make([]sessionContext, 0, len(raw))
+		for _, r := range raw {
+			items = append(items, sessionContext{
+				id: r.ID, name: r.Name, description: r.Description,
+				summary: r.Summary, content: r.Content,
+				dynamicContext: r.DynamicContext, tags: r.Tags,
+			})
 		}
 		return sessionContextsLoadedMsg{items: items}
 	}
@@ -391,31 +427,32 @@ func (s *sessionContextsSection) Init() tea.Cmd {
 
 func (s *sessionContextsSection) Commit() tea.Cmd {
 	sc := s.draft
+	client := s.client
 	return func() tea.Msg {
-		var id string
+		body, _ := json.Marshal(map[string]string{
+			"name": sc.name, "description": sc.description,
+			"summary": sc.summary, "content": sc.content,
+			"dynamic_context": sc.dynamicContext, "tags": sc.tags,
+		})
 		if sc.id == "" {
-			// Insert
-			err := database.QueryRowContext(context.Background(),
-				`INSERT INTO session_contexts (name, description, content, tags)
-				 VALUES (?, ?, ?, ?) RETURNING id`,
-				sc.name, sc.description, sc.content, sc.tags,
-			).Scan(&id)
+			// Create
+			resp, err := client.postSync("/api/swarm/contexts", body)
 			if err != nil {
 				return sessionContextSavedMsg{err: err}
 			}
-		} else {
-			// Update
-			_, err := database.ExecContext(context.Background(),
-				`UPDATE session_contexts SET name=?, description=?, content=?, tags=?, updated_at=unixepoch()
-				 WHERE id=?`,
-				sc.name, sc.description, sc.content, sc.tags, sc.id,
-			)
-			if err != nil {
+			var result struct {
+				ID string `json:"id"`
+			}
+			if err := json.Unmarshal(resp, &result); err != nil {
 				return sessionContextSavedMsg{err: err}
 			}
-			id = sc.id
+			return sessionContextSavedMsg{id: result.ID}
 		}
-		return sessionContextSavedMsg{id: id}
+		// Update
+		if err := client.putSync("/api/swarm/contexts/"+sc.id, body); err != nil {
+			return sessionContextSavedMsg{err: err}
+		}
+		return sessionContextSavedMsg{id: sc.id}
 	}
 }
 
@@ -439,6 +476,7 @@ func (s *sessionContextsSection) Update(msg tea.KeyMsg) (SettingsSectionModel, [
 		s.fields[0].SetValue("")
 		s.fields[1].SetValue("")
 		s.fields[2].SetValue("")
+		s.fields[3].SetValue("")
 		s.fields[0].Focus()
 		s.editField = 0
 		s.editing = true
@@ -449,7 +487,8 @@ func (s *sessionContextsSection) Update(msg tea.KeyMsg) (SettingsSectionModel, [
 			s.editIdx = s.cursor
 			s.fields[0].SetValue(sc.name)
 			s.fields[1].SetValue(sc.description)
-			s.fields[2].SetValue(sc.tags)
+			s.fields[2].SetValue(sc.summary)
+			s.fields[3].SetValue(sc.tags)
 			s.fields[0].Focus()
 			s.editField = 0
 			s.editing = true
@@ -457,10 +496,9 @@ func (s *sessionContextsSection) Update(msg tea.KeyMsg) (SettingsSectionModel, [
 	case "d", "delete":
 		if len(s.items) > 0 {
 			id := s.items[s.cursor].id
+			client := s.client
 			return s, []tea.Cmd{func() tea.Msg {
-				_, err := database.ExecContext(context.Background(),
-					"DELETE FROM session_contexts WHERE id=?", id)
-				if err != nil {
+				if err := client.deleteSync("/api/swarm/contexts/" + id); err != nil {
 					return tuiErrMsg{op: "delete-context", text: err.Error()}
 				}
 				return tuiDoneMsg{op: "delete-context"}
@@ -483,7 +521,7 @@ func (s *sessionContextsSection) updateEditing(msg tea.KeyMsg) (SettingsSectionM
 		s.editField = (s.editField - 1 + len(s.fields)) % len(s.fields)
 		s.fields[s.editField].Focus()
 	case "ctrl+e":
-		// Open content in $EDITOR — only for existing (saved) contexts
+		// Open static content in $EDITOR — only for existing (saved) contexts
 		if s.draft.id == "" {
 			break // must save metadata first
 		}
@@ -494,11 +532,11 @@ func (s *sessionContextsSection) updateEditing(msg tea.KeyMsg) (SettingsSectionM
 		f.WriteString(s.draft.content) //nolint:errcheck
 		f.Close()
 		tmpPath := f.Name()
-		// Snapshot draft fields before suspending
 		ctxID := s.draft.id
 		ctxName := strings.TrimSpace(s.fields[0].Value())
 		ctxDesc := strings.TrimSpace(s.fields[1].Value())
-		ctxTags := strings.TrimSpace(s.fields[2].Value())
+		ctxSummary := strings.TrimSpace(s.fields[2].Value())
+		ctxTags := strings.TrimSpace(s.fields[3].Value())
 		if ctxName == "" {
 			ctxName = s.draft.name
 		}
@@ -508,6 +546,41 @@ func (s *sessionContextsSection) updateEditing(msg tea.KeyMsg) (SettingsSectionM
 				ctxID:      ctxID,
 				ctxName:    ctxName,
 				ctxDesc:    ctxDesc,
+				ctxSummary: ctxSummary,
+				ctxTags:    ctxTags,
+				tmpPath:    tmpPath,
+				editor:     editorBin,
+				editorArgs: editorArgs,
+			}
+		}}
+
+	case "ctrl+d":
+		// Open dynamic_context in $EDITOR — only for existing (saved) contexts
+		if s.draft.id == "" {
+			break // must save metadata first
+		}
+		f, err := os.CreateTemp("", "swarm-ctx-dyn-*.md")
+		if err != nil {
+			break
+		}
+		f.WriteString(s.draft.dynamicContext) //nolint:errcheck
+		f.Close()
+		tmpPath := f.Name()
+		ctxID := s.draft.id
+		ctxName := strings.TrimSpace(s.fields[0].Value())
+		ctxDesc := strings.TrimSpace(s.fields[1].Value())
+		ctxSummary := strings.TrimSpace(s.fields[2].Value())
+		ctxTags := strings.TrimSpace(s.fields[3].Value())
+		if ctxName == "" {
+			ctxName = s.draft.name
+		}
+		editorBin, editorArgs := resolveEditor()
+		return s, []tea.Cmd{func() tea.Msg {
+			return tuiCtxDynamicEditMsg{
+				ctxID:      ctxID,
+				ctxName:    ctxName,
+				ctxDesc:    ctxDesc,
+				ctxSummary: ctxSummary,
 				ctxTags:    ctxTags,
 				tmpPath:    tmpPath,
 				editor:     editorBin,
@@ -524,7 +597,8 @@ func (s *sessionContextsSection) updateEditing(msg tea.KeyMsg) (SettingsSectionM
 			// Save: update draft from fields
 			s.draft.name = strings.TrimSpace(s.fields[0].Value())
 			s.draft.description = strings.TrimSpace(s.fields[1].Value())
-			s.draft.tags = strings.TrimSpace(s.fields[2].Value())
+			s.draft.summary = strings.TrimSpace(s.fields[2].Value())
+			s.draft.tags = strings.TrimSpace(s.fields[3].Value())
 			if s.draft.name != "" {
 				s.dirty = true
 				cmd := s.Commit()
@@ -584,6 +658,16 @@ func (s *sessionContextsSection) View(w, h int) string {
 			}
 			sb.WriteString(cursor + nameStyle.Render(fmt.Sprintf("%-20s", sc.name)) +
 				"  " + dimStyle.Render(desc) + "\n")
+			if sc.summary != "" {
+				sumLine := sc.summary
+				if len(sumLine) > w-6 {
+					sumLine = sumLine[:w-6] + "…"
+				}
+				sb.WriteString("    " + dimStyle.Render(sumLine) + "\n")
+			}
+			if sc.dynamicContext != "" {
+				sb.WriteString("    " + lipgloss.NewStyle().Foreground(colorOrange).Render("⚡ dynamic context") + "\n")
+			}
 			if sc.tags != "" {
 				sb.WriteString("    " + dimStyle.Render("tags: "+sc.tags) + "\n")
 			}
@@ -603,7 +687,7 @@ func (s *sessionContextsSection) viewEditing(w int) string {
 		sb.WriteString(lipgloss.NewStyle().Foreground(colorTeal).Bold(true).Render("Edit: "+s.draft.name) + "\n\n")
 	}
 
-	labels := []string{"Name", "Description", "Tags"}
+	labels := []string{"Name", "Description", "Summary", "Tags"}
 	for i, f := range s.fields {
 		cursor := "  "
 		if i == s.editField {
@@ -614,9 +698,10 @@ func (s *sessionContextsSection) viewEditing(w int) string {
 	}
 
 	if s.draft.id != "" {
-		sb.WriteString(dimStyle.Render("Ctrl+E  edit full content in $EDITOR") + "\n\n")
+		sb.WriteString(dimStyle.Render("Ctrl+E  edit static content in $EDITOR") + "\n")
+		sb.WriteString(dimStyle.Render("Ctrl+D  edit dynamic context in $EDITOR") + "\n\n")
 	} else {
-		sb.WriteString(dimStyle.Render("Save metadata first, then Ctrl+E to edit full content") + "\n\n")
+		sb.WriteString(dimStyle.Render("Save metadata first, then Ctrl+E/Ctrl+D to edit content") + "\n\n")
 	}
 	sb.WriteString(dimStyle.Render("Tab/↑↓ next field  Enter save (on last field)  Esc cancel"))
 	return sb.String()
@@ -669,7 +754,7 @@ func handleSessionContextsAPI(w http.ResponseWriter, r *http.Request, pathParts 
 		switch r.Method {
 		case http.MethodGet:
 			rows, err := database.QueryContext(ctx,
-				"SELECT id, name, description, content, tags, created_at, updated_at FROM session_contexts ORDER BY name")
+				"SELECT id, name, description, summary, content, dynamic_context, tags, created_at, updated_at FROM session_contexts ORDER BY name")
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
@@ -678,14 +763,15 @@ func handleSessionContextsAPI(w http.ResponseWriter, r *http.Request, pathParts 
 			var result []map[string]interface{}
 			for rows.Next() {
 				var id, name, content string
-				var desc, tags sql.NullString
+				var desc, summary, dynCtx, tags sql.NullString
 				var createdAt, updatedAt int64
-				if err := rows.Scan(&id, &name, &desc, &content, &tags, &createdAt, &updatedAt); err != nil {
+				if err := rows.Scan(&id, &name, &desc, &summary, &content, &dynCtx, &tags, &createdAt, &updatedAt); err != nil {
 					continue
 				}
 				result = append(result, map[string]interface{}{
 					"id": id, "name": name, "description": desc.String,
-					"content": content, "tags": tags.String,
+					"summary": summary.String, "content": content,
+					"dynamic_context": dynCtx.String, "tags": tags.String,
 					"created_at": createdAt, "updated_at": updatedAt,
 				})
 			}
@@ -697,10 +783,12 @@ func handleSessionContextsAPI(w http.ResponseWriter, r *http.Request, pathParts 
 
 		case http.MethodPost:
 			var body struct {
-				Name        string `json:"name"`
-				Description string `json:"description"`
-				Content     string `json:"content"`
-				Tags        string `json:"tags"`
+				Name           string `json:"name"`
+				Description    string `json:"description"`
+				Summary        string `json:"summary"`
+				Content        string `json:"content"`
+				DynamicContext string `json:"dynamic_context"`
+				Tags           string `json:"tags"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Name == "" {
 				http.Error(w, "name required", http.StatusBadRequest)
@@ -708,9 +796,9 @@ func handleSessionContextsAPI(w http.ResponseWriter, r *http.Request, pathParts 
 			}
 			var id string
 			err := database.QueryRowContext(ctx,
-				`INSERT INTO session_contexts (name, description, content, tags)
-				 VALUES (?, ?, ?, ?) RETURNING id`,
-				body.Name, body.Description, body.Content, body.Tags,
+				`INSERT INTO session_contexts (name, description, summary, content, dynamic_context, tags)
+				 VALUES (?, ?, ?, ?, ?, ?) RETURNING id`,
+				body.Name, body.Description, body.Summary, body.Content, body.DynamicContext, body.Tags,
 			).Scan(&id)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -730,10 +818,10 @@ func handleSessionContextsAPI(w http.ResponseWriter, r *http.Request, pathParts 
 	switch r.Method {
 	case http.MethodGet:
 		var sc sessionContext
-		var desc, tags sql.NullString
+		var desc, summary, dynCtx, tags sql.NullString
 		err := database.QueryRowContext(ctx,
-			"SELECT id, name, description, content, tags FROM session_contexts WHERE id=?", id,
-		).Scan(&sc.id, &sc.name, &desc, &sc.content, &tags)
+			"SELECT id, name, description, summary, content, dynamic_context, tags FROM session_contexts WHERE id=?", id,
+		).Scan(&sc.id, &sc.name, &desc, &summary, &sc.content, &dynCtx, &tags)
 		if err == sql.ErrNoRows {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
@@ -742,25 +830,33 @@ func handleSessionContextsAPI(w http.ResponseWriter, r *http.Request, pathParts 
 			return
 		}
 		sc.description = desc.String
+		sc.summary = summary.String
+		sc.dynamicContext = dynCtx.String
 		sc.tags = tags.String
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(sc) //nolint:errcheck
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"id": sc.id, "name": sc.name, "description": sc.description,
+			"summary": sc.summary, "content": sc.content,
+			"dynamic_context": sc.dynamicContext, "tags": sc.tags,
+		}) //nolint:errcheck
 
 	case http.MethodPut:
 		var body struct {
-			Name        string `json:"name"`
-			Description string `json:"description"`
-			Content     string `json:"content"`
-			Tags        string `json:"tags"`
+			Name           string `json:"name"`
+			Description    string `json:"description"`
+			Summary        string `json:"summary"`
+			Content        string `json:"content"`
+			DynamicContext string `json:"dynamic_context"`
+			Tags           string `json:"tags"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 		_, err := database.ExecContext(ctx,
-			`UPDATE session_contexts SET name=?, description=?, content=?, tags=?, updated_at=unixepoch()
+			`UPDATE session_contexts SET name=?, description=?, summary=?, content=?, dynamic_context=?, tags=?, updated_at=unixepoch()
 			 WHERE id=?`,
-			body.Name, body.Description, body.Content, body.Tags, id,
+			body.Name, body.Description, body.Summary, body.Content, body.DynamicContext, body.Tags, id,
 		)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)

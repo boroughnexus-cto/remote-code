@@ -1,8 +1,7 @@
 package main
 
 import (
-	"context"
-	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -16,13 +15,21 @@ import (
 // assigns the selected context to the session; Backspace/Del clears it; Esc cancels.
 
 type tuiCtxPickerMsg struct {
-	items []sessionContext
+	items []ctxPickerItem
 }
 
 // tuiCtxPickerModel holds ephemeral picker state (session being edited + items).
+type ctxPickerItem struct {
+	id         string
+	name       string
+	description string
+	summary    string
+	hasDynamic bool
+}
+
 type tuiCtxPickerModel struct {
 	sid    string
-	items  []sessionContext // fetched on open
+	items  []ctxPickerItem
 	cursor int
 	ready  bool
 }
@@ -31,25 +38,32 @@ func newCtxPicker(sid string) *tuiCtxPickerModel {
 	return &tuiCtxPickerModel{sid: sid}
 }
 
-// fetchContextsForPicker loads all session_contexts synchronously (called via Cmd).
-func fetchContextsForPicker() tea.Cmd {
+// fetchContextsForPicker loads all session_contexts for the picker via the HTTP API.
+func fetchContextsForPicker(client TUIClient) tea.Cmd {
 	return func() tea.Msg {
-		rows, err := database.QueryContext(context.Background(),
-			"SELECT id, name, description, content, tags FROM session_contexts ORDER BY name")
+		b, err := client.getSync("/api/swarm/contexts")
 		if err != nil {
 			return tuiErrMsg{op: "ctx-picker", text: err.Error()}
 		}
-		defer rows.Close()
-		var items []sessionContext
-		for rows.Next() {
-			var sc sessionContext
-			var desc, tags sql.NullString
-			if err := rows.Scan(&sc.id, &sc.name, &desc, &sc.content, &tags); err != nil {
-				continue
-			}
-			sc.description = desc.String
-			sc.tags = tags.String
-			items = append(items, sc)
+		var raw []struct {
+			ID             string `json:"id"`
+			Name           string `json:"name"`
+			Description    string `json:"description"`
+			Summary        string `json:"summary"`
+			DynamicContext string `json:"dynamic_context"`
+		}
+		if err := json.Unmarshal(b, &raw); err != nil {
+			return tuiErrMsg{op: "ctx-picker", text: err.Error()}
+		}
+		items := make([]ctxPickerItem, 0, len(raw))
+		for _, r := range raw {
+			items = append(items, ctxPickerItem{
+				id:          r.ID,
+				name:        r.Name,
+				description: r.Description,
+				summary:     r.Summary,
+				hasDynamic:  r.DynamicContext != "",
+			})
 		}
 		return tuiCtxPickerMsg{items: items}
 	}
@@ -78,10 +92,10 @@ func (m tuiModel) updateCtxPicker(msg tea.KeyMsg) (tuiModel, []tea.Cmd) {
 
 	case "enter":
 		if len(cp.items) > 0 {
-			sc := cp.items[cp.cursor]
+			item := cp.items[cp.cursor]
 			m.ctxPicker = nil
 			path := "/api/swarm/sessions/" + cp.sid + "/context"
-			return m, []tea.Cmd{m.client.patch("set-context", path, map[string]string{"context_id": sc.id})}
+			return m, []tea.Cmd{m.client.patch("set-context", path, map[string]string{"context_id": item.id})}
 		}
 
 	case "backspace", "delete", "x":
@@ -131,7 +145,7 @@ func (m tuiModel) viewCtxPicker() string {
 			end = len(cp.items)
 		}
 		for i := start; i < end; i++ {
-			sc := cp.items[i]
+			item := cp.items[i]
 			cursor := "  "
 			nameStyle := lipgloss.NewStyle().Foreground(colorText)
 			descStyle := dimStyle
@@ -139,13 +153,27 @@ func (m tuiModel) viewCtxPicker() string {
 				cursor = lipgloss.NewStyle().Foreground(colorTeal).Render("▶ ")
 				nameStyle = lipgloss.NewStyle().Foreground(colorTeal).Bold(true)
 			}
-			name := fmt.Sprintf("%-24s", truncStr(sc.name, 24))
-			desc := truncStr(sc.description, boxW-30)
+			name := fmt.Sprintf("%-24s", truncStr(item.name, 24))
+			desc := truncStr(item.description, boxW-30)
 			sb.WriteString(cursor + nameStyle.Render(name) + "  " + descStyle.Render(desc) + "\n")
 		}
 		if len(cp.items) > maxShow {
 			more := len(cp.items) - maxShow
 			sb.WriteString(dimStyle.Render(fmt.Sprintf("\n  %d more — ↑/↓ to scroll", more)) + "\n")
+		}
+		// Detail pane for highlighted item
+		if cp.cursor < len(cp.items) {
+			sel := cp.items[cp.cursor]
+			if sel.summary != "" || sel.hasDynamic {
+				sb.WriteString("\n" + dimStyle.Render(strings.Repeat("─", boxW-4)) + "\n")
+				if sel.summary != "" {
+					sumLine := truncStr(sel.summary, boxW-4)
+					sb.WriteString(dimStyle.Render(sumLine) + "\n")
+				}
+				if sel.hasDynamic {
+					sb.WriteString(lipgloss.NewStyle().Foreground(colorOrange).Render("⚡ dynamic context active") + "\n")
+				}
+			}
 		}
 	}
 
