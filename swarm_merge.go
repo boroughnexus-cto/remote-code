@@ -32,6 +32,37 @@ import (
 
 // ─── Per-repo merge mutex ─────────────────────────────────────────────────────
 
+// checkIntegratorHealth scans all active agents' repos for integrator worktrees
+// stuck in a mid-merge state (MERGE_HEAD present). Called once at server startup.
+func checkIntegratorHealth() {
+	rows, err := database.QueryContext(context.Background(),
+		`SELECT DISTINCT COALESCE(repo_path,'') FROM swarm_agents WHERE repo_path IS NOT NULL AND repo_path != ''`)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var repoPath string
+		if rows.Scan(&repoPath) != nil || repoPath == "" {
+			continue
+		}
+		intPath := integratorWorktreePath(repoPath)
+		mergeHead := filepath.Join(intPath, ".git")
+		// In a worktree the git dir is a file pointing to the main .git/worktrees/<name>
+		// MERGE_HEAD lives inside that worktrees dir — easiest proxy: check via git status.
+		out, err := exec.Command("git", "-C", intPath, "status", "--porcelain=v1").CombinedOutput()
+		if err != nil {
+			continue
+		}
+		_ = mergeHead
+		// git status outputs nothing clean; if "UU" conflict markers appear it's mid-merge.
+		if strings.Contains(string(out), "UU ") || strings.Contains(string(out), "AA ") {
+			log.Printf("swarm/merge: WARNING — integrator worktree at %s appears to be in a mid-merge state. "+
+				"Run: git -C %s merge --abort", intPath, intPath)
+		}
+	}
+}
+
 // repoMergeMus serialises concurrent mergeTaskBranch calls for the same repo.
 var repoMergeMus sync.Map // map[string]*sync.Mutex
 

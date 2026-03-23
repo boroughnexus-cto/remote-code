@@ -89,6 +89,9 @@ func main() {
 	// Start background version check (logs if update available; served at /api/swarm/version)
 	startVersionCheck()
 
+	// SWM-14: warn if any integrator worktree is stuck in a mid-merge state from a prior crash.
+	go checkIntegratorHealth()
+
 	// Start swarm agent status monitor
 	startSwarmMonitor()
 	startIPCPoller()
