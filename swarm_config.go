@@ -128,6 +128,14 @@ var configRegistry = map[string]configMeta{
 	// Display
 	"display.log_verbosity": {Default: "info", DangerLevel: 0, Description: "TUI log verbosity: info/debug/trace", Validate: validateEnum("info", "debug", "trace")},
 	"display.timestamps":    {Default: "relative", DangerLevel: 0, Description: "Timestamp format: relative/absolute/none", Validate: validateEnum("relative", "absolute", "none")},
+	// Pool (warm Claude session pool + OpenAI-compatible API)
+	"pool.enabled":          {Default: "false", EnvVar: "POOL_ENABLED", DangerLevel: 1, Description: "Enable warm session pool + /v1/ OpenAI API", Validate: validateBoolValue()},
+	"pool.slots_per_model":  {Default: "2", EnvVar: "POOL_SLOTS_PER_MODEL", DangerLevel: 1, Description: "Warm instances per model", Validate: validatePositiveInt(1, 10)},
+	"pool.models":           {Default: "claude-haiku-4-5,claude-sonnet-4-6,claude-opus-4-6", EnvVar: "POOL_MODELS", DangerLevel: 1, Description: "Comma-separated models to pool"},
+	"pool.api_key":          {Default: "", EnvVar: "POOL_API_KEY", DangerLevel: 2, Description: "Bearer token for /v1/ endpoints; empty = no auth"},
+	"pool.request_timeout_s":  {Default: "300", EnvVar: "POOL_REQUEST_TIMEOUT", DangerLevel: 0, Description: "Per-request timeout (seconds)", Validate: validatePositiveInt(10, 600)},
+	"pool.max_consec_errors":  {Default: "3", EnvVar: "POOL_MAX_CONSEC_ERRORS", DangerLevel: 0, Description: "Consecutive errors before slot marked dead", Validate: validatePositiveInt(1, 10)},
+	"pool.idle_recycle_min":   {Default: "30", EnvVar: "POOL_IDLE_RECYCLE_MIN", DangerLevel: 0, Description: "Recycle idle slots after N minutes", Validate: validatePositiveInt(5, 1440)},
 }
 
 // configService is the settings service backed by SQLite.

@@ -112,12 +112,20 @@ func main() {
 	startAutoDispatchLoop(serverCtx)
 	go InitDispatchWarm(serverCtx)
 
+	// Start warm session pool if enabled
+	initPool(serverCtx)
+
 	// Setup HTTP routes
 	http.HandleFunc("/", serveHome)
 	http.HandleFunc("/voice", serveVoice)
 	http.HandleFunc("/ws", authMiddleware(handleWebSocket))
 	http.HandleFunc("/ws/swarm", authMiddleware(handleSwarmWebSocket))
 	http.HandleFunc("/api/", handleAPIWithAuth)
+
+	// OpenAI-compatible pool API (outside auth middleware — uses its own Bearer token)
+	http.HandleFunc("/v1/chat/completions", handlePoolChatCompletions)
+	http.HandleFunc("/v1/models", handlePoolListModels)
+	http.HandleFunc("/api/swarm/pool", handlePoolStatusAPI)
 
 	// Channels SSE endpoint: Claude Code connects here when launched with --channels.
 	// Auth is enforced inside ServeSSE via run_token; active only when a

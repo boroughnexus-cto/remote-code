@@ -182,6 +182,7 @@ func applyMigrations(database *sql.DB) error {
 		"db/migrations/047_context_dynamic.sql",
 		"db/migrations/048_autopilot_label_filter.sql",
 		"db/migrations/049_swarm_mode.sql",
+		"db/migrations/050_pool.sql",
 	}
 
 	for _, migrationPath := range migrations {
