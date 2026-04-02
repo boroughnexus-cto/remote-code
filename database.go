@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"embed"
 	"fmt"
 	"log"
 	"os"
@@ -77,6 +78,9 @@ func initDatabaseWithPathAndReturn(dbPath string) (*sql.DB, *db.Queries, string)
 	queries := db.New(database)
 	return database, queries, dbPath
 }
+
+//go:embed db/migrations/*.sql
+var migrationsFS embed.FS
 
 func applyMigrations(database *sql.DB) error {
 	// Create migrations tracking table if it doesn't exist
@@ -197,7 +201,7 @@ func applyMigrations(database *sql.DB) error {
 			continue
 		}
 
-		migrationSQL, err := os.ReadFile(migrationPath)
+		migrationSQL, err := migrationsFS.ReadFile(migrationPath)
 		if err != nil {
 			return fmt.Errorf("failed to read migration %s: %v", migrationPath, err)
 		}
