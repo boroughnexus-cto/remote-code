@@ -345,11 +345,6 @@ func (s *integrationsSection) View(w, h int) string {
 			note: "Infrastructure monitoring, alert proxy, Icinga view (I key)",
 		},
 		{
-			name: "Telegram",
-			vars: []string{"TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"},
-			note: "Agent escalation routing, /ack command, webhook at POST /api/telegram/webhook",
-		},
-		{
 			name: "SwarmOps Auth",
 			vars: []string{"SWARMOPS_AUTH_TOKEN"},
 			note: "Shared bearer token for API + TUI (optional; dev mode skips auth)",

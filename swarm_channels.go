@@ -275,22 +275,7 @@ func (ct *ChannelsTransport) ServeMessages(w http.ResponseWriter, r *http.Reques
 			"serverInfo": map[string]any{"name": "swarmops", "version": "1.0.0"},
 		}
 	case "tools/list":
-		result = map[string]any{"tools": []any{
-			map[string]any{
-				"name":        "send_telegram_message",
-				"description": "Send a message to the SwarmOps Telegram chat. Use this to communicate with the human operator. Worker agent escalations arrive automatically — only call this for direct SiBot messages.",
-				"inputSchema": map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"text": map[string]any{
-							"type":        "string",
-							"description": "Message text to send.",
-						},
-					},
-					"required": []string{"text"},
-				},
-			},
-		}}
+		result = map[string]any{"tools": []any{}}
 	case "tools/call":
 		result = ct.handleToolCall(req.Params)
 	case "resources/list":
@@ -321,27 +306,7 @@ func (ct *ChannelsTransport) handleToolCall(params json.RawMessage) any {
 		return mcpToolError("invalid params")
 	}
 
-	switch p.Name {
-	case "send_telegram_message":
-		if telegramRouter == nil {
-			return mcpToolError("Telegram router not initialised (missing TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID)")
-		}
-		var args struct {
-			Text string `json:"text"`
-		}
-		if err := json.Unmarshal(p.Arguments, &args); err != nil || args.Text == "" {
-			return mcpToolError("missing required argument: text")
-		}
-		if _, err := telegramRouter.sendMessage(telegramRouter.chatID, args.Text); err != nil {
-			log.Printf("channels: send_telegram_message failed: %v", err)
-			return mcpToolError(fmt.Sprintf("Telegram send failed: %v", err))
-		}
-		return map[string]any{
-			"content": []any{map[string]any{"type": "text", "text": "Message sent."}},
-		}
-	default:
-		return mcpToolError(fmt.Sprintf("unknown tool: %s", p.Name))
-	}
+	return mcpToolError(fmt.Sprintf("unknown tool: %s", p.Name))
 }
 
 // mcpToolError returns an MCP tools/call error response.

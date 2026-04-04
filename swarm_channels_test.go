@@ -313,19 +313,3 @@ func TestHandleToolCall_UnknownTool(t *testing.T) {
 		t.Error("expected isError=true for unknown tool")
 	}
 }
-
-func TestHandleToolCall_SendTelegram_NoRouter(t *testing.T) {
-	ct := &ChannelsTransport{}
-	orig := telegramRouter
-	telegramRouter = nil
-	defer func() { telegramRouter = orig }()
-
-	result := ct.handleToolCall([]byte(`{"name":"send_telegram_message","arguments":{"text":"hello"}}`))
-	m, ok := result.(map[string]any)
-	if !ok {
-		t.Fatal("result should be map")
-	}
-	if isErr, _ := m["isError"].(bool); !isErr {
-		t.Error("expected isError=true when router is nil")
-	}
-}

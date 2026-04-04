@@ -1747,7 +1747,7 @@ func handleSwarmTasksAPI(w http.ResponseWriter, r *http.Request, ctx context.Con
 			}
 			// Reconcile goal completion whenever a task stage changes.
 			go reconcileGoalsForTask(context.Background(), sessionID, taskID)
-			// Local + Telegram notification when task completes
+			// Local notification when task completes
 			if stage == "done" {
 				var taskTitle, sessionName string
 				database.QueryRowContext(ctx, "SELECT title FROM swarm_tasks WHERE id = ?", taskID).Scan(&taskTitle)           //nolint:errcheck

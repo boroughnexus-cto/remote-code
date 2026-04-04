@@ -2,10 +2,8 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"log"
-	"strings"
 	"time"
 )
 
@@ -99,7 +97,7 @@ Use confidence ≥ 0.8 only when every criterion is demonstrably satisfied.`,
 }
 
 // ralphTerminateTask transitions the task to failed_ralph_loop and the goal to needs_human
-// in a single transaction. Sends a structured Telegram escalation package.
+// in a single transaction.
 func ralphTerminateTask(ctx context.Context, sessionID, taskID, goalID, phase, reason string, attempts int) error {
 	now := time.Now().Unix()
 
@@ -135,140 +133,6 @@ func ralphTerminateTask(ctx context.Context, sessionID, taskID, goalID, phase, r
 	writeSwarmEvent(ctx, sessionID, "", taskID, "ralph_loop_exhausted", reason)
 	swarmBroadcaster.schedule(sessionID)
 	log.Printf("swarm/ralph: task=%s goal=%s terminated — %s", taskID[:8], goalID[:8], reason)
-
-	// Build and send escalation package asynchronously.
-	go sendRalphEscalation(context.Background(), sessionID, taskID, goalID, phase, attempts)
+	sendLocalNotification("⛔ SwarmOps: Ralph loop exhausted", fmt.Sprintf("Task %s Goal %s", taskID[:8], goalID[:8]))
 	return nil
-}
-
-// ralphEscalationPackage holds the context assembled for a ralph_loop Telegram escalation.
-type ralphEscalationPackage struct {
-	sessionID  string
-	taskID     string
-	goalID     string
-	phase      string
-	attempts   int
-	attemptLog []string // blocked_reason history
-	branchName string
-	judgeNotes string
-	goalDesc   string
-}
-
-// buildRalphEscalationPackage queries the DB for context to include in the escalation message.
-func buildRalphEscalationPackage(ctx context.Context, sessionID, taskID, goalID, phase string, attempts int) ralphEscalationPackage {
-	pkg := ralphEscalationPackage{
-		sessionID: sessionID,
-		taskID:    taskID,
-		goalID:    goalID,
-		phase:     phase,
-		attempts:  attempts,
-	}
-
-	// Collect blocked_reason history from the task (up to 3 most recent).
-	rows, _ := database.QueryContext(ctx,
-		`SELECT COALESCE(blocked_reason,'(no reason recorded)')
-		 FROM swarm_tasks WHERE id=?`, taskID)
-	if rows != nil {
-		defer rows.Close()
-		for rows.Next() {
-			var reason string
-			rows.Scan(&reason) //nolint:errcheck
-			pkg.attemptLog = append(pkg.attemptLog, reason)
-		}
-	}
-
-	// Branch name from agent worktree.
-	var agentID string
-	database.QueryRowContext(ctx, "SELECT COALESCE(agent_id,'') FROM swarm_tasks WHERE id=?", taskID).Scan(&agentID) //nolint:errcheck
-	if agentID != "" {
-		pkg.branchName = swarmBranchName(agentID)
-	}
-
-	// Judge notes from most recent judge task in same goal.
-	if goalID != "" {
-		var notes sql.NullString
-		database.QueryRowContext(ctx,
-			`SELECT judge_notes FROM swarm_goals WHERE id=?`, goalID,
-		).Scan(&notes) //nolint:errcheck
-		if notes.Valid {
-			pkg.judgeNotes = notes.String
-		}
-
-		// Goal description
-		database.QueryRowContext(ctx,
-			`SELECT COALESCE(description,'') FROM swarm_goals WHERE id=?`, goalID,
-		).Scan(&pkg.goalDesc) //nolint:errcheck
-	}
-
-	return pkg
-}
-
-// sendRalphEscalation assembles the escalation package and sends it to Telegram.
-// Uses SubmitEscalation so the reply can be routed back to the goal.
-func sendRalphEscalation(ctx context.Context, sessionID, taskID, goalID, phase string, attempts int) {
-	pkg := buildRalphEscalationPackage(ctx, sessionID, taskID, goalID, phase, attempts)
-
-	var attemptLines strings.Builder
-	for i, line := range pkg.attemptLog {
-		fmt.Fprintf(&attemptLines, "  %d. %s\n", i+1, line)
-	}
-
-	hypothesis := "(no judge notes)"
-	if pkg.judgeNotes != "" {
-		hypothesis = pkg.judgeNotes
-	}
-
-	msg := fmt.Sprintf(`⛔ *[SWARM ESCALATION]* Goal: %s
-Phase: *%s* — Ralph loop exhausted after %d attempts
-
-%s
-*Attempts:*
-%s
-*Branch:* `+"`%s`"+` (run: `+"`git diff main...HEAD`"+`)
-*Hypothesis:* %s
-
-*Reply with one of:*
-  `+"`1 <guidance>`"+` — Retry with your guidance
-  `+"`2`"+` — Reassign to different agent
-  `+"`3`"+` — Cancel this goal
-  `+"`4`"+` — Defer (leave as needs_human)`,
-		goalID[:8],
-		phase, attempts,
-		func() string {
-			if pkg.goalDesc != "" {
-				return "_" + pkg.goalDesc + "_\n\n"
-			}
-			return ""
-		}(),
-		attemptLines.String(),
-		pkg.branchName,
-		hypothesis,
-	)
-
-	tr := telegramRouter
-	if tr == nil {
-		// No router — fall back to simple notification
-		sendTelegramNotification(msg)
-		return
-	}
-
-	// Use SubmitEscalation so a reply can be correlated back to this goal.
-	// We use a synthetic agentID of the orchestrator for routing.
-	var orchID string
-	database.QueryRowContext(ctx,
-		`SELECT id FROM swarm_agents WHERE session_id=? AND role='orchestrator' AND tmux_session IS NOT NULL LIMIT 1`,
-		sessionID,
-	).Scan(&orchID) //nolint:errcheck
-	if orchID == "" {
-		sendTelegramNotification(msg)
-		return
-	}
-
-	escID, err := tr.SubmitRalphEscalation(ctx, orchID, taskID, goalID, msg, 72*time.Hour)
-	if err != nil {
-		log.Printf("swarm/ralph: submit escalation failed: %v", err)
-		sendTelegramNotification(msg) // fallback
-		return
-	}
-	log.Printf("swarm/ralph: escalation sent esc=%s goal=%s", escID[:8], goalID[:8])
 }

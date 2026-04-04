@@ -87,11 +87,8 @@ func maybeAutoMergeGoalPRs(ctx context.Context, sessionID, goalID string) {
 		}
 
 		if c.agentID == "" {
-			// No agent — send Telegram for manual merge
-			go sendTelegramNotification(fmt.Sprintf(
-				"🔀 *PR ready for merge* (no agent available)\n\nGoal: `%s`\nPR: %s\n\nPlease merge manually.",
-				goalID[:8], c.prURL,
-			))
+			// No agent — notify locally for manual merge
+			sendLocalNotification("🔀 SwarmOps: PR ready for merge", fmt.Sprintf("Goal: %s PR: %s", goalID[:8], c.prURL))
 			database.ExecContext(ctx, //nolint:errcheck
 				"UPDATE swarm_tasks SET pr_status='ready_for_review', updated_at=? WHERE id=?",
 				time.Now().Unix(), c.taskID,

@@ -74,10 +74,7 @@ func rollupGoalBudget(ctx context.Context, taskID string) {
 			fmt.Sprintf("goal=%s used=%d budget=%d", goalID[:8], total, budget))
 		swarmBroadcaster.schedule(sessionID)
 		go injectBudgetNotice(ctx, sessionID, goalID, total, budget, true)
-		go sendTelegramNotification(fmt.Sprintf(
-			"⛔ *[BUDGET EXHAUSTED]* Goal `%s` — Session `%s`\n\nToken budget reached (%d/%d). New task acceptance blocked. Active agents may still be running.\n\nTo raise: `PATCH /api/swarm/sessions/.../goals/%s/budget`",
-			goalID[:8], sessionID[:8], total, budget, goalID,
-		))
+		sendLocalNotification("⛔ SwarmOps: budget exhausted", fmt.Sprintf("Goal %s — %d/%d tokens", goalID[:8], total, budget))
 	} else if pct >= budgetWarnThreshold && warningSent == 0 {
 		// 80% warning — once only; checkpoint all running workers, not just orchestrator
 		database.ExecContext(ctx, //nolint:errcheck
