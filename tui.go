@@ -43,13 +43,39 @@ var (
 			Padding(0, 1)
 )
 
+// ─── Sidebar item: unified type for sessions + pool slots ────────────────────
+
+type sidebarItemKind int
+
+const (
+	itemSession sidebarItemKind = iota
+	itemPoolSlot
+)
+
+type sidebarItem struct {
+	kind      sidebarItemKind
+	label     string
+	indicator string
+	// Session fields
+	sessionID   string
+	tmuxSession string
+	status      string
+	// Pool slot fields
+	slotID   string
+	model    string
+	state    string // idle, busy, starting, dead
+	requests int64
+	costUSD  float64
+	alive    bool
+}
+
 // ─── Messages ────────────────────────────────────────────────────────────────
 
 type tickMsg time.Time
 type sessionsMsg []Session
 type terminalMsg string
-type poolStatusMsg string
 type contextListMsg []contextItem
+type itemsMsg []sidebarItem
 
 type contextItem struct {
 	ID   string `json:"id"`
@@ -61,16 +87,16 @@ type contextItem struct {
 type tuiMode int
 
 const (
-	modePassthrough tuiMode = iota // keystrokes go to tmux session
-	modeNewName                    // typing session name
-	modeNewDir                     // typing directory
-	modeContextPick                // picking context
+	modePassthrough tuiMode = iota
+	modeNewName
+	modeNewDir
+	modeContextPick
 )
 
 type tuiModel struct {
-	sessions []Session
-	cursor   int
-	mode     tuiMode
+	items  []sidebarItem
+	cursor int
+	mode   tuiMode
 
 	// Right pane
 	vp      viewport.Model
@@ -82,11 +108,8 @@ type tuiModel struct {
 	contexts     []contextItem
 	ctxCursor    int
 
-	// Terminal content
+	// Terminal content cache
 	termContent string
-
-	// Pool status
-	poolStatus string
 
 	// Terminal size
 	w, h int
@@ -113,7 +136,7 @@ func initialModel() tuiModel {
 }
 
 func (m tuiModel) Init() tea.Cmd {
-	return tea.Batch(tickCmd(), loadSessions)
+	return tea.Batch(tickCmd(), loadItems)
 }
 
 func tickCmd() tea.Cmd {
@@ -122,14 +145,67 @@ func tickCmd() tea.Cmd {
 	})
 }
 
-func loadSessions() tea.Msg {
+// loadItems builds the unified sidebar list: sessions first, then pool slots.
+func loadItems() tea.Msg {
 	ctx := context.Background()
 	refreshSessionStatuses(ctx)
-	sessions, err := listSessions(ctx)
-	if err != nil {
-		return sessionsMsg(nil)
+	sessions, _ := listSessions(ctx)
+
+	var items []sidebarItem
+
+	for _, s := range sessions {
+		indicator := statusStopped
+		if s.Status == "running" {
+			indicator = statusRunning
+		}
+		items = append(items, sidebarItem{
+			kind:        itemSession,
+			label:       s.Name,
+			indicator:   indicator,
+			sessionID:   s.ID,
+			tmuxSession: s.TmuxSession,
+			status:      s.Status,
+		})
 	}
-	return sessionsMsg(sessions)
+
+	if globalPool != nil {
+		status := globalPool.Status()
+		if models, ok := status["models"].(map[string]interface{}); ok {
+			for model, info := range models {
+				if minfo, ok := info.(map[string]interface{}); ok {
+					if slots, ok := minfo["slots"].([]map[string]interface{}); ok {
+						for _, slot := range slots {
+							sid, _ := slot["id"].(string)
+							state, _ := slot["state"].(string)
+							reqs, _ := slot["requests"].(int64)
+							cost, _ := slot["cost_usd"].(float64)
+							alive, _ := slot["alive"].(bool)
+
+							ind := statusAPI
+							if !alive || state == "dead" {
+								ind = statusStopped
+							}
+
+							short := modelShortName(model)
+							items = append(items, sidebarItem{
+								kind:      itemPoolSlot,
+								label:     fmt.Sprintf("[api] %s", short),
+								indicator: ind,
+								slotID:   sid,
+								model:    model,
+								state:    state,
+								requests: reqs,
+								costUSD:  cost,
+								alive:    alive,
+							})
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return itemsMsg(items)
 }
 
 func loadTerminal(tmuxName string) tea.Cmd {
@@ -139,17 +215,6 @@ func loadTerminal(tmuxName string) tea.Cmd {
 			return terminalMsg("(error: " + err.Error() + ")")
 		}
 		return terminalMsg(content)
-	}
-}
-
-func loadPoolStatus() tea.Cmd {
-	return func() tea.Msg {
-		if globalPool == nil {
-			return poolStatusMsg("Pool: disabled")
-		}
-		status := globalPool.Status()
-		b, _ := json.MarshalIndent(status, "", "  ")
-		return poolStatusMsg(string(b))
 	}
 }
 
@@ -182,7 +247,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if contentWidth < 20 {
 			contentWidth = 20
 		}
-		contentHeight := m.h - 2 // just status line at bottom
+		contentHeight := m.h - 2
 		if contentHeight < 5 {
 			contentHeight = 5
 		}
@@ -193,21 +258,19 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tickMsg:
 		var cmds []tea.Cmd
-		cmds = append(cmds, tickCmd(), loadSessions)
-		if len(m.sessions) > 0 && m.cursor < len(m.sessions) {
-			s := m.sessions[m.cursor]
-			if s.Hidden {
-				cmds = append(cmds, loadPoolStatus())
-			} else if s.Status == "running" {
-				cmds = append(cmds, loadTerminal(s.TmuxSession))
+		cmds = append(cmds, tickCmd(), loadItems)
+		if m.cursor < len(m.items) {
+			item := m.items[m.cursor]
+			if item.kind == itemSession && item.status == "running" {
+				cmds = append(cmds, loadTerminal(item.tmuxSession))
 			}
 		}
 		return m, tea.Batch(cmds...)
 
-	case sessionsMsg:
-		m.sessions = msg
-		if m.cursor >= len(m.sessions) && len(m.sessions) > 0 {
-			m.cursor = len(m.sessions) - 1
+	case itemsMsg:
+		m.items = msg
+		if m.cursor >= len(m.items) && len(m.items) > 0 {
+			m.cursor = len(m.items) - 1
 		}
 		return m, nil
 
@@ -219,10 +282,6 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case poolStatusMsg:
-		m.poolStatus = string(msg)
-		return m, nil
-
 	case contextListMsg:
 		m.contexts = msg
 		if len(m.contexts) > 0 {
@@ -232,7 +291,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.doSpawn(nil, nil)
 			m.mode = modePassthrough
 		}
-		return m, loadSessions
+		return m, loadItems
 
 	case tea.MouseMsg:
 		if m.mode == modePassthrough && m.vpReady {
@@ -261,7 +320,7 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case "ctrl+z":
-			if m.cursor < len(m.sessions)-1 {
+			if m.cursor < len(m.items)-1 {
 				m.cursor++
 				m.flash = ""
 			}
@@ -273,18 +332,20 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.flash = "New session — enter name (esc to cancel)"
 			return m, textinput.Blink
 		case "alt+d":
-			if len(m.sessions) > 0 && m.cursor < len(m.sessions) {
-				s := m.sessions[m.cursor]
-				deleteSession(context.Background(), s.ID)
-				m.flash = fmt.Sprintf("Deleted %s", s.Name)
-				return m, loadSessions
+			if m.cursor < len(m.items) && m.items[m.cursor].kind == itemSession {
+				item := m.items[m.cursor]
+				deleteSession(context.Background(), item.sessionID)
+				m.flash = fmt.Sprintf("Deleted %s", item.label)
+				return m, loadItems
 			}
 			return m, nil
 		case "ctrl+\\":
 			return m, tea.Quit
 		default:
-			// Pass all other keys to the active tmux session
-			m.sendKeyToSession(key)
+			// Only pass keys to session items (not pool slots)
+			if m.cursor < len(m.items) && m.items[m.cursor].kind == itemSession {
+				m.sendKeyToSession(key)
+			}
 			return m, nil
 		}
 
@@ -339,7 +400,7 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			m.mode = modePassthrough
 			m.flash = ""
-			return m, loadSessions
+			return m, loadItems
 		case "esc":
 			m.mode = modePassthrough
 			m.flash = ""
@@ -351,15 +412,14 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // sendKeyToSession translates a Bubbletea key string to tmux send-keys.
 func (m *tuiModel) sendKeyToSession(key string) {
-	if len(m.sessions) == 0 || m.cursor >= len(m.sessions) {
+	if m.cursor >= len(m.items) {
 		return
 	}
-	s := m.sessions[m.cursor]
-	if s.Status != "running" {
+	item := m.items[m.cursor]
+	if item.kind != itemSession || item.status != "running" {
 		return
 	}
 
-	// Map bubbletea key names to tmux key names
 	tmuxKey := key
 	switch key {
 	case "enter":
@@ -408,14 +468,11 @@ func (m *tuiModel) sendKeyToSession(key string) {
 		tmuxKey = "C-k"
 	}
 
-	// Single printable character: send as literal
 	if len(key) == 1 {
-		exec.Command("tmux", "send-keys", "-t", s.TmuxSession, "-l", key).Run()
+		exec.Command("tmux", "send-keys", "-t", item.tmuxSession, "-l", key).Run()
 		return
 	}
-
-	// Named keys: send as key name
-	exec.Command("tmux", "send-keys", "-t", s.TmuxSession, tmuxKey).Run()
+	exec.Command("tmux", "send-keys", "-t", item.tmuxSession, tmuxKey).Run()
 }
 
 func (m *tuiModel) doSpawn(contextID, contextName *string) {
@@ -444,7 +501,6 @@ func (m tuiModel) View() string {
 
 	main := lipgloss.JoinHorizontal(lipgloss.Top, sidebar, content)
 
-	// Status bar
 	var statusLine string
 	switch m.mode {
 	case modeNewName:
@@ -469,51 +525,39 @@ func (m tuiModel) renderSidebar() string {
 	lines = append(lines, headerStyle.Render("SwarmOps"))
 	lines = append(lines, "")
 
-	for i, s := range m.sessions {
-		var indicator string
-		if s.Hidden {
-			indicator = statusAPI
-		} else if s.Status == "running" {
-			indicator = statusRunning
-		} else {
-			indicator = statusStopped
+	// Track whether we've printed the pool separator
+	printedPoolSep := false
+
+	for i, item := range m.items {
+		if item.kind == itemPoolSlot && !printedPoolSep {
+			if i > 0 {
+				lines = append(lines, "")
+			}
+			lines = append(lines, dimStyle.Render("─── Pool ───"))
+			printedPoolSep = true
 		}
 
-		label := s.Name
-		if s.Hidden {
-			label = "[api] " + label
-		}
-
+		label := item.label
 		if len(label) > 20 {
 			label = label[:17] + "..."
 		}
 
-		line := fmt.Sprintf(" %s %s", indicator, label)
+		line := fmt.Sprintf(" %s %s", item.indicator, label)
+
+		// Show slot state inline for pool items
+		if item.kind == itemPoolSlot {
+			stateTag := item.state
+			line = fmt.Sprintf(" %s %s %s", item.indicator, label, dimStyle.Render(stateTag))
+		}
+
 		if i == m.cursor {
 			line = selectedStyle.Render(line)
 		}
 		lines = append(lines, line)
 	}
 
-	if len(m.sessions) == 0 {
+	if len(m.items) == 0 {
 		lines = append(lines, dimStyle.Render(" (no sessions)"))
-	}
-
-	// Pool at bottom
-	if globalPool != nil {
-		lines = append(lines, "")
-		lines = append(lines, dimStyle.Render("─── Pool ───"))
-		status := globalPool.Status()
-		if models, ok := status["models"].(map[string]interface{}); ok {
-			for model, info := range models {
-				if m, ok := info.(map[string]interface{}); ok {
-					idle, _ := m["idle"].(float64)
-					busy, _ := m["busy"].(float64)
-					short := modelShortName(model)
-					lines = append(lines, dimStyle.Render(fmt.Sprintf(" %s %d/%d", short, int(idle), int(idle+busy))))
-				}
-			}
-		}
 	}
 
 	for len(lines) < m.h-2 {
@@ -528,21 +572,36 @@ func (m tuiModel) renderContent() string {
 		return ""
 	}
 
-	if len(m.sessions) == 0 {
-		m.vp.SetContent(dimStyle.Render("\n  No sessions. Press ctrl+n to create one."))
+	if len(m.items) == 0 {
+		m.vp.SetContent(dimStyle.Render("\n  No sessions. Press Alt+N to create one."))
 		return m.vp.View()
 	}
 
-	if m.cursor < len(m.sessions) {
-		s := m.sessions[m.cursor]
-		if s.Hidden {
-			m.vp.SetContent(m.poolStatus)
-		} else if s.Status != "running" {
-			m.vp.SetContent(dimStyle.Render("\n  Session stopped."))
+	if m.cursor < len(m.items) {
+		item := m.items[m.cursor]
+		switch item.kind {
+		case itemPoolSlot:
+			m.vp.SetContent(m.renderPoolSlotDetail(item))
+		case itemSession:
+			if item.status != "running" {
+				m.vp.SetContent(dimStyle.Render("\n  Session stopped."))
+			}
+			// running sessions get content set via terminalMsg
 		}
 	}
 
 	return m.vp.View()
+}
+
+func (m tuiModel) renderPoolSlotDetail(item sidebarItem) string {
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("  Pool Slot: %s\n", item.slotID))
+	b.WriteString(fmt.Sprintf("  Model:     %s\n", item.model))
+	b.WriteString(fmt.Sprintf("  State:     %s\n", item.state))
+	b.WriteString(fmt.Sprintf("  Alive:     %v\n", item.alive))
+	b.WriteString(fmt.Sprintf("  Requests:  %d\n", item.requests))
+	b.WriteString(fmt.Sprintf("  Cost:      $%.4f\n", item.costUSD))
+	return b.String()
 }
 
 func (m tuiModel) renderContextPicker() string {
