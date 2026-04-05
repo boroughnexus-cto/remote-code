@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -57,27 +58,23 @@ type contextItem struct {
 
 // ─── Model ───────────────────────────────────────────────────────────────────
 
-type tuiFocus int
+type tuiMode int
 
 const (
-	focusSidebar tuiFocus = iota
-	focusInput
-	focusNewName
-	focusNewDir
-	focusContextPicker
+	modePassthrough tuiMode = iota // keystrokes go to tmux session
+	modeNewName                    // typing session name
+	modeNewDir                     // typing directory
+	modeContextPick                // picking context
 )
 
 type tuiModel struct {
 	sessions []Session
 	cursor   int
-	focus    tuiFocus
+	mode     tuiMode
 
 	// Right pane
 	vp      viewport.Model
 	vpReady bool
-
-	// Input for sending text to session
-	chatInput textinput.Model
 
 	// New session wizard
 	newNameInput textinput.Model
@@ -99,10 +96,6 @@ type tuiModel struct {
 }
 
 func initialModel() tuiModel {
-	ci := textinput.New()
-	ci.Placeholder = "Type to send to session..."
-	ci.CharLimit = 4096
-
 	ni := textinput.New()
 	ni.Placeholder = "Session name"
 	ni.CharLimit = 64
@@ -113,8 +106,7 @@ func initialModel() tuiModel {
 	di.SetValue(os.Getenv("HOME"))
 
 	return tuiModel{
-		focus:        focusSidebar,
-		chatInput:    ci,
+		mode:         modePassthrough,
 		newNameInput: ni,
 		newDirInput:  di,
 	}
@@ -172,7 +164,6 @@ func fetchContexts() tea.Cmd {
 		defer resp.Body.Close()
 		body, _ := io.ReadAll(resp.Body)
 
-		// Parse response — mcp-context returns array of objects
 		var items []contextItem
 		json.Unmarshal(body, &items)
 		return contextListMsg(items)
@@ -187,15 +178,16 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.w = msg.Width
 		m.h = msg.Height
-		contentWidth := m.w - 26 // sidebar width + border
+		contentWidth := m.w - 26
 		if contentWidth < 20 {
 			contentWidth = 20
 		}
-		contentHeight := m.h - 4 // header + input + status
+		contentHeight := m.h - 2 // just status line at bottom
 		if contentHeight < 5 {
 			contentHeight = 5
 		}
 		m.vp = viewport.New(contentWidth, contentHeight)
+		m.vp.MouseWheelEnabled = true
 		m.vpReady = true
 		return m, nil
 
@@ -234,13 +226,20 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case contextListMsg:
 		m.contexts = msg
 		if len(m.contexts) > 0 {
-			m.focus = focusContextPicker
+			m.mode = modeContextPick
 			m.ctxCursor = 0
 		} else {
 			m.doSpawn(nil, nil)
-			m.focus = focusSidebar
+			m.mode = modePassthrough
 		}
-		return m, nil
+		return m, loadSessions
+
+	case tea.MouseMsg:
+		if m.mode == modePassthrough && m.vpReady {
+			var cmd tea.Cmd
+			m.vp, cmd = m.vp.Update(msg)
+			return m, cmd
+		}
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)
@@ -252,94 +251,76 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
 
-	switch m.focus {
-	case focusSidebar:
+	switch m.mode {
+	case modePassthrough:
 		switch key {
-		case "ctrl+a", "up":
+		case "ctrl+a":
 			if m.cursor > 0 {
 				m.cursor--
+				m.flash = ""
 			}
-		case "ctrl+z", "down":
+			return m, nil
+		case "ctrl+z":
 			if m.cursor < len(m.sessions)-1 {
 				m.cursor++
+				m.flash = ""
 			}
-		case "enter":
-			m.focus = focusInput
-			m.chatInput.Focus()
-			return m, textinput.Blink
-		case "n":
-			m.focus = focusNewName
+			return m, nil
+		case "alt+n":
+			m.mode = modeNewName
 			m.newNameInput.SetValue("")
 			m.newNameInput.Focus()
-			m.flash = "New session: enter name"
+			m.flash = "New session — enter name (esc to cancel)"
 			return m, textinput.Blink
-		case "d":
+		case "alt+d":
 			if len(m.sessions) > 0 && m.cursor < len(m.sessions) {
 				s := m.sessions[m.cursor]
 				deleteSession(context.Background(), s.ID)
 				m.flash = fmt.Sprintf("Deleted %s", s.Name)
 				return m, loadSessions
 			}
-		case "q", "ctrl+c":
-			return m, tea.Quit
-		}
-
-	case focusInput:
-		switch key {
-		case "enter":
-			text := m.chatInput.Value()
-			if text != "" && len(m.sessions) > 0 && m.cursor < len(m.sessions) {
-				s := m.sessions[m.cursor]
-				if err := injectToSession(s.TmuxSession, text); err != nil {
-					m.flash = "Error: " + err.Error()
-				}
-				m.chatInput.SetValue("")
-			}
-		case "esc":
-			m.focus = focusSidebar
-			m.chatInput.Blur()
 			return m, nil
+		case "ctrl+\\":
+			return m, tea.Quit
 		default:
-			var cmd tea.Cmd
-			m.chatInput, cmd = m.chatInput.Update(msg)
-			return m, cmd
+			// Pass all other keys to the active tmux session
+			m.sendKeyToSession(key)
+			return m, nil
 		}
 
-	case focusNewName:
+	case modeNewName:
 		switch key {
 		case "enter":
 			if m.newNameInput.Value() != "" {
-				m.focus = focusNewDir
+				m.mode = modeNewDir
 				m.newDirInput.Focus()
-				m.flash = "New session: enter directory"
+				m.flash = "New session — enter directory (esc to cancel)"
 				return m, textinput.Blink
 			}
 		case "esc":
-			m.focus = focusSidebar
+			m.mode = modePassthrough
 			m.flash = ""
-			return m, nil
 		default:
 			var cmd tea.Cmd
 			m.newNameInput, cmd = m.newNameInput.Update(msg)
 			return m, cmd
 		}
 
-	case focusNewDir:
+	case modeNewDir:
 		switch key {
 		case "enter":
 			m.flash = "Fetching contexts..."
 			return m, fetchContexts()
 		case "esc":
-			m.focus = focusSidebar
+			m.mode = modePassthrough
 			m.flash = ""
-			return m, nil
 		default:
 			var cmd tea.Cmd
 			m.newDirInput, cmd = m.newDirInput.Update(msg)
 			return m, cmd
 		}
 
-	case focusContextPicker:
+	case modeContextPick:
 		switch key {
 		case "ctrl+a", "up":
 			if m.ctxCursor > 0 {
@@ -351,23 +332,90 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		case "enter":
 			if m.ctxCursor == 0 {
-				// "None" selected
 				m.doSpawn(nil, nil)
 			} else {
 				c := m.contexts[m.ctxCursor-1]
 				m.doSpawn(&c.ID, &c.Name)
 			}
-			m.focus = focusSidebar
+			m.mode = modePassthrough
 			m.flash = ""
 			return m, loadSessions
 		case "esc":
-			m.focus = focusSidebar
+			m.mode = modePassthrough
 			m.flash = ""
-			return m, nil
 		}
 	}
 
 	return m, nil
+}
+
+// sendKeyToSession translates a Bubbletea key string to tmux send-keys.
+func (m *tuiModel) sendKeyToSession(key string) {
+	if len(m.sessions) == 0 || m.cursor >= len(m.sessions) {
+		return
+	}
+	s := m.sessions[m.cursor]
+	if s.Status != "running" {
+		return
+	}
+
+	// Map bubbletea key names to tmux key names
+	tmuxKey := key
+	switch key {
+	case "enter":
+		tmuxKey = "Enter"
+	case "tab":
+		tmuxKey = "Tab"
+	case "backspace":
+		tmuxKey = "BSpace"
+	case "delete":
+		tmuxKey = "DC"
+	case "up":
+		tmuxKey = "Up"
+	case "down":
+		tmuxKey = "Down"
+	case "left":
+		tmuxKey = "Left"
+	case "right":
+		tmuxKey = "Right"
+	case "home":
+		tmuxKey = "Home"
+	case "end":
+		tmuxKey = "End"
+	case "pgup":
+		tmuxKey = "PPage"
+	case "pgdown":
+		tmuxKey = "NPage"
+	case "esc":
+		tmuxKey = "Escape"
+	case "space":
+		tmuxKey = "Space"
+	case "ctrl+c":
+		tmuxKey = "C-c"
+	case "ctrl+l":
+		tmuxKey = "C-l"
+	case "ctrl+r":
+		tmuxKey = "C-r"
+	case "ctrl+p":
+		tmuxKey = "C-p"
+	case "ctrl+e":
+		tmuxKey = "C-e"
+	case "ctrl+w":
+		tmuxKey = "C-w"
+	case "ctrl+u":
+		tmuxKey = "C-u"
+	case "ctrl+k":
+		tmuxKey = "C-k"
+	}
+
+	// Single printable character: send as literal
+	if len(key) == 1 {
+		exec.Command("tmux", "send-keys", "-t", s.TmuxSession, "-l", key).Run()
+		return
+	}
+
+	// Named keys: send as key name
+	exec.Command("tmux", "send-keys", "-t", s.TmuxSession, tmuxKey).Run()
 }
 
 func (m *tuiModel) doSpawn(contextID, contextName *string) {
@@ -394,29 +442,26 @@ func (m tuiModel) View() string {
 	sidebar := m.renderSidebar()
 	content := m.renderContent()
 
-	// Input bar at the bottom
-	var inputBar string
-	switch m.focus {
-	case focusInput:
-		inputBar = m.chatInput.View()
-	case focusNewName:
-		inputBar = "Name: " + m.newNameInput.View()
-	case focusNewDir:
-		inputBar = "Dir: " + m.newDirInput.View()
-	case focusContextPicker:
-		inputBar = m.renderContextPicker()
-	default:
-		inputBar = dimStyle.Render("Enter=type │ n=new │ d=delete │ q=quit")
-	}
-
-	// Status
-	statusLine := ""
-	if m.flash != "" {
-		statusLine = dimStyle.Render(m.flash)
-	}
-
 	main := lipgloss.JoinHorizontal(lipgloss.Top, sidebar, content)
-	return lipgloss.JoinVertical(lipgloss.Left, main, inputBar, statusLine)
+
+	// Status bar
+	var statusLine string
+	switch m.mode {
+	case modeNewName:
+		statusLine = "Name: " + m.newNameInput.View()
+	case modeNewDir:
+		statusLine = "Dir: " + m.newDirInput.View()
+	case modeContextPick:
+		statusLine = m.renderContextPicker()
+	default:
+		if m.flash != "" {
+			statusLine = dimStyle.Render(m.flash)
+		} else {
+			statusLine = dimStyle.Render("^A/^Z switch │ Alt+N new │ Alt+D delete │ ^\\ quit")
+		}
+	}
+
+	return lipgloss.JoinVertical(lipgloss.Left, main, statusLine)
 }
 
 func (m tuiModel) renderSidebar() string {
@@ -439,7 +484,6 @@ func (m tuiModel) renderSidebar() string {
 			label = "[api] " + label
 		}
 
-		// Truncate to sidebar width
 		if len(label) > 20 {
 			label = label[:17] + "..."
 		}
@@ -455,7 +499,7 @@ func (m tuiModel) renderSidebar() string {
 		lines = append(lines, dimStyle.Render(" (no sessions)"))
 	}
 
-	// Pool status at bottom
+	// Pool at bottom
 	if globalPool != nil {
 		lines = append(lines, "")
 		lines = append(lines, dimStyle.Render("─── Pool ───"))
@@ -472,7 +516,6 @@ func (m tuiModel) renderSidebar() string {
 		}
 	}
 
-	// Pad to fill height
 	for len(lines) < m.h-2 {
 		lines = append(lines, "")
 	}
@@ -486,7 +529,7 @@ func (m tuiModel) renderContent() string {
 	}
 
 	if len(m.sessions) == 0 {
-		m.vp.SetContent(dimStyle.Render("\n  No sessions. Press 'n' to create one."))
+		m.vp.SetContent(dimStyle.Render("\n  No sessions. Press ctrl+n to create one."))
 		return m.vp.View()
 	}
 
@@ -497,7 +540,6 @@ func (m tuiModel) renderContent() string {
 		} else if s.Status != "running" {
 			m.vp.SetContent(dimStyle.Render("\n  Session stopped."))
 		}
-		// termContent is set via terminalMsg for running sessions
 	}
 
 	return m.vp.View()
@@ -507,7 +549,6 @@ func (m tuiModel) renderContextPicker() string {
 	var parts []string
 	parts = append(parts, "Context: ")
 
-	// Option 0: None
 	label := "(none)"
 	if m.ctxCursor == 0 {
 		label = selectedStyle.Render("> " + label)
@@ -530,18 +571,16 @@ func (m tuiModel) renderContextPicker() string {
 
 // RunSwarmTUI starts the Bubbletea TUI.
 func RunSwarmTUI() {
-	// Initialize database for TUI mode
 	database = initDatabase()
 	defer database.Close()
 
 	globalConfigService = newConfigService(database)
 
-	// Start pool if enabled (for sidebar display)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	initPool(ctx)
 
-	p := tea.NewProgram(initialModel(), tea.WithAltScreen())
+	p := tea.NewProgram(initialModel(), tea.WithAltScreen(), tea.WithMouseCellMotion())
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "TUI error: %v\n", err)
 		os.Exit(1)
