@@ -10,35 +10,23 @@ import (
 	"strings"
 	"time"
 
-	"swarmops/db"
-
 	_ "modernc.org/sqlite"
 )
 
-func initDatabase() (*sql.DB, *db.Queries) {
-	// Enable WAL mode and a 5s busy timeout in the DSN so all pool connections
-	// inherit them. Without busy_timeout, concurrent goroutines (broadcaster,
-	// goal auto-task creation) cause SQLITE_BUSY under load.
-	database, queries, _ := initDatabaseWithPathAndReturn(
+func initDatabase() *sql.DB {
+	database, _ := initDatabaseWithPathAndReturn(
 		"swarmops.db?_pragma=journal_mode%3DWAL&_pragma=busy_timeout%3D5000",
 	)
-	return database, queries
+	return database
 }
 
-func initTestDatabase() (*sql.DB, *db.Queries, string) {
-	// Use a unique filename for each test run to avoid conflicts.
-	// Bake WAL mode + busy_timeout into the DSN so they apply to every connection
-	// in the pool, not just the one that happens to run PRAGMA after open.
-	// This prevents SQLITE_BUSY when background goroutines (broadcaster timers,
-	// kickOffGoalSpecTask) write concurrently with test assertions.
+func initTestDatabase() (*sql.DB, string) {
 	testDbPath := fmt.Sprintf("swarmops-test-%d.db?_pragma=journal_mode%%3DWAL&_pragma=busy_timeout%%3D5000", time.Now().UnixNano())
-	db, queries, path := initDatabaseWithPathAndReturn(testDbPath)
-	return db, queries, path
+	db, path := initDatabaseWithPathAndReturn(testDbPath)
+	return db, path
 }
 
-func initDatabaseWithPathAndReturn(dbPath string) (*sql.DB, *db.Queries, string) {
-	
-	// Ensure directory exists
+func initDatabaseWithPathAndReturn(dbPath string) (*sql.DB, string) {
 	dbDir := filepath.Dir(dbPath)
 	if dbDir != "." {
 		if err := os.MkdirAll(dbDir, 0755); err != nil {
@@ -46,9 +34,6 @@ func initDatabaseWithPathAndReturn(dbPath string) (*sql.DB, *db.Queries, string)
 		}
 	}
 
-	// Open database connection.
-	// _pragma=foreign_keys%3Don sets foreign_keys=ON for every connection in the pool,
-	// since SQLite PRAGMA settings are per-connection and database/sql uses a pool.
 	dsn := dbPath
 	if !strings.Contains(dbPath, "?") {
 		dsn = dbPath + "?_pragma=foreign_keys%3Don"
@@ -60,30 +45,25 @@ func initDatabaseWithPathAndReturn(dbPath string) (*sql.DB, *db.Queries, string)
 		log.Fatalf("Failed to open database: %v", err)
 	}
 
-	// Test the connection
 	if err := database.Ping(); err != nil {
 		log.Fatalf("Failed to ping database: %v", err)
 	}
 
-	// Enable foreign key enforcement (SQLite disables it by default)
 	if _, err := database.Exec("PRAGMA foreign_keys = ON"); err != nil {
 		log.Printf("database: PRAGMA foreign_keys: %v", err)
 	}
 
-	// Apply migrations
 	if err := applyMigrations(database); err != nil {
 		log.Fatalf("Failed to apply migrations: %v", err)
 	}
 
-	queries := db.New(database)
-	return database, queries, dbPath
+	return database, dbPath
 }
 
 //go:embed db/migrations/*.sql
 var migrationsFS embed.FS
 
 func applyMigrations(database *sql.DB) error {
-	// Create migrations tracking table if it doesn't exist
 	_, err := database.Exec(`
 		CREATE TABLE IF NOT EXISTS schema_migrations (
 			version TEXT PRIMARY KEY,
@@ -94,8 +74,6 @@ func applyMigrations(database *sql.DB) error {
 		return fmt.Errorf("failed to create schema_migrations table: %v", err)
 	}
 
-	// Check if this is an existing database that needs migration seeding
-	// by checking if the migrations table is empty but schema exists
 	var migrationCount int
 	err = database.QueryRow("SELECT COUNT(*) FROM schema_migrations").Scan(&migrationCount)
 	if err != nil {
@@ -103,36 +81,30 @@ func applyMigrations(database *sql.DB) error {
 	}
 
 	if migrationCount == 0 {
-		// Check if 001_initial was already applied (projects table exists)
 		var tableExists int
 		err = database.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='projects'").Scan(&tableExists)
 		if err != nil {
 			return fmt.Errorf("failed to check for projects table: %v", err)
 		}
 		if tableExists > 0 {
-			// Seed 001 as already applied
 			database.Exec("INSERT OR IGNORE INTO schema_migrations (version) VALUES (?)", "db/migrations/001_initial.sql")
 		}
 
-		// Check if 002_elo_tracking was already applied (elo_rating column exists on agents)
 		var eloColumnExists int
 		err = database.QueryRow("SELECT COUNT(*) FROM pragma_table_info('agents') WHERE name='elo_rating'").Scan(&eloColumnExists)
 		if err != nil {
 			return fmt.Errorf("failed to check for elo_rating column: %v", err)
 		}
 		if eloColumnExists > 0 {
-			// Seed 002 as already applied
 			database.Exec("INSERT OR IGNORE INTO schema_migrations (version) VALUES (?)", "db/migrations/002_elo_tracking.sql")
 		}
 
-		// Check if 003_remove_worktrees was already applied (worktrees table doesn't exist)
 		var worktreesExists int
 		err = database.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='worktrees'").Scan(&worktreesExists)
 		if err != nil {
 			return fmt.Errorf("failed to check for worktrees table: %v", err)
 		}
 		if worktreesExists == 0 && tableExists > 0 {
-			// Worktrees table doesn't exist but other tables do, 003 was already applied
 			database.Exec("INSERT OR IGNORE INTO schema_migrations (version) VALUES (?)", "db/migrations/003_remove_worktrees.sql")
 		}
 	}
@@ -187,17 +159,16 @@ func applyMigrations(database *sql.DB) error {
 		"db/migrations/048_autopilot_label_filter.sql",
 		"db/migrations/049_swarm_mode.sql",
 		"db/migrations/050_pool.sql",
+		"db/migrations/051_sessions.sql",
 	}
 
 	for _, migrationPath := range migrations {
-		// Check if migration has already been applied
 		var count int
 		err := database.QueryRow("SELECT COUNT(*) FROM schema_migrations WHERE version = ?", migrationPath).Scan(&count)
 		if err != nil {
 			return fmt.Errorf("failed to check migration status for %s: %v", migrationPath, err)
 		}
 		if count > 0 {
-			// Migration already applied, skip
 			continue
 		}
 
@@ -208,8 +179,6 @@ func applyMigrations(database *sql.DB) error {
 
 		_, err = database.Exec(string(migrationSQL))
 		if err != nil {
-			// Handle ALTER TABLE errors for columns that already exist
-			// This can happen when migration 006 runs on a fresh DB where 005 already created the column
 			if strings.Contains(err.Error(), "duplicate column name") {
 				log.Printf("Migration %s: column already exists, skipping", migrationPath)
 			} else {
@@ -217,7 +186,6 @@ func applyMigrations(database *sql.DB) error {
 			}
 		}
 
-		// Record that migration was applied
 		_, err = database.Exec("INSERT INTO schema_migrations (version) VALUES (?)", migrationPath)
 		if err != nil {
 			return fmt.Errorf("failed to record migration %s: %v", migrationPath, err)

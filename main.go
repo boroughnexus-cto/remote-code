@@ -4,26 +4,14 @@ import (
 	"bufio"
 	"context"
 	"database/sql"
-	_ "embed"
-	"encoding/json"
-	"io"
 	"log"
 	"net/http"
 	"os"
-	"os/exec"
 	"strings"
-
-	"swarmops/db"
-
-	"github.com/creack/pty"
-	"github.com/gorilla/websocket"
+	"time"
 )
 
-//go:embed voice.html
-var voiceHTML []byte
-
 func init() {
-	// Load .env file if present (ignored in production where env vars are set externally)
 	f, err := os.Open(".env")
 	if err != nil {
 		return
@@ -36,21 +24,14 @@ func init() {
 			continue
 		}
 		if k, v, ok := strings.Cut(line, "="); ok {
-			if os.Getenv(k) == "" { // don't override real env vars
+			if os.Getenv(k) == "" {
 				os.Setenv(k, v)
 			}
 		}
 	}
 }
 
-var upgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool {
-		return true
-	},
-}
-
 var database *sql.DB
-var queries *db.Queries
 
 func main() {
 	// TUI subcommand: ./swarmops tui
@@ -58,196 +39,57 @@ func main() {
 		RunSwarmTUI()
 		return
 	}
-	// CLI subcommands: status / task / inject
-	if len(os.Args) > 1 {
-		switch os.Args[1] {
-		case "status", "task", "inject":
-			runCLI(os.Args[1:])
-			return
-		}
-	}
 
 	// Initialize database
-	database, queries = initDatabase()
+	database = initDatabase()
 	defer database.Close()
 
-	// Initialize config service (reads/writes system_config table)
+	// Initialize config service
 	globalConfigService = newConfigService(database)
 
-	// Restore fleet mode from DB (may be non-normal if server restarted mid-incident)
-	globalFleetState.LoadFromDB(database)
-
-	// Initialize agent transport (tmux for now; channels in Phase 3)
-	swarmTransport = initTransport()
-
-	// Ensure the Claude Code Stop hook script is written to disk
-	ensureSwarmHookScript()
-
-	// Start background version check (logs if update available; served at /api/swarm/version)
-	startVersionCheck()
-
-	// Start background usage stats poller (Claude quota + Copilot; served at /api/swarm/usage)
-	startUsagePoller()
-
-	// SWM-14: warn if any integrator worktree is stuck in a mid-merge state from a prior crash.
-	go checkIntegratorHealth()
-
-	// Start swarm agent status monitor
-	startSwarmMonitor()
-	startIPCPoller()
-	startTaskWatchdog()
-	startOrphanSweeper()
-	startDiskUsagePoller()
-	validateIntegrationConfig()
-	// Server-level context cancelled on SIGINT/SIGTERM (used by long-running background workers).
+	// Server context for background workers
 	serverCtx, serverCancel := context.WithCancel(context.Background())
 	defer serverCancel()
-
-	go startCIPoller(serverCtx)
-	go startPlaneAdapter(serverCtx)
-	go startTriagePoller(serverCtx)
-	startAutoDispatchLoop(serverCtx)
-	go InitDispatchWarm(serverCtx)
 
 	// Start warm session pool if enabled
 	initPool(serverCtx)
 
-	// Setup HTTP routes
-	http.HandleFunc("/", serveHome)
-	http.HandleFunc("/voice", serveVoice)
-	http.HandleFunc("/ws", authMiddleware(handleWebSocket))
-	http.HandleFunc("/ws/swarm", authMiddleware(handleSwarmWebSocket))
-	http.HandleFunc("/api/", handleAPIWithAuth)
+	// Periodic session status sync
+	go func() {
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				syncTmuxSessions()
+			case <-serverCtx.Done():
+				return
+			}
+		}
+	}()
 
-	// OpenAI-compatible pool API (outside auth middleware — uses its own Bearer token)
+	// HTTP routes
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"status":"ok","version":"2.0"}`))
+	})
+
+	http.HandleFunc("/api/", handleAPI)
+
+	// OpenAI-compatible pool API
 	http.HandleFunc("/v1/chat/completions", handlePoolChatCompletions)
 	http.HandleFunc("/v1/models", handlePoolListModels)
 	http.HandleFunc("/api/swarm/pool", handlePoolStatusAPI)
-
-	// Channels SSE endpoint: Claude Code connects here when launched with --channels.
-	// Auth is enforced inside ServeSSE via run_token; active only when a
-	// ChannelsTransport is reachable through swarmTransport.
-	if ct := getChannelsTransport(); ct != nil {
-		http.HandleFunc("GET /mcp/channels/{agentID}/{runID}", ct.ServeSSE)
-		http.HandleFunc("POST /mcp/channels/{agentID}/{runID}/messages", ct.ServeMessages)
-		log.Printf("transport: channels MCP endpoints registered at /mcp/channels/{agentID}/{runID}")
-	}
 
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
 	}
 
-	log.Printf("Server starting on :%s", port)
+	log.Printf("SwarmOps starting on :%s", port)
 	log.Fatal(http.ListenAndServe(":"+port, nil))
-}
-
-// handleAPIWithAuth wraps the API handler with authentication where needed
-func handleAPIWithAuth(w http.ResponseWriter, r *http.Request) {
-	// Auth endpoints don't require authentication
-	if strings.HasPrefix(r.URL.Path, "/api/auth/") {
-		handleAPI(w, r)
-		return
-	}
-
-	// All other API endpoints require authentication
-	authMiddleware(handleAPI)(w, r)
-}
-
-func serveHome(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/" {
-		http.NotFound(w, r)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.Write([]byte(`{"status":"ok","ui":"/voice"}`)) //nolint:errcheck
-}
-
-func serveVoice(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-store")
-	w.Write(voiceHTML) //nolint:errcheck
-}
-
-func handleWebSocket(w http.ResponseWriter, r *http.Request) {
-	conn, err := upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		log.Printf("WebSocket upgrade error: %v", err)
-		return
-	}
-	defer conn.Close()
-
-	// Check if a specific session is requested
-	sessionName := r.URL.Query().Get("session")
-	
-	var cmd *exec.Cmd
-	if sessionName != "" {
-		// Attach to specific tmux session
-		log.Printf("Attaching to tmux session: %s", sessionName)
-		cmd = exec.Command("tmux", "attach-session", "-t", sessionName)
-	} else {
-		// Create or attach to global session for general terminal use
-		log.Printf("Creating/attaching to global terminal session")
-		cmd = exec.Command("tmux", "new-session", "-A", "-s", "swarmops")
-	}
-
-	// Ensure proper terminal environment for UTF-8 and colors
-	cmd.Env = append(os.Environ(),
-		"LANG=C.UTF-8",
-		"LC_ALL=C.UTF-8",
-		"TERM=xterm-256color",
-	)
- 
- 	ptmx, err := pty.Start(cmd)
-	if err != nil {
-		log.Printf("Failed to start pty: %v", err)
-		return
-	}
-	defer ptmx.Close()
-
-	go func() {
-		for {
-			_, message, err := conn.ReadMessage()
-			if err != nil {
-				log.Printf("WebSocket read error: %v", err)
-				break
-			}
-
-			// Try to parse control messages (e.g., resize)
-			type resizeMsg struct {
-				Type string `json:"type"`
-				Cols int    `json:"cols"`
-				Rows int    `json:"rows"`
-			}
-			var rm resizeMsg
-			if err := json.Unmarshal(message, &rm); err == nil && rm.Type == "resize" {
-				if rm.Cols > 0 && rm.Rows > 0 {
-					_ = pty.Setsize(ptmx, &pty.Winsize{Cols: uint16(rm.Cols), Rows: uint16(rm.Rows)})
-				}
-				continue
-			}
-
-			ptmx.Write(message)
-		}
-	}()
-
-	go func() {
-		buf := make([]byte, 4096)
-		for {
-			n, err := ptmx.Read(buf)
-			if err != nil {
-				if err != io.EOF {
-					log.Printf("PTY read error: %v", err)
-				}
-				break
-			}
-			// Send raw bytes as a binary WebSocket frame; the browser will decode UTF-8 progressively
-			if err := conn.WriteMessage(websocket.BinaryMessage, buf[:n]); err != nil {
-				log.Printf("WebSocket write error: %v", err)
-				break
-			}
-		}
-	}()
-
-	cmd.Wait()
 }

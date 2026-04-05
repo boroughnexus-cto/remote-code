@@ -653,7 +653,13 @@ func TestPoolSlot_RealClaude(t *testing.T) {
 // ─── Pool request logging ────────────────────────────────────────────────────
 
 func TestPoolLogRequest(t *testing.T) {
-	pm := &PoolManager{db: database}
+	testDB, dbPath := initTestDatabase()
+	defer testDB.Close()
+	defer os.Remove(strings.TrimSuffix(dbPath, "?_pragma=journal_mode%3DWAL&_pragma=busy_timeout%3D5000"))
+	oldDB := database
+	database = testDB
+	defer func() { database = oldDB }()
+	pm := &PoolManager{db: testDB}
 
 	reqID := "test-req-" + fmt.Sprintf("%d", time.Now().UnixNano())
 	pm.logRequest(reqID, "claude-haiku-4-5", "pool-haiku-0", "test prompt", "complete",

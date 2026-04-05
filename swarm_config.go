@@ -105,37 +105,14 @@ type configChange struct {
 
 // configRegistry is the hardcoded map of known keys with metadata.
 var configRegistry = map[string]configMeta{
-	// Swarm limits
-	"swarm.max_agents":     {Default: "10", EnvVar: "SWARM_MAX_AGENTS", DangerLevel: 1, Description: "Maximum concurrent agents", Validate: validatePositiveInt(1, 1000)},
-	"swarm.max_tasks":      {Default: "50", EnvVar: "SWARM_MAX_TASKS", DangerLevel: 0, Description: "Maximum tracked tasks", Validate: validatePositiveInt(1, 10000)},
-	"swarm.max_disk_mb":    {Default: "5000", EnvVar: "SWARM_MAX_DISK_MB", DangerLevel: 1, Description: "Max worktree disk usage (MB)", Validate: validatePositiveInt(100, 0)},
-	"swarm.cost_limit_usd": {Default: "5.0", EnvVar: "SWARM_COST_LIMIT_USD", DangerLevel: 1, Description: "Per-session cost limit (USD)", Validate: validatePositiveFloat(0)},
-	"swarm.stuck_timeout":              {Default: "1800", EnvVar: "SWARM_STUCK_TIMEOUT", DangerLevel: 0, Description: "Seconds before agent marked stuck (0=disable)", Validate: validatePositiveInt(0, 0)},
-	"swarm.watchdog_heartbeat_timeout": {Default: "2700", EnvVar: "SWARM_WATCHDOG_HEARTBEAT_TIMEOUT", DangerLevel: 0, Description: "Seconds without heartbeat before agent is timed out (requires tmux dead)", Validate: validatePositiveInt(60, 0)},
-	"swarm.watchdog_absolute_timeout":  {Default: "7200", EnvVar: "SWARM_WATCHDOG_ABSOLUTE_TIMEOUT", DangerLevel: 0, Description: "Seconds hard cap regardless of heartbeat", Validate: validatePositiveInt(60, 0)},
-	// Budget
-	"swarm.budget_max_total":     {Default: "100.0", EnvVar: "SWARM_BUDGET_MAX_TOTAL", DangerLevel: 1, Description: "Total budget ceiling (USD)", Validate: validatePositiveFloat(0)},
-	"swarm.budget_autoraise_pct": {Default: "10", EnvVar: "SWARM_BUDGET_AUTORAISE_PCT", DangerLevel: 1, Description: "Auto-raise budget by this % when limit hit", Validate: validatePositiveInt(0, 100)},
-	// Spawn rate
-	"swarm.spawn_rate_interval": {Default: "60", EnvVar: "SWARM_SPAWN_RATE_INTERVAL", DangerLevel: 0, Description: "Spawn rate interval (seconds)", Validate: validatePositiveInt(1, 0)},
-	"swarm.spawn_rate_burst":    {Default: "3", EnvVar: "SWARM_SPAWN_RATE_BURST", DangerLevel: 0, Description: "Spawn burst limit", Validate: validatePositiveInt(1, 100)},
-	// Triage
-	"swarm.triage_enabled":  {Default: "false", EnvVar: "SWARM_TRIAGE_ENABLED", DangerLevel: 0, Description: "Enable background triage agent", Validate: validateBoolValue()},
-	"swarm.triage_interval": {Default: "3600", EnvVar: "SWARM_TRIAGE_INTERVAL", DangerLevel: 0, Description: "Triage check interval (seconds)", Validate: validatePositiveInt(60, 0)},
-	// Fleet
-	"fleet.mode":   {Default: "normal", DangerLevel: 2, Restartable: false, Description: "Fleet operating mode: normal/contain/stabilize", Validate: validateEnum("normal", "contain", "stabilize")},
-	"fleet.paused": {Default: "false", DangerLevel: 2, Restartable: false, Description: "Pause all new agent spawning", Validate: validateBoolValue()},
-	// Display
-	"display.log_verbosity": {Default: "info", DangerLevel: 0, Description: "TUI log verbosity: info/debug/trace", Validate: validateEnum("info", "debug", "trace")},
-	"display.timestamps":    {Default: "relative", DangerLevel: 0, Description: "Timestamp format: relative/absolute/none", Validate: validateEnum("relative", "absolute", "none")},
 	// Pool (warm Claude session pool + OpenAI-compatible API)
-	"pool.enabled":          {Default: "false", EnvVar: "POOL_ENABLED", DangerLevel: 1, Description: "Enable warm session pool + /v1/ OpenAI API", Validate: validateBoolValue()},
-	"pool.slots_per_model":  {Default: "2", EnvVar: "POOL_SLOTS_PER_MODEL", DangerLevel: 1, Description: "Warm instances per model", Validate: validatePositiveInt(1, 10)},
-	"pool.models":           {Default: "claude-haiku-4-5,claude-sonnet-4-6,claude-opus-4-6", EnvVar: "POOL_MODELS", DangerLevel: 1, Description: "Comma-separated models to pool"},
-	"pool.api_key":          {Default: "", EnvVar: "POOL_API_KEY", DangerLevel: 2, Description: "Bearer token for /v1/ endpoints; empty = no auth"},
-	"pool.request_timeout_s":  {Default: "300", EnvVar: "POOL_REQUEST_TIMEOUT", DangerLevel: 0, Description: "Per-request timeout (seconds)", Validate: validatePositiveInt(10, 600)},
-	"pool.max_consec_errors":  {Default: "3", EnvVar: "POOL_MAX_CONSEC_ERRORS", DangerLevel: 0, Description: "Consecutive errors before slot marked dead", Validate: validatePositiveInt(1, 10)},
-	"pool.idle_recycle_min":   {Default: "30", EnvVar: "POOL_IDLE_RECYCLE_MIN", DangerLevel: 0, Description: "Recycle idle slots after N minutes", Validate: validatePositiveInt(5, 1440)},
+	"pool.enabled":           {Default: "false", EnvVar: "POOL_ENABLED", DangerLevel: 1, Description: "Enable warm session pool + /v1/ OpenAI API", Validate: validateBoolValue()},
+	"pool.slots_per_model":   {Default: "2", EnvVar: "POOL_SLOTS_PER_MODEL", DangerLevel: 1, Description: "Warm instances per model", Validate: validatePositiveInt(1, 10)},
+	"pool.models":            {Default: "claude-haiku-4-5,claude-sonnet-4-6,claude-opus-4-6", EnvVar: "POOL_MODELS", DangerLevel: 1, Description: "Comma-separated models to pool"},
+	"pool.api_key":           {Default: "", EnvVar: "POOL_API_KEY", DangerLevel: 2, Description: "Bearer token for /v1/ endpoints; empty = no auth"},
+	"pool.request_timeout_s": {Default: "300", EnvVar: "POOL_REQUEST_TIMEOUT", DangerLevel: 0, Description: "Per-request timeout (seconds)", Validate: validatePositiveInt(10, 600)},
+	"pool.max_consec_errors": {Default: "3", EnvVar: "POOL_MAX_CONSEC_ERRORS", DangerLevel: 0, Description: "Consecutive errors before slot marked dead", Validate: validatePositiveInt(1, 10)},
+	"pool.idle_recycle_min":  {Default: "30", EnvVar: "POOL_IDLE_RECYCLE_MIN", DangerLevel: 0, Description: "Recycle idle slots after N minutes", Validate: validatePositiveInt(5, 1440)},
 }
 
 // configService is the settings service backed by SQLite.
