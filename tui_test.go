@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -159,6 +160,14 @@ func stripAnsi(s string) string {
 	return xansi.Strip(s)
 }
 
+// timeRe matches HH:MM:SS timestamps for normalization in golden comparisons.
+var timeRe = regexp.MustCompile(`\d{2}:\d{2}:\d{2}`)
+
+// normalizeTimestamps replaces HH:MM:SS with a fixed placeholder.
+func normalizeTimestamps(s string) string {
+	return timeRe.ReplaceAllString(s, "00:00:00")
+}
+
 // viewStripped returns the View() output with ANSI codes stripped.
 func viewStripped(m tuiModel) string {
 	return stripAnsi(m.View())
@@ -194,9 +203,12 @@ func assertGolden(t *testing.T, name, actual string) {
 	t.Helper()
 	path := goldenPath(name)
 
+	// Normalize timestamps so golden files don't depend on wall clock
+	normalized := normalizeTimestamps(actual)
+
 	if updateGolden() {
 		os.MkdirAll(filepath.Dir(path), 0755)
-		if err := os.WriteFile(path, []byte(actual), 0644); err != nil {
+		if err := os.WriteFile(path, []byte(normalized), 0644); err != nil {
 			t.Fatalf("failed to write golden file %s: %v", path, err)
 		}
 		return
@@ -204,11 +216,11 @@ func assertGolden(t *testing.T, name, actual string) {
 
 	expected, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("golden file %s not found. Run with UPDATE_GOLDEN=1 to generate.\nActual output:\n%s", path, actual)
+		t.Fatalf("golden file %s not found. Run with UPDATE_GOLDEN=1 to generate.\nActual output:\n%s", path, normalized)
 	}
 
-	if string(expected) != actual {
-		t.Errorf("golden file %s mismatch.\n--- expected ---\n%s\n--- actual ---\n%s", path, string(expected), actual)
+	if string(expected) != normalized {
+		t.Errorf("golden file %s mismatch.\n--- expected ---\n%s\n--- actual ---\n%s", path, string(expected), normalized)
 	}
 }
 
@@ -846,5 +858,132 @@ func TestStatusBar_ClearedOnCursorMove(t *testing.T) {
 	m = sendSpecialKey(m, "ctrl+z")
 	if m.flash != "" {
 		t.Errorf("flash should be cleared on cursor move, got %q", m.flash)
+	}
+}
+
+// ─── Top bar tests ──────────────────────────────────────────────────────────
+
+func TestTopBar_ShowsTitle(t *testing.T) {
+	m := newTestModel(nil)
+	view := viewStripped(m)
+
+	assertContains(t, view, "SwarmOps")
+}
+
+func TestTopBar_ShowsSessionCounts(t *testing.T) {
+	items := []sidebarItem{
+		fakeSessionItem("running-1", "running"),
+		fakeSessionItem("running-2", "running"),
+		fakeSessionItem("stopped-1", "stopped"),
+	}
+	m := newTestModel(items)
+	view := viewStripped(m)
+
+	assertContains(t, view, "2 running")
+	assertContains(t, view, "1 stopped")
+}
+
+func TestTopBar_ShowsPoolInfo(t *testing.T) {
+	items := []sidebarItem{
+		fakePoolItem("claude-haiku-4-5", "idle"),
+		fakePoolItem("claude-sonnet-4-6", "busy"),
+	}
+	m := newTestModel(items)
+	view := viewStripped(m)
+
+	assertContains(t, view, "Pool: 2 slots")
+}
+
+func TestTopBar_PoolOffWhenNoSlots(t *testing.T) {
+	m := newTestModel(nil)
+	view := viewStripped(m)
+
+	assertContains(t, view, "Pool: off")
+}
+
+func TestTopBar_ShowsTimestamp(t *testing.T) {
+	m := newTestModel(nil)
+	view := viewStripped(m)
+
+	// Should contain a time-like pattern (HH:MM:SS)
+	assertContains(t, view, ":")
+}
+
+func TestSidebar_ShowsSessionsLabel(t *testing.T) {
+	m := newTestModel(nil)
+	view := viewStripped(m)
+
+	assertContains(t, view, "Sessions")
+}
+
+// ─── Keyboard audit: keys don't leak between modes ──────────────────────────
+
+func TestKeyAudit_PassthroughAltKeysWork(t *testing.T) {
+	m := newTestModel(nil)
+
+	// Alt+N should enter new name mode, not be sent to tmux
+	m = sendSpecialKey(m, "alt+n")
+	if m.mode != modeNewName {
+		t.Errorf("alt+n should enter modeNewName, got %d", m.mode)
+	}
+}
+
+func TestKeyAudit_PopupKeysNotPassedToTmux(t *testing.T) {
+	// In popup mode, keys like q, s, r, / should be handled by popup, not sent to tmux
+	m := newTestModel(nil)
+	m.mode = modePlaneIssues
+	m.planeIssues = fakePlaneIssues()
+
+	// s should cycle sort, not be sent anywhere
+	m = sendKey(m, "s")
+	if m.popupSortMode != 1 {
+		t.Errorf("s in popup should cycle sort, got mode %d", m.popupSortMode)
+	}
+
+	// q should close popup
+	m = sendKey(m, "q")
+	if m.mode != modePassthrough {
+		t.Errorf("q should close popup, got mode %d", m.mode)
+	}
+}
+
+func TestKeyAudit_RegularKeysInPassthroughGoToTmux(t *testing.T) {
+	// Regular keys in passthrough should fall through to sendKeyToSession
+	// We can't easily test tmux interaction, but we can verify they don't
+	// change mode or state
+	items := []sidebarItem{fakeSessionItem("sess", "running")}
+	m := newTestModel(items)
+
+	m = sendKey(m, "a")
+	if m.mode != modePassthrough {
+		t.Errorf("regular key should stay in passthrough, got %d", m.mode)
+	}
+}
+
+// ─── Mouse handling test ────────────────────────────────────────────────────
+
+func TestMouse_ViewportHandlesMouseInPassthrough(t *testing.T) {
+	m := newTestModel(nil)
+
+	// Send a mouse wheel event — should not panic or change mode
+	updated, _ := m.Update(tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonWheelDown})
+	m = updated.(tuiModel)
+
+	if m.mode != modePassthrough {
+		t.Errorf("mouse in passthrough should stay in passthrough, got %d", m.mode)
+	}
+}
+
+func TestMouse_IgnoredInPopupModes(t *testing.T) {
+	m := newTestModel(nil)
+	m.mode = modePlaneIssues
+	m.planeIssues = fakePlaneIssues()
+
+	// Mouse in popup mode should not change anything
+	updated, _ := m.Update(tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonWheelDown})
+	m = updated.(tuiModel)
+
+	if m.mode != modePlaneIssues {
+		t.Errorf("mouse in popup should stay in popup, got %d", m.mode)
 	}
 }

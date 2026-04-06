@@ -41,7 +41,19 @@ var (
 			Bold(true).
 			Foreground(lipgloss.Color("#023d60")).
 			Padding(0, 1)
+
+	topBarStyle = lipgloss.NewStyle().
+			BorderBottom(true).
+			BorderStyle(lipgloss.NormalBorder()).
+			BorderForeground(lipgloss.Color("241")).
+			Padding(0, 1)
+
+	topBarTitleStyle = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.Color("#15a8a8"))
 )
+
+const headerHeight = 4 // top bar occupies 4 lines (content + border)
 
 // ─── Sidebar item: unified type for sessions + pool slots ────────────────────
 
@@ -292,7 +304,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if contentWidth < 20 {
 			contentWidth = 20
 		}
-		contentHeight := m.h - 2
+		contentHeight := m.h - 2 - headerHeight
 		if contentHeight < 5 {
 			contentHeight = 5
 		}
@@ -787,6 +799,7 @@ func (m tuiModel) View() string {
 		return renderActionPicker(m)
 	}
 
+	topBar := m.renderTopBar()
 	sidebar := m.renderSidebar()
 	content := m.renderContent()
 
@@ -808,12 +821,52 @@ func (m tuiModel) View() string {
 		}
 	}
 
-	return lipgloss.JoinVertical(lipgloss.Left, main, statusLine)
+	return lipgloss.JoinVertical(lipgloss.Left, topBar, main, statusLine)
+}
+
+func (m tuiModel) renderTopBar() string {
+	// Line 1: Title + session count
+	running := 0
+	stopped := 0
+	poolSlots := 0
+	for _, item := range m.items {
+		switch item.kind {
+		case itemSession:
+			if item.status == "running" {
+				running++
+			} else {
+				stopped++
+			}
+		case itemPoolSlot:
+			poolSlots++
+		}
+	}
+
+	title := topBarTitleStyle.Render("SwarmOps")
+	sessInfo := dimStyle.Render(fmt.Sprintf("  %d running, %d stopped", running, stopped))
+	line1 := title + sessInfo
+
+	// Line 2: Pool info + timestamp
+	var line2 string
+	if poolSlots > 0 {
+		line2 = dimStyle.Render(fmt.Sprintf("Pool: %d slots", poolSlots))
+	} else {
+		line2 = dimStyle.Render("Pool: off")
+	}
+	ts := dimStyle.Render(time.Now().Format("15:04:05"))
+	gap := m.w - lipgloss.Width(line2) - lipgloss.Width(ts) - 4
+	if gap < 1 {
+		gap = 1
+	}
+	line2 = line2 + strings.Repeat(" ", gap) + ts
+
+	content := line1 + "\n" + line2
+	return topBarStyle.Width(m.w - 2).Render(content)
 }
 
 func (m tuiModel) renderSidebar() string {
 	var lines []string
-	lines = append(lines, headerStyle.Render("SwarmOps"))
+	lines = append(lines, headerStyle.Render("Sessions"))
 	lines = append(lines, "")
 
 	// Track whether we've printed the pool separator
@@ -855,7 +908,7 @@ func (m tuiModel) renderSidebar() string {
 		lines = append(lines, "")
 	}
 
-	return sidebarStyle.Height(m.h - 2).Render(strings.Join(lines, "\n"))
+	return sidebarStyle.Height(m.h - 2 - headerHeight).Render(strings.Join(lines, "\n"))
 }
 
 // updateContentCache computes the right-pane content string based on current state
