@@ -1,0 +1,8 @@
+Plane Issues — Backlog & In Progress
+
+  !! [started   ] Fix auth middleware
+  !  [backlog   ] Add API rate limiting
+  -  [unstarted ] Update documentation
+     [backlog   ] Refactor models
+
+  ^A/^Z scroll | r refresh | q/Esc close

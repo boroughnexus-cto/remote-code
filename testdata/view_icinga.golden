@@ -1,0 +1,8 @@
+Icinga Alerts — Active Problems
+
+  CRITICAL  backup-fire / restic-backup
+     -> Backup failed: exit code 1
+  WARNING   unraid / disk-temp
+     -> Disk 3 temperature 52C
+
+  ^A/^Z scroll | r refresh | q/Esc close

@@ -91,6 +91,8 @@ const (
 	modeNewName
 	modeNewDir
 	modeContextPick
+	modePlaneIssues
+	modeIcingaAlerts
 )
 
 // Spawner abstracts session creation for testability.
@@ -131,6 +133,12 @@ type tuiModel struct {
 
 	// Status message
 	flash string
+
+	// Popup data
+	planeIssues    []planeIssue
+	icingaProblems []icingaProblem
+	popupErr       string
+	popupCursor    int
 
 	// Dependency injection for testing
 	spawner Spawner
@@ -304,6 +312,33 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case planeIssuesMsg:
+		if m.mode == modePlaneIssues {
+			m.planeIssues = msg
+			m.popupErr = ""
+			if m.popupCursor >= len(m.planeIssues) {
+				m.popupCursor = max(0, len(m.planeIssues)-1)
+			}
+		}
+		return m, nil
+
+	case icingaProblemsMsg:
+		if m.mode == modeIcingaAlerts {
+			m.icingaProblems = msg
+			m.popupErr = ""
+			if m.popupCursor >= len(m.icingaProblems) {
+				m.popupCursor = max(0, len(m.icingaProblems)-1)
+			}
+		}
+		return m, nil
+
+	case popupErrMsg:
+		if (msg.source == "plane" && m.mode == modePlaneIssues) ||
+			(msg.source == "icinga" && m.mode == modeIcingaAlerts) {
+			m.popupErr = msg.text
+		}
+		return m, nil
+
 	case contextListMsg:
 		m.contexts = msg
 		if len(m.contexts) > 0 {
@@ -363,6 +398,20 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, loadItems
 			}
 			return m, nil
+		case "alt+p":
+			m.mode = modePlaneIssues
+			m.planeIssues = nil
+			m.popupErr = ""
+			m.popupCursor = 0
+			m.flash = ""
+			return m, fetchPlaneIssues()
+		case "alt+i":
+			m.mode = modeIcingaAlerts
+			m.icingaProblems = nil
+			m.popupErr = ""
+			m.popupCursor = 0
+			m.flash = ""
+			return m, fetchIcingaProblems()
 		case "ctrl+\\":
 			return m, tea.Quit
 		default:
@@ -428,6 +477,46 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "esc":
 			m.mode = modePassthrough
 			m.flash = ""
+		}
+
+	case modePlaneIssues:
+		switch key {
+		case "q", "esc":
+			m.mode = modePassthrough
+			m.popupErr = ""
+		case "ctrl+a", "up":
+			if len(m.planeIssues) > 0 && m.popupCursor > 0 {
+				m.popupCursor--
+			}
+		case "ctrl+z", "down":
+			if len(m.planeIssues) > 0 && m.popupCursor < len(m.planeIssues)-1 {
+				m.popupCursor++
+			}
+		case "r":
+			m.planeIssues = nil
+			m.popupErr = ""
+			m.popupCursor = 0
+			return m, fetchPlaneIssues()
+		}
+
+	case modeIcingaAlerts:
+		switch key {
+		case "q", "esc":
+			m.mode = modePassthrough
+			m.popupErr = ""
+		case "ctrl+a", "up":
+			if len(m.icingaProblems) > 0 && m.popupCursor > 0 {
+				m.popupCursor--
+			}
+		case "ctrl+z", "down":
+			if len(m.icingaProblems) > 0 && m.popupCursor < len(m.icingaProblems)-1 {
+				m.popupCursor++
+			}
+		case "r":
+			m.icingaProblems = nil
+			m.popupErr = ""
+			m.popupCursor = 0
+			return m, fetchIcingaProblems()
 		}
 	}
 
@@ -520,6 +609,14 @@ func (m tuiModel) View() string {
 		return "Loading..."
 	}
 
+	// Full-screen popup modes
+	switch m.mode {
+	case modePlaneIssues:
+		return renderPlanePopup(m)
+	case modeIcingaAlerts:
+		return renderIcingaPopup(m)
+	}
+
 	sidebar := m.renderSidebar()
 	content := m.renderContent()
 
@@ -537,7 +634,7 @@ func (m tuiModel) View() string {
 		if m.flash != "" {
 			statusLine = dimStyle.Render(m.flash)
 		} else {
-			statusLine = dimStyle.Render("^A/^Z switch │ Alt+N new │ Alt+D delete │ ^\\ quit")
+			statusLine = dimStyle.Render("^A/^Z switch │ Alt+N new │ Alt+D delete │ Alt+P plane │ Alt+I icinga │ ^\\ quit")
 		}
 	}
 

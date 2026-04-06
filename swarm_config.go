@@ -113,6 +113,17 @@ var configRegistry = map[string]configMeta{
 	"pool.request_timeout_s": {Default: "300", EnvVar: "POOL_REQUEST_TIMEOUT", DangerLevel: 0, Description: "Per-request timeout (seconds)", Validate: validatePositiveInt(10, 600)},
 	"pool.max_consec_errors": {Default: "3", EnvVar: "POOL_MAX_CONSEC_ERRORS", DangerLevel: 0, Description: "Consecutive errors before slot marked dead", Validate: validatePositiveInt(1, 10)},
 	"pool.idle_recycle_min":  {Default: "30", EnvVar: "POOL_IDLE_RECYCLE_MIN", DangerLevel: 0, Description: "Recycle idle slots after N minutes", Validate: validatePositiveInt(5, 1440)},
+
+	// Plane integration (TUI popup)
+	"plane.api_url":    {Default: "", EnvVar: "PLANE_API_URL", DangerLevel: 0, Description: "Plane API base URL (e.g. http://100.74.34.7:8300)"},
+	"plane.api_key":    {Default: "", EnvVar: "PLANE_API_KEY", DangerLevel: 2, Description: "Plane API token"},
+	"plane.workspace":  {Default: "thomkernet", EnvVar: "PLANE_WORKSPACE", DangerLevel: 0, Description: "Plane workspace slug"},
+	"plane.project_id": {Default: "", EnvVar: "PLANE_PROJECT_ID", DangerLevel: 0, Description: "Plane project UUID for TUI popup"},
+
+	// Icinga integration (TUI popup)
+	"icinga.api_url":  {Default: "", EnvVar: "ICINGA_API_URL", DangerLevel: 0, Description: "Icinga API base URL (e.g. https://icinga.example.com:5665)"},
+	"icinga.api_user": {Default: "", EnvVar: "ICINGA_API_USER", DangerLevel: 0, Description: "Icinga API username"},
+	"icinga.api_pass": {Default: "", EnvVar: "ICINGA_API_PASS", DangerLevel: 2, Description: "Icinga API password"},
 }
 
 // configService is the settings service backed by SQLite.
