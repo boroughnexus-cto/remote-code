@@ -52,10 +52,15 @@ func newTestModel(items []sidebarItem) tuiModel {
 	di.CharLimit = 256
 	di.SetValue("/home/test")
 
+	fi := textinput.New()
+	fi.Placeholder = "filter..."
+	fi.CharLimit = 128
+
 	m := tuiModel{
 		mode:         modePassthrough,
 		newNameInput: ni,
 		newDirInput:  di,
+		popupFilter:  fi,
 		spawner:      &mockSpawner{},
 		items:        items,
 		w:            testWidth,

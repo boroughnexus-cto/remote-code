@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -198,78 +199,254 @@ func icingaStateLabel(state int) string {
 	}
 }
 
+// ─── Filter & Sort ──────────────────────────────────────────────────────────
+
+// planeSortLabels are the sort mode names, indexed by popupSortMode.
+var planeSortLabels = []string{"default", "priority", "state", "name"}
+
+// icingaSortLabels are the sort mode names, indexed by popupSortMode.
+var icingaSortLabels = []string{"default", "severity", "host", "service"}
+
+var priorityOrder = map[string]int{
+	"urgent": 0, "high": 1, "medium": 2, "low": 3, "none": 4,
+}
+
+var stateGroupOrder = map[string]int{
+	"started": 0, "unstarted": 1, "backlog": 2,
+}
+
+func filteredPlaneIssues(m tuiModel) []planeIssue {
+	if m.planeIssues == nil {
+		return nil
+	}
+	query := strings.ToLower(strings.TrimSpace(m.popupFilter.Value()))
+	if query == "" {
+		return sortPlaneIssues(m.planeIssues, m.popupSortMode)
+	}
+	var out []planeIssue
+	for _, issue := range m.planeIssues {
+		if strings.Contains(strings.ToLower(issue.Title), query) ||
+			strings.Contains(strings.ToLower(issue.StateGroup), query) ||
+			strings.Contains(strings.ToLower(issue.Priority), query) {
+			out = append(out, issue)
+		}
+	}
+	return sortPlaneIssues(out, m.popupSortMode)
+}
+
+func sortPlaneIssues(issues []planeIssue, mode int) []planeIssue {
+	if mode == 0 || len(issues) <= 1 {
+		return issues
+	}
+	sorted := make([]planeIssue, len(issues))
+	copy(sorted, issues)
+	switch mode {
+	case 1: // priority
+		sort.SliceStable(sorted, func(i, j int) bool {
+			return priorityOrder[sorted[i].Priority] < priorityOrder[sorted[j].Priority]
+		})
+	case 2: // state
+		sort.SliceStable(sorted, func(i, j int) bool {
+			return stateGroupOrder[sorted[i].StateGroup] < stateGroupOrder[sorted[j].StateGroup]
+		})
+	case 3: // name
+		sort.SliceStable(sorted, func(i, j int) bool {
+			return strings.ToLower(sorted[i].Title) < strings.ToLower(sorted[j].Title)
+		})
+	}
+	return sorted
+}
+
+func filteredIcingaProblems(m tuiModel) []icingaProblem {
+	if m.icingaProblems == nil {
+		return nil
+	}
+	query := strings.ToLower(strings.TrimSpace(m.popupFilter.Value()))
+	if query == "" {
+		return sortIcingaProblems(m.icingaProblems, m.popupSortMode)
+	}
+	var out []icingaProblem
+	for _, p := range m.icingaProblems {
+		if strings.Contains(strings.ToLower(p.Host), query) ||
+			strings.Contains(strings.ToLower(p.Service), query) ||
+			strings.Contains(strings.ToLower(p.Output), query) {
+			out = append(out, p)
+		}
+	}
+	return sortIcingaProblems(out, m.popupSortMode)
+}
+
+func sortIcingaProblems(problems []icingaProblem, mode int) []icingaProblem {
+	if mode == 0 || len(problems) <= 1 {
+		return problems
+	}
+	sorted := make([]icingaProblem, len(problems))
+	copy(sorted, problems)
+	switch mode {
+	case 1: // severity (critical first)
+		sort.SliceStable(sorted, func(i, j int) bool {
+			return sorted[i].State > sorted[j].State
+		})
+	case 2: // host
+		sort.SliceStable(sorted, func(i, j int) bool {
+			return strings.ToLower(sorted[i].Host) < strings.ToLower(sorted[j].Host)
+		})
+	case 3: // service
+		sort.SliceStable(sorted, func(i, j int) bool {
+			return strings.ToLower(sorted[i].Service) < strings.ToLower(sorted[j].Service)
+		})
+	}
+	return sorted
+}
+
+// ─── Prompt generation ──────────────────────────────────────────────────────
+
+func planeIssuePrompt(issue planeIssue) string {
+	return fmt.Sprintf("Work on Plane issue: %s (priority: %s, state: %s)", issue.Title, issue.Priority, issue.StateGroup)
+}
+
+func icingaProblemPrompt(problem icingaProblem) string {
+	return fmt.Sprintf("Investigate Icinga alert: %s on %s — %s", problem.Service, problem.Host, problem.Output)
+}
+
+// ─── Rendering ──────────────────────────────────────────────────────────────
+
 func renderPlanePopup(m tuiModel) string {
 	var sb strings.Builder
-	sb.WriteString(popupTitleStyle.Render("Plane Issues — Backlog & In Progress"))
-	sb.WriteString("\n\n")
+
+	title := "Plane Issues — Backlog & In Progress"
+	sortLabel := planeSortLabels[m.popupSortMode%len(planeSortLabels)]
+	if m.popupSortMode > 0 {
+		title += "  [sorted: " + sortLabel + "]"
+	}
+	sb.WriteString(popupTitleStyle.Render(title))
+	sb.WriteString("\n")
+
+	if m.popupFilterActive || m.popupFilter.Value() != "" {
+		sb.WriteString("  / " + m.popupFilter.View() + "\n")
+	}
+	sb.WriteString("\n")
 
 	if m.popupErr != "" {
 		sb.WriteString(dimStyle.Render("  Error: "+m.popupErr) + "\n")
 	} else if m.planeIssues == nil {
 		sb.WriteString(dimStyle.Render("  Loading...") + "\n")
-	} else if len(m.planeIssues) == 0 {
-		sb.WriteString(dimStyle.Render("  No issues found.") + "\n")
 	} else {
-		for i, issue := range m.planeIssues {
-			icon := priorityIcons[issue.Priority]
-			if icon == "" {
-				icon = "  "
-			}
+		filtered := filteredPlaneIssues(m)
+		if len(filtered) == 0 {
+			sb.WriteString(dimStyle.Render("  No issues found.") + "\n")
+		} else {
+			for i, issue := range filtered {
+				icon := priorityIcons[issue.Priority]
+				if icon == "" {
+					icon = "  "
+				}
 
-			stateLabel := fmt.Sprintf("%-10s", issue.StateGroup)
-			title := issue.Title
-			maxTitle := m.w - 20
-			if maxTitle < 20 {
-				maxTitle = 20
-			}
-			if len(title) > maxTitle {
-				title = title[:maxTitle-3] + "..."
-			}
+				stateLabel := fmt.Sprintf("%-10s", issue.StateGroup)
+				issueTitle := issue.Title
+				maxTitle := m.w - 20
+				if maxTitle < 20 {
+					maxTitle = 20
+				}
+				if len(issueTitle) > maxTitle {
+					issueTitle = issueTitle[:maxTitle-3] + "..."
+				}
 
-			line := fmt.Sprintf("  %s [%s] %s", icon, stateLabel, title)
-			if i == m.popupCursor {
-				line = selectedStyle.Render(line)
+				line := fmt.Sprintf("  %s [%s] %s", icon, stateLabel, issueTitle)
+				if i == m.popupCursor {
+					line = selectedStyle.Render(line)
+				}
+				sb.WriteString(line + "\n")
 			}
-			sb.WriteString(line + "\n")
 		}
 	}
 
-	sb.WriteString("\n" + dimStyle.Render("  ^A/^Z scroll | r refresh | q/Esc close"))
+	sb.WriteString("\n" + dimStyle.Render("  ^A/^Z scroll | / filter | s sort | Enter act | r refresh | q/Esc close"))
 	return sb.String()
 }
 
 func renderIcingaPopup(m tuiModel) string {
 	var sb strings.Builder
-	sb.WriteString(popupTitleStyle.Render("Icinga Alerts — Active Problems"))
-	sb.WriteString("\n\n")
+
+	title := "Icinga Alerts — Active Problems"
+	sortLabel := icingaSortLabels[m.popupSortMode%len(icingaSortLabels)]
+	if m.popupSortMode > 0 {
+		title += "  [sorted: " + sortLabel + "]"
+	}
+	sb.WriteString(popupTitleStyle.Render(title))
+	sb.WriteString("\n")
+
+	if m.popupFilterActive || m.popupFilter.Value() != "" {
+		sb.WriteString("  / " + m.popupFilter.View() + "\n")
+	}
+	sb.WriteString("\n")
 
 	if m.popupErr != "" {
 		sb.WriteString(dimStyle.Render("  Error: "+m.popupErr) + "\n")
 	} else if m.icingaProblems == nil {
 		sb.WriteString(dimStyle.Render("  Loading...") + "\n")
-	} else if len(m.icingaProblems) == 0 {
-		sb.WriteString(dimStyle.Render("  No active problems. All clear!") + "\n")
 	} else {
-		for i, p := range m.icingaProblems {
-			stateStyle := stateColors[p.State]
-			if stateStyle.GetForeground() == (lipgloss.NoColor{}) {
-				stateStyle = dimStyle
-			}
-			label := icingaStateLabel(p.State)
-			header := fmt.Sprintf("  %s  %s / %s", label, p.Host, p.Service)
-			if i == m.popupCursor {
-				header = selectedStyle.Render(header)
-			} else {
-				header = stateStyle.Render(header)
-			}
-			sb.WriteString(header + "\n")
+		filtered := filteredIcingaProblems(m)
+		if len(filtered) == 0 {
+			sb.WriteString(dimStyle.Render("  No active problems. All clear!") + "\n")
+		} else {
+			for i, p := range filtered {
+				stateStyle := stateColors[p.State]
+				if stateStyle.GetForeground() == (lipgloss.NoColor{}) {
+					stateStyle = dimStyle
+				}
+				label := icingaStateLabel(p.State)
+				header := fmt.Sprintf("  %s  %s / %s", label, p.Host, p.Service)
+				if i == m.popupCursor {
+					header = selectedStyle.Render(header)
+				} else {
+					header = stateStyle.Render(header)
+				}
+				sb.WriteString(header + "\n")
 
-			if p.Output != "" {
-				sb.WriteString(dimStyle.Render("     -> "+p.Output) + "\n")
+				if p.Output != "" {
+					sb.WriteString(dimStyle.Render("     -> "+p.Output) + "\n")
+				}
 			}
 		}
 	}
 
-	sb.WriteString("\n" + dimStyle.Render("  ^A/^Z scroll | r refresh | q/Esc close"))
+	sb.WriteString("\n" + dimStyle.Render("  ^A/^Z scroll | / filter | s sort | Enter act | r refresh | q/Esc close"))
+	return sb.String()
+}
+
+// ─── Action picker ──────────────────────────────────────────────────────────
+
+func renderActionPicker(m tuiModel) string {
+	var sb strings.Builder
+
+	target := m.actionTarget
+	if len(target) > 60 {
+		target = target[:57] + "..."
+	}
+	sb.WriteString(popupTitleStyle.Render("Act on: "+target))
+	sb.WriteString("\n\n")
+
+	if len(m.actionSessions) > 0 {
+		sb.WriteString("  Send to existing session:\n")
+		for i, s := range m.actionSessions {
+			prefix := "    "
+			if i == m.actionCursor {
+				prefix = selectedStyle.Render("  > ")
+			}
+			sb.WriteString(prefix + s.label + " (" + s.status + ")\n")
+		}
+		sb.WriteString("\n")
+	}
+
+	newIdx := len(m.actionSessions)
+	prefix := "    "
+	if m.actionCursor == newIdx {
+		prefix = selectedStyle.Render("  > ")
+	}
+	sb.WriteString("  Spawn new session:\n")
+	sb.WriteString(prefix + "[New session with this task]\n")
+
+	sb.WriteString("\n" + dimStyle.Render("  ^A/^Z select | Enter confirm | Esc cancel"))
 	return sb.String()
 }

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -404,3 +406,593 @@ func findStr(s, sub string) bool {
 	}
 	return false
 }
+
+// ─── Filter tests ──────────────────────────────────────────────────���────────
+
+func TestFilter_PlaneMatchesTitle(t *testing.T) {
+	m := newTestModel(nil)
+	m.mode = modePlaneIssues
+	m.planeIssues = fakePlaneIssues()
+	m.popupFilter.SetValue("auth")
+
+	filtered := filteredPlaneIssues(m)
+	if len(filtered) != 1 {
+		t.Fatalf("expected 1 match for 'auth', got %d", len(filtered))
+	}
+	if filtered[0].Title != "Fix auth middleware" {
+		t.Errorf("expected 'Fix auth middleware', got %q", filtered[0].Title)
+	}
+}
+
+func TestFilter_PlaneMatchesPriority(t *testing.T) {
+	m := newTestModel(nil)
+	m.mode = modePlaneIssues
+	m.planeIssues = fakePlaneIssues()
+	m.popupFilter.SetValue("urgent")
+
+	filtered := filteredPlaneIssues(m)
+	if len(filtered) != 1 {
+		t.Fatalf("expected 1 match for 'urgent', got %d", len(filtered))
+	}
+}
+
+func TestFilter_PlaneMatchesState(t *testing.T) {
+	m := newTestModel(nil)
+	m.mode = modePlaneIssues
+	m.planeIssues = fakePlaneIssues()
+	m.popupFilter.SetValue("backlog")
+
+	filtered := filteredPlaneIssues(m)
+	if len(filtered) != 2 {
+		t.Fatalf("expected 2 matches for 'backlog', got %d", len(filtered))
+	}
+}
+
+func TestFilter_PlaneNoMatch(t *testing.T) {
+	m := newTestModel(nil)
+	m.mode = modePlaneIssues
+	m.planeIssues = fakePlaneIssues()
+	m.popupFilter.SetValue("zzzzz")
+
+	filtered := filteredPlaneIssues(m)
+	if len(filtered) != 0 {
+		t.Fatalf("expected 0 matches, got %d", len(filtered))
+	}
+}
+
+func TestFilter_PlaneEmptyFilterReturnsAll(t *testing.T) {
+	m := newTestModel(nil)
+	m.mode = modePlaneIssues
+	m.planeIssues = fakePlaneIssues()
+
+	filtered := filteredPlaneIssues(m)
+	if len(filtered) != len(m.planeIssues) {
+		t.Fatalf("empty filter should return all %d issues, got %d", len(m.planeIssues), len(filtered))
+	}
+}
+
+func TestFilter_PlaneNilIssuesReturnsNil(t *testing.T) {
+	m := newTestModel(nil)
+	m.planeIssues = nil
+
+	filtered := filteredPlaneIssues(m)
+	if filtered != nil {
+		t.Fatalf("nil issues should return nil, got %v", filtered)
+	}
+}
+
+func TestFilter_IcingaMatchesHost(t *testing.T) {
+	m := newTestModel(nil)
+	m.mode = modeIcingaAlerts
+	m.icingaProblems = fakeIcingaProblems()
+	m.popupFilter.SetValue("unraid")
+
+	filtered := filteredIcingaProblems(m)
+	if len(filtered) != 1 {
+		t.Fatalf("expected 1 match for 'unraid', got %d", len(filtered))
+	}
+	if filtered[0].Host != "unraid" {
+		t.Errorf("expected host 'unraid', got %q", filtered[0].Host)
+	}
+}
+
+func TestFilter_IcingaMatchesOutput(t *testing.T) {
+	m := newTestModel(nil)
+	m.icingaProblems = fakeIcingaProblems()
+	m.popupFilter.SetValue("exit code")
+
+	filtered := filteredIcingaProblems(m)
+	if len(filtered) != 1 {
+		t.Fatalf("expected 1 match for 'exit code', got %d", len(filtered))
+	}
+}
+
+func TestFilter_CaseInsensitive(t *testing.T) {
+	m := newTestModel(nil)
+	m.planeIssues = fakePlaneIssues()
+	m.popupFilter.SetValue("FIX AUTH")
+
+	filtered := filteredPlaneIssues(m)
+	if len(filtered) != 1 {
+		t.Fatalf("case-insensitive filter should match, got %d", len(filtered))
+	}
+}
+
+func TestKey_FilterActivate(t *testing.T) {
+	m := newTestModel(nil)
+	m.mode = modePlaneIssues
+	m.planeIssues = fakePlaneIssues()
+
+	m = sendKey(m, "/")
+	if !m.popupFilterActive {
+		t.Error("/ should activate filter")
+	}
+}
+
+func TestKey_FilterEscClears(t *testing.T) {
+	m := newTestModel(nil)
+	m.mode = modePlaneIssues
+	m.planeIssues = fakePlaneIssues()
+	m.popupFilterActive = true
+	m.popupFilter.SetValue("test")
+
+	m = sendSpecialKey(m, "esc")
+	if m.popupFilterActive {
+		t.Error("esc should deactivate filter")
+	}
+	if m.popupFilter.Value() != "" {
+		t.Errorf("esc should clear filter, got %q", m.popupFilter.Value())
+	}
+	if m.mode != modePlaneIssues {
+		t.Errorf("esc in filter should stay in popup mode, got %d", m.mode)
+	}
+}
+
+func TestKey_FilterEnterConfirms(t *testing.T) {
+	m := newTestModel(nil)
+	m.mode = modePlaneIssues
+	m.planeIssues = fakePlaneIssues()
+	m.popupFilterActive = true
+	m.popupFilter.SetValue("auth")
+	m.popupFilter.Focus()
+
+	m = sendSpecialKey(m, "enter")
+	if m.popupFilterActive {
+		t.Error("enter should deactivate filter")
+	}
+	// Filter value should persist
+	if m.popupFilter.Value() != "auth" {
+		t.Errorf("enter should keep filter value, got %q", m.popupFilter.Value())
+	}
+}
+
+func TestKey_FilterCursorResets(t *testing.T) {
+	m := newTestModel(nil)
+	m.mode = modePlaneIssues
+	m.planeIssues = fakePlaneIssues()
+	m.popupCursor = 3
+
+	// Activate filter and type — cursor should reset
+	m = sendKey(m, "/")
+	// Simulate typing by setting filter value directly since Bubbletea input is complex
+	m.popupFilter.SetValue("auth")
+	m.popupCursor = 0 // filter handler resets cursor
+	filtered := filteredPlaneIssues(m)
+	if m.popupCursor >= len(filtered) && len(filtered) > 0 {
+		t.Error("cursor should be within filtered range")
+	}
+}
+
+// ─── Sort tests ─────────────────────────────────────────────────────────────
+
+func TestSort_PlaneCycles(t *testing.T) {
+	m := newTestModel(nil)
+	m.mode = modePlaneIssues
+	m.planeIssues = fakePlaneIssues()
+
+	if m.popupSortMode != 0 {
+		t.Fatalf("initial sort mode should be 0, got %d", m.popupSortMode)
+	}
+
+	m = sendKey(m, "s")
+	if m.popupSortMode != 1 {
+		t.Errorf("after first s: sort mode should be 1, got %d", m.popupSortMode)
+	}
+
+	m = sendKey(m, "s")
+	if m.popupSortMode != 2 {
+		t.Errorf("after second s: sort mode should be 2, got %d", m.popupSortMode)
+	}
+
+	m = sendKey(m, "s")
+	if m.popupSortMode != 3 {
+		t.Errorf("after third s: sort mode should be 3, got %d", m.popupSortMode)
+	}
+
+	m = sendKey(m, "s")
+	if m.popupSortMode != 0 {
+		t.Errorf("after fourth s: sort mode should wrap to 0, got %d", m.popupSortMode)
+	}
+}
+
+func TestSort_PlaneByPriority(t *testing.T) {
+	m := newTestModel(nil)
+	m.planeIssues = fakePlaneIssues()
+	m.popupSortMode = 1 // priority
+
+	sorted := filteredPlaneIssues(m)
+	if len(sorted) < 2 {
+		t.Fatal("need at least 2 issues")
+	}
+	// urgent should come first
+	if sorted[0].Priority != "urgent" {
+		t.Errorf("first issue should be urgent, got %q", sorted[0].Priority)
+	}
+}
+
+func TestSort_PlaneByState(t *testing.T) {
+	m := newTestModel(nil)
+	m.planeIssues = fakePlaneIssues()
+	m.popupSortMode = 2 // state
+
+	sorted := filteredPlaneIssues(m)
+	if len(sorted) < 2 {
+		t.Fatal("need at least 2 issues")
+	}
+	// started should come first
+	if sorted[0].StateGroup != "started" {
+		t.Errorf("first issue should be started, got %q", sorted[0].StateGroup)
+	}
+}
+
+func TestSort_PlaneByName(t *testing.T) {
+	m := newTestModel(nil)
+	m.planeIssues = fakePlaneIssues()
+	m.popupSortMode = 3 // name
+
+	sorted := filteredPlaneIssues(m)
+	if len(sorted) < 2 {
+		t.Fatal("need at least 2 issues")
+	}
+	// "Add API..." comes before "Fix auth..."
+	if !strings.HasPrefix(sorted[0].Title, "Add") {
+		t.Errorf("first issue by name should start with 'Add', got %q", sorted[0].Title)
+	}
+}
+
+func TestSort_IcingaBySeverity(t *testing.T) {
+	m := newTestModel(nil)
+	m.icingaProblems = []icingaProblem{
+		{Host: "host1", Service: "svc1", State: 1, Output: "warning"},
+		{Host: "host2", Service: "svc2", State: 2, Output: "critical"},
+	}
+	m.popupSortMode = 1 // severity (critical first)
+
+	sorted := filteredIcingaProblems(m)
+	if sorted[0].State != 2 {
+		t.Errorf("first by severity should be critical (2), got %d", sorted[0].State)
+	}
+}
+
+func TestSort_IcingaByHost(t *testing.T) {
+	m := newTestModel(nil)
+	m.icingaProblems = fakeIcingaProblems() // backup-fire, unraid
+	m.popupSortMode = 2 // host
+
+	sorted := filteredIcingaProblems(m)
+	if sorted[0].Host != "backup-fire" {
+		t.Errorf("first by host should be backup-fire, got %q", sorted[0].Host)
+	}
+}
+
+func TestSort_ResetsCursor(t *testing.T) {
+	m := newTestModel(nil)
+	m.mode = modePlaneIssues
+	m.planeIssues = fakePlaneIssues()
+	m.popupCursor = 3
+
+	m = sendKey(m, "s")
+	if m.popupCursor != 0 {
+		t.Errorf("sort should reset cursor to 0, got %d", m.popupCursor)
+	}
+}
+
+func TestSort_FilterAndSortCombined(t *testing.T) {
+	m := newTestModel(nil)
+	m.planeIssues = fakePlaneIssues()
+	m.popupFilter.SetValue("backlog") // 2 items: "Add API...", "Refactor..."
+	m.popupSortMode = 3               // name
+
+	sorted := filteredPlaneIssues(m)
+	if len(sorted) != 2 {
+		t.Fatalf("expected 2 backlog items, got %d", len(sorted))
+	}
+	if !strings.HasPrefix(sorted[0].Title, "Add") {
+		t.Errorf("sorted+filtered first should be 'Add...', got %q", sorted[0].Title)
+	}
+}
+
+// ─── Sort label shown in view ───────────────────────────────────────────────
+
+func TestView_PlaneSortLabel(t *testing.T) {
+	m := newTestModel(nil)
+	m.mode = modePlaneIssues
+	m.planeIssues = fakePlaneIssues()
+	m.popupSortMode = 1
+	view := viewStripped(m)
+
+	assertContains(t, view, "sorted: priority")
+}
+
+func TestView_IcingaSortLabel(t *testing.T) {
+	m := newTestModel(nil)
+	m.mode = modeIcingaAlerts
+	m.icingaProblems = fakeIcingaProblems()
+	m.popupSortMode = 1
+	view := viewStripped(m)
+
+	assertContains(t, view, "sorted: severity")
+}
+
+// ─── View shows filter input ────────────────────────────────────────────────
+
+func TestView_PlaneShowsFilter(t *testing.T) {
+	m := newTestModel(nil)
+	m.mode = modePlaneIssues
+	m.planeIssues = fakePlaneIssues()
+	m.popupFilterActive = true
+	m.popupFilter.SetValue("auth")
+	view := viewStripped(m)
+
+	assertContains(t, view, "/ ")
+	assertContains(t, view, "auth")
+}
+
+// ─── Help bar shows new keys ────────────────────────────────────────────────
+
+func TestView_PopupHelpBar(t *testing.T) {
+	m := newTestModel(nil)
+	m.mode = modePlaneIssues
+	m.planeIssues = fakePlaneIssues()
+	view := viewStripped(m)
+
+	assertContains(t, view, "/ filter")
+	assertContains(t, view, "s sort")
+	assertContains(t, view, "Enter act")
+}
+
+// ─── Action picker tests ────────────────────────────────────────────────────
+
+func TestAction_OpenFromPlane(t *testing.T) {
+	items := []sidebarItem{
+		fakeSessionItem("dev-session", "running"),
+		fakeSessionItem("stopped-one", "stopped"),
+	}
+	m := newTestModel(items)
+	m.mode = modePlaneIssues
+	m.planeIssues = fakePlaneIssues()
+	m.popupCursor = 0
+
+	m = sendSpecialKey(m, "enter")
+	if m.mode != modePopupAction {
+		t.Errorf("enter should open action picker, got mode %d", m.mode)
+	}
+	if m.actionTarget != "Fix auth middleware" {
+		t.Errorf("actionTarget should be issue title, got %q", m.actionTarget)
+	}
+	if !strings.Contains(m.actionPrompt, "Fix auth middleware") {
+		t.Errorf("actionPrompt should contain issue title, got %q", m.actionPrompt)
+	}
+	if m.actionPrevMode != modePlaneIssues {
+		t.Errorf("actionPrevMode should be modePlaneIssues, got %d", m.actionPrevMode)
+	}
+	// Only running sessions should appear
+	if len(m.actionSessions) != 1 {
+		t.Errorf("should have 1 running session, got %d", len(m.actionSessions))
+	}
+	if m.actionSessions[0].label != "dev-session" {
+		t.Errorf("running session should be dev-session, got %q", m.actionSessions[0].label)
+	}
+}
+
+func TestAction_OpenFromIcinga(t *testing.T) {
+	items := []sidebarItem{fakeSessionItem("ops", "running")}
+	m := newTestModel(items)
+	m.mode = modeIcingaAlerts
+	m.icingaProblems = fakeIcingaProblems()
+	m.popupCursor = 0
+
+	m = sendSpecialKey(m, "enter")
+	if m.mode != modePopupAction {
+		t.Errorf("enter should open action picker, got mode %d", m.mode)
+	}
+	if !strings.Contains(m.actionTarget, "backup-fire") {
+		t.Errorf("actionTarget should contain host, got %q", m.actionTarget)
+	}
+	if !strings.Contains(m.actionPrompt, "restic-backup") {
+		t.Errorf("actionPrompt should contain service, got %q", m.actionPrompt)
+	}
+}
+
+func TestAction_EscReturnsToPopup(t *testing.T) {
+	m := newTestModel(nil)
+	m.mode = modePopupAction
+	m.actionPrevMode = modePlaneIssues
+
+	m = sendSpecialKey(m, "esc")
+	if m.mode != modePlaneIssues {
+		t.Errorf("esc should return to previous popup mode, got %d", m.mode)
+	}
+}
+
+func TestAction_CursorNav(t *testing.T) {
+	items := []sidebarItem{
+		fakeSessionItem("s1", "running"),
+		fakeSessionItem("s2", "running"),
+	}
+	m := newTestModel(items)
+	m.mode = modePopupAction
+	m.actionSessions = items[:2] // 2 sessions
+	m.actionCursor = 0
+
+	// Navigate to second session
+	m = sendSpecialKey(m, "ctrl+z")
+	if m.actionCursor != 1 {
+		t.Errorf("cursor should be 1, got %d", m.actionCursor)
+	}
+
+	// Navigate to "new session" option (index 2)
+	m = sendSpecialKey(m, "ctrl+z")
+	if m.actionCursor != 2 {
+		t.Errorf("cursor should be 2 (new session), got %d", m.actionCursor)
+	}
+
+	// Clamp at bottom
+	m = sendSpecialKey(m, "ctrl+z")
+	if m.actionCursor != 2 {
+		t.Errorf("cursor should clamp at 2, got %d", m.actionCursor)
+	}
+
+	// Back up
+	m = sendSpecialKey(m, "ctrl+a")
+	if m.actionCursor != 1 {
+		t.Errorf("cursor should be 1, got %d", m.actionCursor)
+	}
+}
+
+func TestAction_SpawnNew(t *testing.T) {
+	spawner := &mockSpawner{}
+	m := newTestModel(nil)
+	m.spawner = spawner
+	m.mode = modePopupAction
+	m.actionSessions = nil // no existing sessions
+	m.actionCursor = 0     // "new session" is index 0 when no sessions
+	m.actionTarget = "Fix auth middleware"
+	m.actionPrompt = "Work on Plane issue: Fix auth middleware"
+
+	m = sendSpecialKey(m, "enter")
+
+	if len(spawner.calls) != 1 {
+		t.Fatalf("expected 1 spawn call, got %d", len(spawner.calls))
+	}
+	if spawner.calls[0].name != "fix-auth-middleware" {
+		t.Errorf("session name should be sanitized, got %q", spawner.calls[0].name)
+	}
+	if m.mode != modePassthrough {
+		t.Errorf("should return to passthrough, got %d", m.mode)
+	}
+}
+
+func TestAction_NoItemsNoEnter(t *testing.T) {
+	m := newTestModel(nil)
+	m.mode = modePlaneIssues
+	m.planeIssues = []planeIssue{} // empty
+
+	m = sendSpecialKey(m, "enter")
+	// Should stay in plane mode since there's nothing to act on
+	if m.mode != modePlaneIssues {
+		t.Errorf("enter on empty list should stay in popup, got mode %d", m.mode)
+	}
+}
+
+// ─── Action picker rendering ────────────────────────────────────────────────
+
+func TestView_ActionPicker(t *testing.T) {
+	items := []sidebarItem{fakeSessionItem("my-project", "running")}
+	m := newTestModel(items)
+	m.mode = modePopupAction
+	m.actionTarget = "Fix auth middleware"
+	m.actionPrompt = "Work on this"
+	m.actionSessions = items
+	m.actionCursor = 0
+	view := viewStripped(m)
+
+	assertContains(t, view, "Act on")
+	assertContains(t, view, "Fix auth middleware")
+	assertContains(t, view, "my-project")
+	assertContains(t, view, "running")
+	assertContains(t, view, "New session")
+	assertContains(t, view, "confirm")
+	assertContains(t, view, "cancel")
+}
+
+func TestView_ActionPickerNoSessions(t *testing.T) {
+	m := newTestModel(nil)
+	m.mode = modePopupAction
+	m.actionTarget = "Check alert"
+	m.actionSessions = nil
+	m.actionCursor = 0
+	view := viewStripped(m)
+
+	assertContains(t, view, "New session")
+	assertNotContains(t, view, "Send to existing")
+}
+
+func TestView_ActionPickerReplacesMain(t *testing.T) {
+	items := []sidebarItem{fakeSessionItem("sess", "running")}
+	m := newTestModel(items)
+	m.mode = modePopupAction
+	m.actionTarget = "test"
+	view := viewStripped(m)
+
+	assertNotContains(t, view, "SwarmOps")
+}
+
+// ─── Prompt generation ──────────────────────────────────────────────────────
+
+func TestPlaneIssuePrompt(t *testing.T) {
+	issue := planeIssue{Title: "Fix auth", Priority: "urgent", StateGroup: "started"}
+	prompt := planeIssuePrompt(issue)
+
+	if !strings.Contains(prompt, "Fix auth") {
+		t.Errorf("prompt should contain title, got %q", prompt)
+	}
+	if !strings.Contains(prompt, "urgent") {
+		t.Errorf("prompt should contain priority, got %q", prompt)
+	}
+	if !strings.Contains(prompt, "started") {
+		t.Errorf("prompt should contain state, got %q", prompt)
+	}
+}
+
+func TestIcingaProblemPrompt(t *testing.T) {
+	problem := icingaProblem{Host: "web-01", Service: "http-check", State: 2, Output: "Connection refused"}
+	prompt := icingaProblemPrompt(problem)
+
+	if !strings.Contains(prompt, "http-check") {
+		t.Errorf("prompt should contain service, got %q", prompt)
+	}
+	if !strings.Contains(prompt, "web-01") {
+		t.Errorf("prompt should contain host, got %q", prompt)
+	}
+	if !strings.Contains(prompt, "Connection refused") {
+		t.Errorf("prompt should contain output, got %q", prompt)
+	}
+}
+
+// ─── sanitizeSessionName ────────────────────────────────────────────────────
+
+func TestSanitizeSessionName(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"Fix auth middleware", "fix-auth-middleware"},
+		{"URGENT: Deploy now!!!", "urgent-deploy-now"},
+		{"", "task"},
+		{"a very long session name that exceeds thirty characters easily", "a-very-long-session-name-that-"},
+		{"---test---", "test"},
+		{"hello_world", "hello-world"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got := sanitizeSessionName(tt.input)
+			if got != tt.want {
+				t.Errorf("sanitizeSessionName(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+// suppress unused import warning
+var _ = fmt.Sprintf

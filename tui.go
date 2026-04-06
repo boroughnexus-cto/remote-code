@@ -93,6 +93,7 @@ const (
 	modeContextPick
 	modePlaneIssues
 	modeIcingaAlerts
+	modePopupAction
 )
 
 // Spawner abstracts session creation for testability.
@@ -140,6 +141,18 @@ type tuiModel struct {
 	popupErr       string
 	popupCursor    int
 
+	// Popup filter & sort
+	popupFilter       textinput.Model
+	popupFilterActive bool
+	popupSortMode     int // 0=default, 1, 2 — meaning depends on popup type
+
+	// Action picker (modePopupAction)
+	actionTarget    string        // display label for the selected item
+	actionPrompt    string        // text to inject into the session
+	actionPrevMode  tuiMode       // mode to return to on Esc
+	actionSessions  []sidebarItem // running sessions to choose from
+	actionCursor    int           // cursor in action picker (sessions + "new" option)
+
 	// Dependency injection for testing
 	spawner Spawner
 }
@@ -154,10 +167,15 @@ func initialModel() tuiModel {
 	di.CharLimit = 256
 	di.SetValue(os.Getenv("HOME"))
 
+	fi := textinput.New()
+	fi.Placeholder = "filter..."
+	fi.CharLimit = 128
+
 	return tuiModel{
 		mode:         modePassthrough,
 		newNameInput: ni,
 		newDirInput:  di,
+		popupFilter:  fi,
 		spawner:      defaultSpawner{},
 	}
 }
@@ -480,43 +498,153 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case modePlaneIssues:
-		switch key {
-		case "q", "esc":
-			m.mode = modePassthrough
-			m.popupErr = ""
-		case "ctrl+a", "up":
-			if len(m.planeIssues) > 0 && m.popupCursor > 0 {
-				m.popupCursor--
+		if m.popupFilterActive {
+			switch key {
+			case "esc":
+				m.popupFilterActive = false
+				m.popupFilter.Blur()
+				m.popupFilter.SetValue("")
+				m.popupCursor = 0
+			case "enter":
+				m.popupFilterActive = false
+				m.popupFilter.Blur()
+				m.popupCursor = 0
+			default:
+				var cmd tea.Cmd
+				m.popupFilter, cmd = m.popupFilter.Update(msg)
+				m.popupCursor = 0
+				return m, cmd
 			}
-		case "ctrl+z", "down":
-			if len(m.planeIssues) > 0 && m.popupCursor < len(m.planeIssues)-1 {
-				m.popupCursor++
+		} else {
+			filtered := filteredPlaneIssues(m)
+			switch key {
+			case "q", "esc":
+				m.mode = modePassthrough
+				m.popupErr = ""
+				m.popupFilter.SetValue("")
+				m.popupSortMode = 0
+			case "ctrl+a", "up":
+				if len(filtered) > 0 && m.popupCursor > 0 {
+					m.popupCursor--
+				}
+			case "ctrl+z", "down":
+				if len(filtered) > 0 && m.popupCursor < len(filtered)-1 {
+					m.popupCursor++
+				}
+			case "/":
+				m.popupFilterActive = true
+				m.popupFilter.Focus()
+				return m, textinput.Blink
+			case "s":
+				m.popupSortMode = (m.popupSortMode + 1) % len(planeSortLabels)
+				m.popupCursor = 0
+			case "enter":
+				if len(filtered) > 0 && m.popupCursor < len(filtered) {
+					issue := filtered[m.popupCursor]
+					m.openActionPicker(issue.Title, planeIssuePrompt(issue), modePlaneIssues)
+				}
+			case "r":
+				m.planeIssues = nil
+				m.popupErr = ""
+				m.popupCursor = 0
+				return m, fetchPlaneIssues()
 			}
-		case "r":
-			m.planeIssues = nil
-			m.popupErr = ""
-			m.popupCursor = 0
-			return m, fetchPlaneIssues()
 		}
 
 	case modeIcingaAlerts:
+		if m.popupFilterActive {
+			switch key {
+			case "esc":
+				m.popupFilterActive = false
+				m.popupFilter.Blur()
+				m.popupFilter.SetValue("")
+				m.popupCursor = 0
+			case "enter":
+				m.popupFilterActive = false
+				m.popupFilter.Blur()
+				m.popupCursor = 0
+			default:
+				var cmd tea.Cmd
+				m.popupFilter, cmd = m.popupFilter.Update(msg)
+				m.popupCursor = 0
+				return m, cmd
+			}
+		} else {
+			filtered := filteredIcingaProblems(m)
+			switch key {
+			case "q", "esc":
+				m.mode = modePassthrough
+				m.popupErr = ""
+				m.popupFilter.SetValue("")
+				m.popupSortMode = 0
+			case "ctrl+a", "up":
+				if len(filtered) > 0 && m.popupCursor > 0 {
+					m.popupCursor--
+				}
+			case "ctrl+z", "down":
+				if len(filtered) > 0 && m.popupCursor < len(filtered)-1 {
+					m.popupCursor++
+				}
+			case "/":
+				m.popupFilterActive = true
+				m.popupFilter.Focus()
+				return m, textinput.Blink
+			case "s":
+				m.popupSortMode = (m.popupSortMode + 1) % len(icingaSortLabels)
+				m.popupCursor = 0
+			case "enter":
+				if len(filtered) > 0 && m.popupCursor < len(filtered) {
+					problem := filtered[m.popupCursor]
+					label := fmt.Sprintf("%s / %s", problem.Host, problem.Service)
+					m.openActionPicker(label, icingaProblemPrompt(problem), modeIcingaAlerts)
+				}
+			case "r":
+				m.icingaProblems = nil
+				m.popupErr = ""
+				m.popupCursor = 0
+				return m, fetchIcingaProblems()
+			}
+		}
+
+	case modePopupAction:
+		maxIdx := len(m.actionSessions) // last index is "new session"
 		switch key {
-		case "q", "esc":
-			m.mode = modePassthrough
-			m.popupErr = ""
+		case "esc":
+			m.mode = m.actionPrevMode
 		case "ctrl+a", "up":
-			if len(m.icingaProblems) > 0 && m.popupCursor > 0 {
-				m.popupCursor--
+			if m.actionCursor > 0 {
+				m.actionCursor--
 			}
 		case "ctrl+z", "down":
-			if len(m.icingaProblems) > 0 && m.popupCursor < len(m.icingaProblems)-1 {
-				m.popupCursor++
+			if m.actionCursor < maxIdx {
+				m.actionCursor++
 			}
-		case "r":
-			m.icingaProblems = nil
-			m.popupErr = ""
-			m.popupCursor = 0
-			return m, fetchIcingaProblems()
+		case "enter":
+			if m.actionCursor < len(m.actionSessions) {
+				// Inject into existing session
+				sess := m.actionSessions[m.actionCursor]
+				if sess.status == "running" {
+					injectToSession(sess.tmuxSession, m.actionPrompt)
+					m.mode = modePassthrough
+					m.flash = fmt.Sprintf("Sent to %s", sess.label)
+				}
+			} else {
+				// Spawn new session
+				name := sanitizeSessionName(m.actionTarget)
+				s, err := m.spawner.Spawn(context.Background(), name, os.Getenv("HOME"), nil, nil)
+				if err != nil {
+					m.flash = "Spawn error: " + err.Error()
+				} else {
+					// Inject the prompt after a brief pause for claude to start
+					go func() {
+						time.Sleep(2 * time.Second)
+						injectToSession(s.TmuxSession, m.actionPrompt)
+					}()
+					m.flash = fmt.Sprintf("Spawned %s — injecting task", s.Name)
+				}
+				m.mode = modePassthrough
+				return m, loadItems
+			}
 		}
 	}
 
@@ -602,6 +730,46 @@ func (m *tuiModel) doSpawn(contextID, contextName *string) {
 	}
 }
 
+// openActionPicker prepares the action picker overlay with running sessions.
+func (m *tuiModel) openActionPicker(target, prompt string, prevMode tuiMode) {
+	m.actionTarget = target
+	m.actionPrompt = prompt
+	m.actionPrevMode = prevMode
+	m.actionCursor = 0
+	m.mode = modePopupAction
+
+	// Collect running sessions for the picker
+	m.actionSessions = nil
+	for _, item := range m.items {
+		if item.kind == itemSession && item.status == "running" {
+			m.actionSessions = append(m.actionSessions, item)
+		}
+	}
+}
+
+// sanitizeSessionName creates a safe tmux session name from a title.
+func sanitizeSessionName(title string) string {
+	name := strings.ToLower(title)
+	name = strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			return r
+		}
+		return '-'
+	}, name)
+	// Collapse repeated hyphens and trim
+	for strings.Contains(name, "--") {
+		name = strings.ReplaceAll(name, "--", "-")
+	}
+	name = strings.Trim(name, "-")
+	if len(name) > 30 {
+		name = name[:30]
+	}
+	if name == "" {
+		name = "task"
+	}
+	return name
+}
+
 // ─── View ────────────────────────────────────────────────────────────────────
 
 func (m tuiModel) View() string {
@@ -615,6 +783,8 @@ func (m tuiModel) View() string {
 		return renderPlanePopup(m)
 	case modeIcingaAlerts:
 		return renderIcingaPopup(m)
+	case modePopupAction:
+		return renderActionPicker(m)
 	}
 
 	sidebar := m.renderSidebar()
