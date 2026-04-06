@@ -154,21 +154,75 @@ func hasMultiPartContent(messages []oaiMessage) bool {
 }
 
 // rawContentForQuery returns the content suitable for sendQuery.
-// For vision messages, returns the raw array; for text, returns the string.
+// For vision messages, converts OpenAI format to Anthropic format and returns
+// the content array; for text, returns the string.
 func rawContentForQuery(messages []oaiMessage) interface{} {
 	// Find the last user message
 	for i := len(messages) - 1; i >= 0; i-- {
 		if messages[i].Role == "user" {
-			// If it is an array, return parsed array for multi-part
-			var arr []interface{}
-			if err := json.Unmarshal(messages[i].Content, &arr); err == nil {
-				return arr
+			// If it is an array, convert OpenAI vision format to Anthropic format
+			var blocks []map[string]interface{}
+			if err := json.Unmarshal(messages[i].Content, &blocks); err == nil {
+				return convertToAnthropicContent(blocks)
 			}
 			// Otherwise return as string
 			return extractTextContent(messages[i].Content)
 		}
 	}
 	return messagesToPrompt(messages)
+}
+
+// convertToAnthropicContent converts OpenAI-style content blocks to Anthropic format.
+// OpenAI: {"type":"image_url","image_url":{"url":"data:image/jpeg;base64,..."}}
+// Anthropic: {"type":"image","source":{"type":"base64","media_type":"image/jpeg","data":"..."}}
+func convertToAnthropicContent(blocks []map[string]interface{}) []map[string]interface{} {
+	result := make([]map[string]interface{}, 0, len(blocks))
+	for _, b := range blocks {
+		t, _ := b["type"].(string)
+		switch t {
+		case "image_url":
+			// Convert OpenAI image_url to Anthropic image source
+			imgURL, _ := b["image_url"].(map[string]interface{})
+			if imgURL == nil {
+				continue
+			}
+			url, _ := imgURL["url"].(string)
+			mediaType, data := parseDataURI(url)
+			if data == "" {
+				continue
+			}
+			result = append(result, map[string]interface{}{
+				"type": "image",
+				"source": map[string]interface{}{
+					"type":       "base64",
+					"media_type": mediaType,
+					"data":       data,
+				},
+			})
+		default:
+			// Pass through text and other blocks as-is
+			result = append(result, b)
+		}
+	}
+	return result
+}
+
+// parseDataURI extracts media type and base64 data from a data URI.
+// e.g. "data:image/jpeg;base64,/9j/4AAQ..." → ("image/jpeg", "/9j/4AAQ...")
+func parseDataURI(uri string) (string, string) {
+	if !strings.HasPrefix(uri, "data:") {
+		return "", ""
+	}
+	// Remove "data:" prefix
+	rest := uri[5:]
+	// Split on ";base64,"
+	idx := strings.Index(rest, ";base64,")
+	if idx < 0 {
+		return "", ""
+	}
+	mediaType := rest[:idx]
+	data := rest[idx+8:]
+	return mediaType, data
 }
 
 // marshalString converts a Go string to a json.RawMessage (JSON string).
