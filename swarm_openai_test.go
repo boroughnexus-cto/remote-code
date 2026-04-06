@@ -291,7 +291,7 @@ func TestHandleNonStreamingResponse(t *testing.T) {
 	if len(resp.Choices) != 1 {
 		t.Fatalf("choices = %d", len(resp.Choices))
 	}
-	if resp.Choices[0].Message.Content != "4" {
+	if extractTextContent(resp.Choices[0].Message.Content) != "4" {
 		t.Errorf("content = %q, want 4", resp.Choices[0].Message.Content)
 	}
 	if resp.Choices[0].FinishReason != "stop" {
@@ -349,7 +349,7 @@ func TestHandleNonStreamingResponse_FallbackToResultText(t *testing.T) {
 
 	var resp oaiChatResponse
 	json.Unmarshal(w.Body.Bytes(), &resp)
-	if resp.Choices[0].Message.Content != "fallback text" {
+	if extractTextContent(resp.Choices[0].Message.Content) != "fallback text" {
 		t.Errorf("content = %q, want 'fallback text'", resp.Choices[0].Message.Content)
 	}
 }
@@ -592,7 +592,7 @@ func TestEndToEnd_NonStreaming(t *testing.T) {
 
 	var resp oaiChatResponse
 	json.Unmarshal(w.Body.Bytes(), &resp)
-	if resp.Choices[0].Message.Content != "42" {
+	if extractTextContent(resp.Choices[0].Message.Content) != "42" {
 		t.Errorf("content = %q, want 42", resp.Choices[0].Message.Content)
 	}
 	if resp.Choices[0].Message.Role != "assistant" {

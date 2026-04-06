@@ -62,10 +62,10 @@ func TestResolveModel(t *testing.T) {
 
 func TestMessagesToPrompt(t *testing.T) {
 	messages := []oaiMessage{
-		{Role: "system", Content: "You are helpful."},
-		{Role: "user", Content: "Hello"},
-		{Role: "assistant", Content: "Hi there!"},
-		{Role: "user", Content: "What is 2+2?"},
+		{Role: "system", Content: marshalString("You are helpful.")},
+		{Role: "user", Content: marshalString("Hello")},
+		{Role: "assistant", Content: marshalString("Hi there!")},
+		{Role: "user", Content: marshalString("What is 2+2?")},
 	}
 	got := messagesToPrompt(messages)
 	if !strings.Contains(got, "[System]\nYou are helpful.") {
@@ -84,7 +84,7 @@ func TestMessagesToPrompt(t *testing.T) {
 
 func TestMessagesToPrompt_SingleUser(t *testing.T) {
 	messages := []oaiMessage{
-		{Role: "user", Content: "just this"},
+		{Role: "user", Content: marshalString("just this")},
 	}
 	got := messagesToPrompt(messages)
 	if got != "just this" {

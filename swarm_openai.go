@@ -24,7 +24,7 @@ type oaiChatRequest struct {
 
 type oaiMessage struct {
 	Role    string `json:"role"`
-	Content string `json:"content"`
+	Content json.RawMessage `json:"content"`
 }
 
 type oaiChatResponse struct {
@@ -115,20 +115,83 @@ func resolveModel(name string) (string, bool) {
 
 // ─── Message conversion ─────────────────────────────────────────────────────
 
+// extractTextContent extracts text from a Content field that may be
+// a JSON string or an OpenAI-style array of content blocks.
+func extractTextContent(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	// Try as plain string first (most common)
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s
+	}
+	// Try as array of content blocks (vision/multi-part)
+	var blocks []map[string]interface{}
+	if err := json.Unmarshal(raw, &blocks); err == nil {
+		var sb strings.Builder
+		for _, b := range blocks {
+			if t, ok := b["type"].(string); ok && t == "text" {
+				if text, ok := b["text"].(string); ok {
+					sb.WriteString(text)
+					sb.WriteString("\n")
+				}
+			}
+		}
+		return strings.TrimSpace(sb.String())
+	}
+	return string(raw)
+}
+
+// hasMultiPartContent returns true if any message has array content (vision).
+func hasMultiPartContent(messages []oaiMessage) bool {
+	for _, m := range messages {
+		if len(m.Content) > 0 && m.Content[0] == '[' {
+			return true
+		}
+	}
+	return false
+}
+
+// rawContentForQuery returns the content suitable for sendQuery.
+// For vision messages, returns the raw array; for text, returns the string.
+func rawContentForQuery(messages []oaiMessage) interface{} {
+	// Find the last user message
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == "user" {
+			// If it is an array, return parsed array for multi-part
+			var arr []interface{}
+			if err := json.Unmarshal(messages[i].Content, &arr); err == nil {
+				return arr
+			}
+			// Otherwise return as string
+			return extractTextContent(messages[i].Content)
+		}
+	}
+	return messagesToPrompt(messages)
+}
+
+// marshalString converts a Go string to a json.RawMessage (JSON string).
+func marshalString(s string) json.RawMessage {
+	b, _ := json.Marshal(s)
+	return json.RawMessage(b)
+}
+
 func messagesToPrompt(messages []oaiMessage) string {
 	var sb strings.Builder
 	for _, m := range messages {
+		text := extractTextContent(m.Content)
 		switch m.Role {
 		case "system":
 			sb.WriteString("[System]\n")
-			sb.WriteString(m.Content)
+			sb.WriteString(text)
 			sb.WriteString("\n\n")
 		case "user":
-			sb.WriteString(m.Content)
+			sb.WriteString(text)
 			sb.WriteString("\n")
 		case "assistant":
 			sb.WriteString("[Previous assistant response]\n")
-			sb.WriteString(m.Content)
+			sb.WriteString(text)
 			sb.WriteString("\n\n")
 		}
 	}
@@ -176,7 +239,15 @@ func handlePoolChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	reqID := generateReqID()
-	prompt := messagesToPrompt(req.Messages)
+	var queryContent interface{}
+	var prompt string
+	if hasMultiPartContent(req.Messages) {
+		queryContent = rawContentForQuery(req.Messages)
+		prompt = "[vision request]"
+	} else {
+		prompt = messagesToPrompt(req.Messages)
+		queryContent = prompt
+	}
 
 	// Acquire a slot
 	slot, err := globalPool.Acquire(r.Context(), model)
@@ -190,7 +261,7 @@ func handlePoolChatCompletions(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 
 	// Send query
-	if err := slot.sendQuery(prompt); err != nil {
+	if err := slot.sendQuery(queryContent); err != nil {
 		slot.mu.Lock()
 		slot.state = slotDead
 		slot.mu.Unlock()
@@ -296,7 +367,7 @@ done:
 		Model:   model,
 		Choices: []oaiChoice{{
 			Index:        0,
-			Message:      oaiMessage{Role: "assistant", Content: text},
+			Message:      oaiMessage{Role: "assistant", Content: marshalString(text)},
 			FinishReason: mapStopReason(resultEv.StopReason),
 		}},
 		Usage: oaiUsage{

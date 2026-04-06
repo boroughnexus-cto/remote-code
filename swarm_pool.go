@@ -111,7 +111,7 @@ type PoolSlot struct {
 }
 
 // sendQuery writes a user message to the Claude CLI's stdin.
-func (s *PoolSlot) sendQuery(content string) error {
+func (s *PoolSlot) sendQuery(content interface{}) error {
 	msg := map[string]interface{}{
 		"type": "user",
 		"message": map[string]interface{}{
