@@ -152,6 +152,8 @@ type tuiModel struct {
 	icingaProblems []icingaProblem
 	popupErr       string
 	popupCursor    int
+	planeReqID     uint64 // incremented on each fetch; stale responses ignored
+	icingaReqID    uint64
 
 	// Popup filter & sort
 	popupFilter       textinput.Model
@@ -343,8 +345,8 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case planeIssuesMsg:
-		if m.mode == modePlaneIssues {
-			m.planeIssues = msg
+		if m.mode == modePlaneIssues && msg.reqID == m.planeReqID {
+			m.planeIssues = msg.issues
 			m.popupErr = ""
 			if m.popupCursor >= len(m.planeIssues) {
 				m.popupCursor = max(0, len(m.planeIssues)-1)
@@ -353,8 +355,8 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case icingaProblemsMsg:
-		if m.mode == modeIcingaAlerts {
-			m.icingaProblems = msg
+		if m.mode == modeIcingaAlerts && msg.reqID == m.icingaReqID {
+			m.icingaProblems = msg.problems
 			m.popupErr = ""
 			if m.popupCursor >= len(m.icingaProblems) {
 				m.popupCursor = max(0, len(m.icingaProblems)-1)
@@ -363,8 +365,8 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case popupErrMsg:
-		if (msg.source == "plane" && m.mode == modePlaneIssues) ||
-			(msg.source == "icinga" && m.mode == modeIcingaAlerts) {
+		if (msg.source == "plane" && m.mode == modePlaneIssues && msg.reqID == m.planeReqID) ||
+			(msg.source == "icinga" && m.mode == modeIcingaAlerts && msg.reqID == m.icingaReqID) {
 			m.popupErr = msg.text
 		}
 		return m, nil
@@ -434,14 +436,16 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.popupErr = ""
 			m.popupCursor = 0
 			m.flash = ""
-			return m, fetchPlaneIssues()
+			m.planeReqID++
+			return m, fetchPlaneIssues(m.planeReqID)
 		case "alt+i":
 			m.mode = modeIcingaAlerts
 			m.icingaProblems = nil
 			m.popupErr = ""
 			m.popupCursor = 0
 			m.flash = ""
-			return m, fetchIcingaProblems()
+			m.icingaReqID++
+			return m, fetchIcingaProblems(m.icingaReqID)
 		case "ctrl+\\":
 			return m, tea.Quit
 		default:
@@ -510,112 +514,38 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case modePlaneIssues:
-		if m.popupFilterActive {
-			switch key {
-			case "esc":
-				m.popupFilterActive = false
-				m.popupFilter.Blur()
-				m.popupFilter.SetValue("")
-				m.popupCursor = 0
-			case "enter":
-				m.popupFilterActive = false
-				m.popupFilter.Blur()
-				m.popupCursor = 0
-			default:
-				var cmd tea.Cmd
-				m.popupFilter, cmd = m.popupFilter.Update(msg)
-				m.popupCursor = 0
-				return m, cmd
+		filtered := filteredPlaneIssues(m)
+		r := handlePopupKeyShared(&m, msg, len(filtered), planeSortLabels)
+		if r.action == "enter" {
+			if m.popupCursor < len(filtered) {
+				issue := filtered[m.popupCursor]
+				m.openActionPicker(issue.Title, planeIssuePrompt(issue), modePlaneIssues)
 			}
-		} else {
-			filtered := filteredPlaneIssues(m)
-			switch key {
-			case "q", "esc":
-				m.mode = modePassthrough
-				m.popupErr = ""
-				m.popupFilter.SetValue("")
-				m.popupSortMode = 0
-			case "ctrl+a", "up":
-				if len(filtered) > 0 && m.popupCursor > 0 {
-					m.popupCursor--
-				}
-			case "ctrl+z", "down":
-				if len(filtered) > 0 && m.popupCursor < len(filtered)-1 {
-					m.popupCursor++
-				}
-			case "/":
-				m.popupFilterActive = true
-				m.popupFilter.Focus()
-				return m, textinput.Blink
-			case "s":
-				m.popupSortMode = (m.popupSortMode + 1) % len(planeSortLabels)
-				m.popupCursor = 0
-			case "enter":
-				if len(filtered) > 0 && m.popupCursor < len(filtered) {
-					issue := filtered[m.popupCursor]
-					m.openActionPicker(issue.Title, planeIssuePrompt(issue), modePlaneIssues)
-				}
-			case "r":
-				m.planeIssues = nil
-				m.popupErr = ""
-				m.popupCursor = 0
-				return m, fetchPlaneIssues()
-			}
+		} else if r.action == "refresh" {
+			m.planeIssues = nil
+			m.planeReqID++
+			return m, fetchPlaneIssues(m.planeReqID)
+		}
+		if r.handled {
+			return m, r.cmd
 		}
 
 	case modeIcingaAlerts:
-		if m.popupFilterActive {
-			switch key {
-			case "esc":
-				m.popupFilterActive = false
-				m.popupFilter.Blur()
-				m.popupFilter.SetValue("")
-				m.popupCursor = 0
-			case "enter":
-				m.popupFilterActive = false
-				m.popupFilter.Blur()
-				m.popupCursor = 0
-			default:
-				var cmd tea.Cmd
-				m.popupFilter, cmd = m.popupFilter.Update(msg)
-				m.popupCursor = 0
-				return m, cmd
+		filtered := filteredIcingaProblems(m)
+		r := handlePopupKeyShared(&m, msg, len(filtered), icingaSortLabels)
+		if r.action == "enter" {
+			if m.popupCursor < len(filtered) {
+				problem := filtered[m.popupCursor]
+				label := fmt.Sprintf("%s / %s", problem.Host, problem.Service)
+				m.openActionPicker(label, icingaProblemPrompt(problem), modeIcingaAlerts)
 			}
-		} else {
-			filtered := filteredIcingaProblems(m)
-			switch key {
-			case "q", "esc":
-				m.mode = modePassthrough
-				m.popupErr = ""
-				m.popupFilter.SetValue("")
-				m.popupSortMode = 0
-			case "ctrl+a", "up":
-				if len(filtered) > 0 && m.popupCursor > 0 {
-					m.popupCursor--
-				}
-			case "ctrl+z", "down":
-				if len(filtered) > 0 && m.popupCursor < len(filtered)-1 {
-					m.popupCursor++
-				}
-			case "/":
-				m.popupFilterActive = true
-				m.popupFilter.Focus()
-				return m, textinput.Blink
-			case "s":
-				m.popupSortMode = (m.popupSortMode + 1) % len(icingaSortLabels)
-				m.popupCursor = 0
-			case "enter":
-				if len(filtered) > 0 && m.popupCursor < len(filtered) {
-					problem := filtered[m.popupCursor]
-					label := fmt.Sprintf("%s / %s", problem.Host, problem.Service)
-					m.openActionPicker(label, icingaProblemPrompt(problem), modeIcingaAlerts)
-				}
-			case "r":
-				m.icingaProblems = nil
-				m.popupErr = ""
-				m.popupCursor = 0
-				return m, fetchIcingaProblems()
-			}
+		} else if r.action == "refresh" {
+			m.icingaProblems = nil
+			m.icingaReqID++
+			return m, fetchIcingaProblems(m.icingaReqID)
+		}
+		if r.handled {
+			return m, r.cmd
 		}
 
 	case modePopupAction:
@@ -740,6 +670,77 @@ func (m *tuiModel) doSpawn(contextID, contextName *string) {
 	} else {
 		m.flash = fmt.Sprintf("Spawned %s", s.Name)
 	}
+}
+
+// popupKeyResult holds the result of shared popup key handling.
+type popupKeyResult struct {
+	handled bool
+	cmd     tea.Cmd
+	action  string // "enter", "refresh", or ""
+}
+
+// handlePopupKeyShared processes keys common to all popup modes.
+// Returns the action taken so the caller can perform popup-specific work.
+func handlePopupKeyShared(m *tuiModel, msg tea.KeyMsg, filteredLen int, sortLabels []string) popupKeyResult {
+	key := msg.String()
+
+	if m.popupFilterActive {
+		switch key {
+		case "esc":
+			m.popupFilterActive = false
+			m.popupFilter.Blur()
+			m.popupFilter.SetValue("")
+			m.popupCursor = 0
+			return popupKeyResult{handled: true}
+		case "enter":
+			m.popupFilterActive = false
+			m.popupFilter.Blur()
+			m.popupCursor = 0
+			return popupKeyResult{handled: true}
+		default:
+			var cmd tea.Cmd
+			m.popupFilter, cmd = m.popupFilter.Update(msg)
+			m.popupCursor = 0
+			return popupKeyResult{handled: true, cmd: cmd}
+		}
+	}
+
+	switch key {
+	case "q", "esc":
+		m.mode = modePassthrough
+		m.popupErr = ""
+		m.popupFilter.SetValue("")
+		m.popupSortMode = 0
+		return popupKeyResult{handled: true}
+	case "ctrl+a", "up":
+		if filteredLen > 0 && m.popupCursor > 0 {
+			m.popupCursor--
+		}
+		return popupKeyResult{handled: true}
+	case "ctrl+z", "down":
+		if filteredLen > 0 && m.popupCursor < filteredLen-1 {
+			m.popupCursor++
+		}
+		return popupKeyResult{handled: true}
+	case "/":
+		m.popupFilterActive = true
+		m.popupFilter.Focus()
+		return popupKeyResult{handled: true, cmd: textinput.Blink}
+	case "s":
+		m.popupSortMode = (m.popupSortMode + 1) % len(sortLabels)
+		m.popupCursor = 0
+		return popupKeyResult{handled: true}
+	case "enter":
+		if filteredLen > 0 {
+			return popupKeyResult{handled: true, action: "enter"}
+		}
+		return popupKeyResult{handled: true}
+	case "r":
+		m.popupErr = ""
+		m.popupCursor = 0
+		return popupKeyResult{handled: true, action: "refresh"}
+	}
+	return popupKeyResult{}
 }
 
 // openActionPicker prepares the action picker overlay with running sessions.

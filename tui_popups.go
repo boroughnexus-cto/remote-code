@@ -33,16 +33,28 @@ type icingaProblem struct {
 
 // ─── Messages ───────────────────────────────────────────────────────────────
 
-type planeIssuesMsg []planeIssue
-type icingaProblemsMsg []icingaProblem
-type popupErrMsg struct{ source, text string }
+type planeIssuesMsg struct {
+	reqID  uint64
+	issues []planeIssue
+}
+
+type icingaProblemsMsg struct {
+	reqID    uint64
+	problems []icingaProblem
+}
+
+type popupErrMsg struct {
+	reqID  uint64
+	source string
+	text   string
+}
 
 // ─── Data fetching ──────────────────────────────────────────────────────────
 
-func fetchPlaneIssues() tea.Cmd {
+func fetchPlaneIssues(reqID uint64) tea.Cmd {
 	return func() tea.Msg {
 		if globalConfigService == nil {
-			return popupErrMsg{"plane", "config service not initialized"}
+			return popupErrMsg{reqID, "plane", "config service not initialized"}
 		}
 
 		apiURL := globalConfigService.GetString("plane.api_url", "")
@@ -51,7 +63,7 @@ func fetchPlaneIssues() tea.Cmd {
 		projectID := globalConfigService.GetString("plane.project_id", "")
 
 		if apiURL == "" || apiKey == "" || projectID == "" {
-			return popupErrMsg{"plane", "Plane not configured (set plane.api_url, plane.api_key, plane.project_id)"}
+			return popupErrMsg{reqID, "plane", "Plane not configured (set plane.api_url, plane.api_key, plane.project_id)"}
 		}
 
 		client := &http.Client{Timeout: 10 * time.Second}
@@ -70,7 +82,7 @@ func fetchPlaneIssues() tea.Cmd {
 
 			resp, err := client.Do(req)
 			if err != nil {
-				return popupErrMsg{"plane", fmt.Sprintf("HTTP error: %v", err)}
+				return popupErrMsg{reqID, "plane", fmt.Sprintf("HTTP error: %v", err)}
 			}
 			body, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
@@ -91,14 +103,14 @@ func fetchPlaneIssues() tea.Cmd {
 			allIssues = append(allIssues, parsed.Results...)
 		}
 
-		return planeIssuesMsg(allIssues)
+		return planeIssuesMsg{reqID, allIssues}
 	}
 }
 
-func fetchIcingaProblems() tea.Cmd {
+func fetchIcingaProblems(reqID uint64) tea.Cmd {
 	return func() tea.Msg {
 		if globalConfigService == nil {
-			return popupErrMsg{"icinga", "config service not initialized"}
+			return popupErrMsg{reqID, "icinga", "config service not initialized"}
 		}
 
 		apiURL := globalConfigService.GetString("icinga.api_url", "")
@@ -106,7 +118,7 @@ func fetchIcingaProblems() tea.Cmd {
 		apiPass := globalConfigService.GetString("icinga.api_pass", "")
 
 		if apiURL == "" || apiUser == "" || apiPass == "" {
-			return popupErrMsg{"icinga", "Icinga not configured (set icinga.api_url, icinga.api_user, icinga.api_pass)"}
+			return popupErrMsg{reqID, "icinga", "Icinga not configured (set icinga.api_url, icinga.api_user, icinga.api_pass)"}
 		}
 
 		url := fmt.Sprintf("%s/v1/objects/services?attrs=display_name&attrs=state&attrs=last_check_result&attrs=host_name&filter=service.state!=0",
@@ -114,7 +126,7 @@ func fetchIcingaProblems() tea.Cmd {
 
 		req, err := http.NewRequest("GET", url, nil)
 		if err != nil {
-			return popupErrMsg{"icinga", fmt.Sprintf("request error: %v", err)}
+			return popupErrMsg{reqID, "icinga", fmt.Sprintf("request error: %v", err)}
 		}
 		req.SetBasicAuth(apiUser, apiPass)
 		req.Header.Set("Accept", "application/json")
@@ -129,13 +141,13 @@ func fetchIcingaProblems() tea.Cmd {
 
 		resp, err := client.Do(req)
 		if err != nil {
-			return popupErrMsg{"icinga", fmt.Sprintf("HTTP error: %v", err)}
+			return popupErrMsg{reqID, "icinga", fmt.Sprintf("HTTP error: %v", err)}
 		}
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
 
 		if resp.StatusCode != 200 {
-			return popupErrMsg{"icinga", fmt.Sprintf("HTTP %d", resp.StatusCode)}
+			return popupErrMsg{reqID, "icinga", fmt.Sprintf("HTTP %d", resp.StatusCode)}
 		}
 
 		var parsed struct {
@@ -151,7 +163,7 @@ func fetchIcingaProblems() tea.Cmd {
 			} `json:"results"`
 		}
 		if err := json.Unmarshal(body, &parsed); err != nil {
-			return popupErrMsg{"icinga", fmt.Sprintf("parse error: %v", err)}
+			return popupErrMsg{reqID, "icinga", fmt.Sprintf("parse error: %v", err)}
 		}
 
 		var problems []icingaProblem
@@ -168,7 +180,7 @@ func fetchIcingaProblems() tea.Cmd {
 			})
 		}
 
-		return icingaProblemsMsg(problems)
+		return icingaProblemsMsg{reqID, problems}
 	}
 }
 

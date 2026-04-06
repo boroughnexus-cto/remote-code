@@ -294,7 +294,7 @@ func TestPlaneIssuesMsg(t *testing.T) {
 	m.mode = modePlaneIssues
 
 	issues := fakePlaneIssues()
-	updated, _ := m.Update(planeIssuesMsg(issues))
+	updated, _ := m.Update(planeIssuesMsg{reqID: m.planeReqID, issues: issues})
 	m = updated.(tuiModel)
 
 	if len(m.planeIssues) != 4 {
@@ -313,7 +313,7 @@ func TestIcingaProblemsMsg(t *testing.T) {
 	m.mode = modeIcingaAlerts
 
 	problems := fakeIcingaProblems()
-	updated, _ := m.Update(icingaProblemsMsg(problems))
+	updated, _ := m.Update(icingaProblemsMsg{reqID: m.icingaReqID, problems: problems})
 	m = updated.(tuiModel)
 
 	if len(m.icingaProblems) != 2 {
@@ -328,7 +328,7 @@ func TestPopupErrMsg(t *testing.T) {
 	m := newTestModel(nil)
 	m.mode = modePlaneIssues
 
-	updated, _ := m.Update(popupErrMsg{source: "plane", text: "connection refused"})
+	updated, _ := m.Update(popupErrMsg{reqID: m.planeReqID, source: "plane", text: "connection refused"})
 	m = updated.(tuiModel)
 
 	if m.popupErr != "connection refused" {
@@ -989,6 +989,182 @@ func TestSanitizeSessionName(t *testing.T) {
 			got := sanitizeSessionName(tt.input)
 			if got != tt.want {
 				t.Errorf("sanitizeSessionName(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+// ─── Pure function tests: sort ──────────────────────────────────────────────
+
+func TestSortPlaneIssues_AllModes(t *testing.T) {
+	issues := []planeIssue{
+		{Title: "Zebra", Priority: "low", StateGroup: "backlog"},
+		{Title: "Alpha", Priority: "urgent", StateGroup: "started"},
+		{Title: "Middle", Priority: "high", StateGroup: "unstarted"},
+	}
+
+	tests := []struct {
+		mode      int
+		firstWant string // expected Title of first element
+	}{
+		{0, "Zebra"},  // default: no sort, original order
+		{1, "Alpha"},  // priority: urgent first
+		{2, "Alpha"},  // state: started first
+		{3, "Alpha"},  // name: Alpha first
+	}
+
+	for _, tt := range tests {
+		t.Run(fmt.Sprintf("mode_%d", tt.mode), func(t *testing.T) {
+			result := sortPlaneIssues(issues, tt.mode)
+			if len(result) != 3 {
+				t.Fatalf("expected 3 issues, got %d", len(result))
+			}
+			if result[0].Title != tt.firstWant {
+				t.Errorf("mode %d: first=%q, want %q", tt.mode, result[0].Title, tt.firstWant)
+			}
+		})
+	}
+}
+
+func TestSortPlaneIssues_Empty(t *testing.T) {
+	result := sortPlaneIssues(nil, 1)
+	if result != nil {
+		t.Errorf("sorting nil should return nil, got %v", result)
+	}
+}
+
+func TestSortPlaneIssues_Single(t *testing.T) {
+	issues := []planeIssue{{Title: "Only"}}
+	result := sortPlaneIssues(issues, 1)
+	if len(result) != 1 || result[0].Title != "Only" {
+		t.Errorf("single item sort failed")
+	}
+}
+
+func TestSortPlaneIssues_PreservesCount(t *testing.T) {
+	issues := fakePlaneIssues()
+	for mode := 0; mode <= 3; mode++ {
+		result := sortPlaneIssues(issues, mode)
+		if len(result) != len(issues) {
+			t.Errorf("mode %d: count changed %d -> %d", mode, len(issues), len(result))
+		}
+	}
+}
+
+func TestSortPlaneIssues_DoesNotMutateOriginal(t *testing.T) {
+	issues := fakePlaneIssues()
+	firstTitle := issues[0].Title
+	_ = sortPlaneIssues(issues, 3) // sort by name
+	if issues[0].Title != firstTitle {
+		t.Errorf("sort mutated original: first was %q, now %q", firstTitle, issues[0].Title)
+	}
+}
+
+func TestSortIcingaProblems_AllModes(t *testing.T) {
+	problems := []icingaProblem{
+		{Host: "zebra", Service: "zz", State: 1},
+		{Host: "alpha", Service: "aa", State: 2},
+	}
+
+	tests := []struct {
+		mode      int
+		firstHost string
+	}{
+		{0, "zebra"}, // default
+		{1, "alpha"}, // severity: critical (2) first
+		{2, "alpha"}, // host: alpha first
+		{3, "alpha"}, // service: aa first
+	}
+
+	for _, tt := range tests {
+		t.Run(fmt.Sprintf("mode_%d", tt.mode), func(t *testing.T) {
+			result := sortIcingaProblems(problems, tt.mode)
+			if result[0].Host != tt.firstHost {
+				t.Errorf("mode %d: first host=%q, want %q", tt.mode, result[0].Host, tt.firstHost)
+			}
+		})
+	}
+}
+
+func TestSortIcingaProblems_Empty(t *testing.T) {
+	result := sortIcingaProblems(nil, 1)
+	if result != nil {
+		t.Errorf("sorting nil should return nil")
+	}
+}
+
+func TestSortIcingaProblems_DoesNotMutateOriginal(t *testing.T) {
+	problems := fakeIcingaProblems()
+	firstHost := problems[0].Host
+	_ = sortIcingaProblems(problems, 2) // sort by host
+	if problems[0].Host != firstHost {
+		t.Errorf("sort mutated original")
+	}
+}
+
+// ─── Pure function tests: filter ────────────────────────────────────────────
+
+func TestFilterPlane_EdgeCases(t *testing.T) {
+	tests := []struct {
+		name     string
+		issues   []planeIssue
+		query    string
+		wantLen  int
+	}{
+		{"nil issues", nil, "test", 0},
+		{"empty issues", []planeIssue{}, "test", 0},
+		{"empty query returns all", fakePlaneIssues(), "", 4},
+		{"whitespace query returns all", fakePlaneIssues(), "  ", 4},
+		{"exact title match", fakePlaneIssues(), "Fix auth middleware", 1},
+		{"partial match", fakePlaneIssues(), "API", 1},
+		{"priority match", fakePlaneIssues(), "urgent", 1},
+		{"state match", fakePlaneIssues(), "started", 2}, // matches "started" and "unstarted"
+		{"no match", fakePlaneIssues(), "nonexistent", 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := newTestModel(nil)
+			m.planeIssues = tt.issues
+			m.popupFilter.SetValue(tt.query)
+			result := filteredPlaneIssues(m)
+			gotLen := len(result)
+			if tt.issues == nil && result != nil {
+				t.Errorf("nil issues should return nil")
+			} else if gotLen != tt.wantLen {
+				t.Errorf("got %d results, want %d", gotLen, tt.wantLen)
+			}
+		})
+	}
+}
+
+func TestFilterIcinga_EdgeCases(t *testing.T) {
+	tests := []struct {
+		name    string
+		problems []icingaProblem
+		query   string
+		wantLen int
+	}{
+		{"nil problems", nil, "test", 0},
+		{"empty problems", []icingaProblem{}, "test", 0},
+		{"empty query returns all", fakeIcingaProblems(), "", 2},
+		{"host match", fakeIcingaProblems(), "backup-fire", 1},
+		{"service match", fakeIcingaProblems(), "disk-temp", 1},
+		{"output match", fakeIcingaProblems(), "exit code", 1},
+		{"no match", fakeIcingaProblems(), "nonexistent", 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := newTestModel(nil)
+			m.icingaProblems = tt.problems
+			m.popupFilter.SetValue(tt.query)
+			result := filteredIcingaProblems(m)
+			gotLen := len(result)
+			if tt.problems == nil && result != nil {
+				t.Errorf("nil problems should return nil")
+			} else if gotLen != tt.wantLen {
+				t.Errorf("got %d results, want %d", gotLen, tt.wantLen)
 			}
 		})
 	}
