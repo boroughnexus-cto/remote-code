@@ -93,6 +93,18 @@ const (
 	modeContextPick
 )
 
+// Spawner abstracts session creation for testability.
+type Spawner interface {
+	Spawn(ctx context.Context, name, dir string, contextID, contextName *string) (*Session, error)
+}
+
+// defaultSpawner calls the real spawnSession function.
+type defaultSpawner struct{}
+
+func (defaultSpawner) Spawn(ctx context.Context, name, dir string, contextID, contextName *string) (*Session, error) {
+	return spawnSession(ctx, name, dir, contextID, contextName)
+}
+
 type tuiModel struct {
 	items  []sidebarItem
 	cursor int
@@ -111,11 +123,17 @@ type tuiModel struct {
 	// Terminal content cache
 	termContent string
 
+	// Pre-rendered content for the right pane (set in Update, read in View)
+	contentCache string
+
 	// Terminal size
 	w, h int
 
 	// Status message
 	flash string
+
+	// Dependency injection for testing
+	spawner Spawner
 }
 
 func initialModel() tuiModel {
@@ -132,6 +150,7 @@ func initialModel() tuiModel {
 		mode:         modePassthrough,
 		newNameInput: ni,
 		newDirInput:  di,
+		spawner:      defaultSpawner{},
 	}
 }
 
@@ -254,6 +273,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.vp = viewport.New(contentWidth, contentHeight)
 		m.vp.MouseWheelEnabled = true
 		m.vpReady = true
+		m.updateContentCache()
 		return m, nil
 
 	case tickMsg:
@@ -272,13 +292,15 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.cursor >= len(m.items) && len(m.items) > 0 {
 			m.cursor = len(m.items) - 1
 		}
+		m.updateContentCache()
 		return m, nil
 
 	case terminalMsg:
 		m.termContent = string(msg)
+		m.contentCache = m.termContent
 		if m.vpReady {
-			m.vp.SetContent(m.termContent)
-			m.vp.GotoBottom()
+			m.vp.SetContent(m.contentCache)
+			m.vp.GotoBottom() // auto-scroll for terminal output
 		}
 		return m, nil
 
@@ -317,12 +339,14 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if m.cursor > 0 {
 				m.cursor--
 				m.flash = ""
+				m.updateContentCache()
 			}
 			return m, nil
 		case "ctrl+z":
 			if m.cursor < len(m.items)-1 {
 				m.cursor++
 				m.flash = ""
+				m.updateContentCache()
 			}
 			return m, nil
 		case "alt+n":
@@ -481,7 +505,7 @@ func (m *tuiModel) doSpawn(contextID, contextName *string) {
 	if dir == "" {
 		dir = os.Getenv("HOME")
 	}
-	s, err := spawnSession(context.Background(), name, dir, contextID, contextName)
+	s, err := m.spawner.Spawn(context.Background(), name, dir, contextID, contextName)
 	if err != nil {
 		m.flash = "Spawn error: " + err.Error()
 	} else {
@@ -567,29 +591,34 @@ func (m tuiModel) renderSidebar() string {
 	return sidebarStyle.Height(m.h - 2).Render(strings.Join(lines, "\n"))
 }
 
+// updateContentCache computes the right-pane content string based on current state
+// and updates the viewport. Called from Update() handlers when state changes that
+// affect the right pane. View() only reads from the viewport — no mutations.
+func (m *tuiModel) updateContentCache() {
+	if len(m.items) == 0 {
+		m.contentCache = dimStyle.Render("\n  No sessions. Press Alt+N to create one.")
+	} else if m.cursor < len(m.items) {
+		item := m.items[m.cursor]
+		switch item.kind {
+		case itemPoolSlot:
+			m.contentCache = m.renderPoolSlotDetail(item)
+		case itemSession:
+			if item.status != "running" {
+				m.contentCache = dimStyle.Render("\n  Session stopped.")
+			}
+			// running sessions get contentCache set via terminalMsg
+		}
+	}
+
+	if m.vpReady {
+		m.vp.SetContent(m.contentCache)
+	}
+}
+
 func (m tuiModel) renderContent() string {
 	if !m.vpReady {
 		return ""
 	}
-
-	if len(m.items) == 0 {
-		m.vp.SetContent(dimStyle.Render("\n  No sessions. Press Alt+N to create one."))
-		return m.vp.View()
-	}
-
-	if m.cursor < len(m.items) {
-		item := m.items[m.cursor]
-		switch item.kind {
-		case itemPoolSlot:
-			m.vp.SetContent(m.renderPoolSlotDetail(item))
-		case itemSession:
-			if item.status != "running" {
-				m.vp.SetContent(dimStyle.Render("\n  Session stopped."))
-			}
-			// running sessions get content set via terminalMsg
-		}
-	}
-
 	return m.vp.View()
 }
 

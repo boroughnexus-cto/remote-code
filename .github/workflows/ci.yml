@@ -1,12 +1,15 @@
 name: CI
 on:
   push:
-    branches: [main]
+    branches: [main, rework/**]
   pull_request:
     branches: [main]
 jobs:
   ci:
     runs-on: ubuntu-latest
+    env:
+      NO_COLOR: "1"
+      TERM: dumb
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -21,3 +24,9 @@ jobs:
         # remove once the codebase is lint-clean.
         continue-on-error: true
       - run: make ci
+      - name: Verify golden files are up to date
+        env:
+          UPDATE_GOLDEN: ""
+        run: |
+          go test -run "TestView_Empty|TestView_Sessions|TestView_PoolSlots" -count=1 ./...
+          git diff --exit-code testdata/
