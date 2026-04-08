@@ -1,28 +1,28 @@
- SwarmOps  0 running, 0 stopped                                                
- Pool: off                                                           00:00:00  
-────────────────────────────────────────────────────────────────────────────── 
-                        │                                                      
-  Sessions              │  No sessions. Press Alt+N to create one.             
-                        │                                                      
-  (no sessions)         │                                                      
-                        │                                                      
-                        │                                                      
-                        │                                                      
-                        │                                                      
-                        │                                                      
-                        │                                                      
-                        │                                                      
-                        │                                                      
-                        │                                                      
-                        │                                                      
-                        │                                                      
-                        │                                                      
-                        │                                                      
-                        │                                                      
-                        │                                                      
-                        │                                                      
-                        │                                                      
-                        │                                                      
-                        │                                                      
-                        │                                                      
-^A/^Z switch │ Alt+N new │ Alt+D delete │ Alt+P plane │ Alt+I icinga │ ^\ quit 
+ SwarmOps  0 running, 0 stopped                                                        
+ Pool: off                                                           00:00:00          
+──────────────────────────────────────────────────────────────────────────────         
+                        │                                                              
+  Sessions              │  No sessions. Press Alt+N to create one.                     
+                        │                                                              
+  (no sessions)         │                                                              
+                        │                                                              
+                        │                                                              
+                        │                                                              
+                        │                                                              
+                        │                                                              
+                        │                                                              
+                        │                                                              
+                        │                                                              
+                        │                                                              
+                        │                                                              
+                        │                                                              
+                        │                                                              
+                        │                                                              
+                        │                                                              
+                        │                                                              
+                        │                                                              
+                        │                                                              
+                        │                                                              
+                        │                                                              
+                        │                                                              
+Alt+A/Alt+Z switch │ Alt+N new │ Alt+D delete │ Alt+P plane │ Alt+I icinga │ Alt+Q quit

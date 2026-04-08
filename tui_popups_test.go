@@ -204,32 +204,32 @@ func TestKey_PlaneCursorNav(t *testing.T) {
 	m.popupCursor = 0
 
 	// Move down
-	m = sendSpecialKey(m, "ctrl+z")
+	m = sendSpecialKey(m, "alt+z")
 	if m.popupCursor != 1 {
 		t.Errorf("cursor should be 1, got %d", m.popupCursor)
 	}
 
-	m = sendSpecialKey(m, "ctrl+z")
-	m = sendSpecialKey(m, "ctrl+z")
+	m = sendSpecialKey(m, "alt+z")
+	m = sendSpecialKey(m, "alt+z")
 	if m.popupCursor != 3 {
 		t.Errorf("cursor should be 3, got %d", m.popupCursor)
 	}
 
 	// Clamp at bottom
-	m = sendSpecialKey(m, "ctrl+z")
+	m = sendSpecialKey(m, "alt+z")
 	if m.popupCursor != 3 {
 		t.Errorf("cursor should clamp at 3, got %d", m.popupCursor)
 	}
 
 	// Move back up
-	m = sendSpecialKey(m, "ctrl+a")
+	m = sendSpecialKey(m, "alt+a")
 	if m.popupCursor != 2 {
 		t.Errorf("cursor should be 2, got %d", m.popupCursor)
 	}
 
 	// Clamp at top
 	m.popupCursor = 0
-	m = sendSpecialKey(m, "ctrl+a")
+	m = sendSpecialKey(m, "alt+a")
 	if m.popupCursor != 0 {
 		t.Errorf("cursor should clamp at 0, got %d", m.popupCursor)
 	}
@@ -241,13 +241,13 @@ func TestKey_IcingaCursorNav(t *testing.T) {
 	m.icingaProblems = fakeIcingaProblems()
 	m.popupCursor = 0
 
-	m = sendSpecialKey(m, "ctrl+z")
+	m = sendSpecialKey(m, "alt+z")
 	if m.popupCursor != 1 {
 		t.Errorf("cursor should be 1, got %d", m.popupCursor)
 	}
 
 	// Clamp at bottom (2 items, max index 1)
-	m = sendSpecialKey(m, "ctrl+z")
+	m = sendSpecialKey(m, "alt+z")
 	if m.popupCursor != 1 {
 		t.Errorf("cursor should clamp at 1, got %d", m.popupCursor)
 	}
@@ -836,25 +836,25 @@ func TestAction_CursorNav(t *testing.T) {
 	m.actionCursor = 0
 
 	// Navigate to second session
-	m = sendSpecialKey(m, "ctrl+z")
+	m = sendSpecialKey(m, "alt+z")
 	if m.actionCursor != 1 {
 		t.Errorf("cursor should be 1, got %d", m.actionCursor)
 	}
 
 	// Navigate to "new session" option (index 2)
-	m = sendSpecialKey(m, "ctrl+z")
+	m = sendSpecialKey(m, "alt+z")
 	if m.actionCursor != 2 {
 		t.Errorf("cursor should be 2 (new session), got %d", m.actionCursor)
 	}
 
 	// Clamp at bottom
-	m = sendSpecialKey(m, "ctrl+z")
+	m = sendSpecialKey(m, "alt+z")
 	if m.actionCursor != 2 {
 		t.Errorf("cursor should clamp at 2, got %d", m.actionCursor)
 	}
 
 	// Back up
-	m = sendSpecialKey(m, "ctrl+a")
+	m = sendSpecialKey(m, "alt+a")
 	if m.actionCursor != 1 {
 		t.Errorf("cursor should be 1, got %d", m.actionCursor)
 	}

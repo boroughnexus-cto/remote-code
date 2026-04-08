@@ -41,10 +41,10 @@ func runSteps(t *testing.T, m tuiModel, steps []step) tuiModel {
 // keyMsg constructs a tea.KeyMsg for common key types.
 func keyMsg(key string) tea.KeyMsg {
 	switch key {
-	case "ctrl+a":
-		return tea.KeyMsg{Type: tea.KeyCtrlA}
-	case "ctrl+z":
-		return tea.KeyMsg{Type: tea.KeyCtrlZ}
+	case "alt+a":
+		return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a"), Alt: true}
+	case "alt+z":
+		return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("z"), Alt: true}
 	case "enter":
 		return tea.KeyMsg{Type: tea.KeyEnter}
 	case "esc":
@@ -93,7 +93,7 @@ func TestSteps_PlanePopupFullFlow(t *testing.T) {
 		},
 		{
 			name: "navigate down",
-			msg:  keyMsg("ctrl+z"),
+			msg:  keyMsg("alt+z"),
 			assert: func(t *testing.T, m tuiModel) {
 				if m.popupCursor != 1 {
 					t.Errorf("cursor should be 1, got %d", m.popupCursor)

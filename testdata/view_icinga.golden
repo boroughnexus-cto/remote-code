@@ -5,4 +5,4 @@ Icinga Alerts — Active Problems
   WARNING   unraid / disk-temp
      -> Disk 3 temperature 52C
 
-  ^A/^Z scroll | / filter | s sort | Enter act | r refresh | q/Esc close
+  Alt+A/Alt+Z scroll | / filter | s sort | Enter act | r refresh | q/Esc close

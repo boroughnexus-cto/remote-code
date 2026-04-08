@@ -1,28 +1,28 @@
- SwarmOps  1 running, 0 stopped                                                
- Pool: 2 slots                                                       00:00:00  
-────────────────────────────────────────────────────────────────────────────── 
-                        │                                                      
-  Sessions              │                                                      
-                        │                                                      
-  ● dev-session         │                                                      
-                        │                                                      
- ─── Pool ───           │                                                      
-  ◆ [api] haiku idle    │                                                      
-  ◆ [api] sonnet busy   │                                                      
-                        │                                                      
-                        │                                                      
-                        │                                                      
-                        │                                                      
-                        │                                                      
-                        │                                                      
-                        │                                                      
-                        │                                                      
-                        │                                                      
-                        │                                                      
-                        │                                                      
-                        │                                                      
-                        │                                                      
-                        │                                                      
-                        │                                                      
-                        │                                                      
-^A/^Z switch │ Alt+N new │ Alt+D delete │ Alt+P plane │ Alt+I icinga │ ^\ quit 
+ SwarmOps  1 running, 0 stopped                                                        
+ Pool: 2 slots                                                       00:00:00          
+──────────────────────────────────────────────────────────────────────────────         
+                        │                                                              
+  Sessions              │                                                              
+                        │                                                              
+  ● dev-session         │                                                              
+                        │                                                              
+ ─── Pool ───           │                                                              
+  ◆ [api] haiku idle    │                                                              
+  ◆ [api] sonnet busy   │                                                              
+                        │                                                              
+                        │                                                              
+                        │                                                              
+                        │                                                              
+                        │                                                              
+                        │                                                              
+                        │                                                              
+                        │                                                              
+                        │                                                              
+                        │                                                              
+                        │                                                              
+                        │                                                              
+                        │                                                              
+                        │                                                              
+                        │                                                              
+                        │                                                              
+Alt+A/Alt+Z switch │ Alt+N new │ Alt+D delete │ Alt+P plane │ Alt+I icinga │ Alt+Q quit

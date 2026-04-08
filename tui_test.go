@@ -130,12 +130,12 @@ func sendKey(m tuiModel, key string) tuiModel {
 func sendSpecialKey(m tuiModel, key string) tuiModel {
 	msg := tea.KeyMsg{}
 	switch key {
-	case "ctrl+a":
-		msg = tea.KeyMsg{Type: tea.KeyCtrlA}
-	case "ctrl+z":
-		msg = tea.KeyMsg{Type: tea.KeyCtrlZ}
-	case "ctrl+\\":
-		msg = tea.KeyMsg{Type: tea.KeyCtrlBackslash}
+	case "alt+a":
+		msg = tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a"), Alt: true}
+	case "alt+z":
+		msg = tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("z"), Alt: true}
+	case "alt+q":
+		msg = tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q"), Alt: true}
 	case "enter":
 		msg = tea.KeyMsg{Type: tea.KeyEnter}
 	case "esc":
@@ -352,14 +352,14 @@ func TestKey_CursorDown(t *testing.T) {
 		t.Fatalf("initial cursor should be 0, got %d", m.cursor)
 	}
 
-	m = sendSpecialKey(m, "ctrl+z")
+	m = sendSpecialKey(m, "alt+z")
 	if m.cursor != 1 {
-		t.Errorf("after ctrl+z: cursor should be 1, got %d", m.cursor)
+		t.Errorf("after alt+z: cursor should be 1, got %d", m.cursor)
 	}
 
-	m = sendSpecialKey(m, "ctrl+z")
+	m = sendSpecialKey(m, "alt+z")
 	if m.cursor != 2 {
-		t.Errorf("after second ctrl+z: cursor should be 2, got %d", m.cursor)
+		t.Errorf("after second alt+z: cursor should be 2, got %d", m.cursor)
 	}
 }
 
@@ -371,9 +371,9 @@ func TestKey_CursorUp(t *testing.T) {
 	m := newTestModel(items)
 	m.cursor = 1
 
-	m = sendSpecialKey(m, "ctrl+a")
+	m = sendSpecialKey(m, "alt+a")
 	if m.cursor != 0 {
-		t.Errorf("after ctrl+a: cursor should be 0, got %d", m.cursor)
+		t.Errorf("after alt+a: cursor should be 0, got %d", m.cursor)
 	}
 }
 
@@ -382,7 +382,7 @@ func TestKey_CursorClampTop(t *testing.T) {
 	m := newTestModel(items)
 	m.cursor = 0
 
-	m = sendSpecialKey(m, "ctrl+a")
+	m = sendSpecialKey(m, "alt+a")
 	if m.cursor != 0 {
 		t.Errorf("cursor should stay at 0 when already at top, got %d", m.cursor)
 	}
@@ -396,7 +396,7 @@ func TestKey_CursorClampBottom(t *testing.T) {
 	m := newTestModel(items)
 	m.cursor = 1
 
-	m = sendSpecialKey(m, "ctrl+z")
+	m = sendSpecialKey(m, "alt+z")
 	if m.cursor != 1 {
 		t.Errorf("cursor should stay at 1 when already at bottom, got %d", m.cursor)
 	}
@@ -405,7 +405,7 @@ func TestKey_CursorClampBottom(t *testing.T) {
 func TestKey_CursorEmptyList(t *testing.T) {
 	m := newTestModel(nil)
 
-	m = sendSpecialKey(m, "ctrl+z")
+	m = sendSpecialKey(m, "alt+z")
 	if m.cursor != 0 {
 		t.Errorf("cursor should stay at 0 with empty list, got %d", m.cursor)
 	}
@@ -492,26 +492,26 @@ func TestKey_ContextPickNavigation(t *testing.T) {
 	m.ctxCursor = 0
 
 	// Move down
-	m = sendSpecialKey(m, "ctrl+z")
+	m = sendSpecialKey(m, "alt+z")
 	if m.ctxCursor != 1 {
-		t.Errorf("ctrl+z should move context cursor to 1, got %d", m.ctxCursor)
+		t.Errorf("alt+z should move context cursor to 1, got %d", m.ctxCursor)
 	}
 
-	m = sendSpecialKey(m, "ctrl+z")
+	m = sendSpecialKey(m, "alt+z")
 	if m.ctxCursor != 2 {
-		t.Errorf("ctrl+z should move context cursor to 2, got %d", m.ctxCursor)
+		t.Errorf("alt+z should move context cursor to 2, got %d", m.ctxCursor)
 	}
 
 	// Clamp at bottom (0=none, 1=alpha, 2=beta → max is 2)
-	m = sendSpecialKey(m, "ctrl+z")
+	m = sendSpecialKey(m, "alt+z")
 	if m.ctxCursor != 2 {
 		t.Errorf("context cursor should clamp at bottom, got %d", m.ctxCursor)
 	}
 
 	// Move back up
-	m = sendSpecialKey(m, "ctrl+a")
+	m = sendSpecialKey(m, "alt+a")
 	if m.ctxCursor != 1 {
-		t.Errorf("ctrl+a should move context cursor to 1, got %d", m.ctxCursor)
+		t.Errorf("alt+a should move context cursor to 1, got %d", m.ctxCursor)
 	}
 }
 
@@ -585,9 +585,9 @@ func TestKey_SpawnError(t *testing.T) {
 
 func TestKey_Quit(t *testing.T) {
 	m := newTestModel(nil)
-	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlBackslash})
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q"), Alt: true})
 	if cmd == nil {
-		t.Error("ctrl+\\ should produce a quit command")
+		t.Error("alt+q should produce a quit command")
 	}
 	// Execute the command to check it's a quit
 	msg := cmd()
@@ -855,7 +855,7 @@ func TestStatusBar_ClearedOnCursorMove(t *testing.T) {
 	m := newTestModel(items)
 	m.flash = "some message"
 
-	m = sendSpecialKey(m, "ctrl+z")
+	m = sendSpecialKey(m, "alt+z")
 	if m.flash != "" {
 		t.Errorf("flash should be cleared on cursor move, got %q", m.flash)
 	}

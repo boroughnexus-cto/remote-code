@@ -978,20 +978,9 @@ func (m tuiModel) renderContextPicker() string {
 	return strings.Join(parts, " │ ")
 }
 
-// RunSwarmTUI starts the Bubbletea TUI.
-func RunSwarmTUI() {
-	database = initDatabase()
-	defer database.Close()
-
-	globalConfigService = newConfigService(database)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	initPool(ctx)
-
+// runTUI starts the Bubbletea TUI. Database, config, and pool must be initialised by main().
+func runTUI() error {
 	p := tea.NewProgram(initialModel(), tea.WithAltScreen(), tea.WithMouseCellMotion())
-	if _, err := p.Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "TUI error: %v\n", err)
-		os.Exit(1)
-	}
+	_, err := p.Run()
+	return err
 }

@@ -373,7 +373,7 @@ func renderPlanePopup(m tuiModel) string {
 		}
 	}
 
-	sb.WriteString("\n" + dimStyle.Render("  ^A/^Z scroll | / filter | s sort | Enter act | r refresh | q/Esc close"))
+	sb.WriteString("\n" + dimStyle.Render("  Alt+A/Alt+Z scroll | / filter | s sort | Enter act | r refresh | q/Esc close"))
 	return sb.String()
 }
 
@@ -423,7 +423,7 @@ func renderIcingaPopup(m tuiModel) string {
 		}
 	}
 
-	sb.WriteString("\n" + dimStyle.Render("  ^A/^Z scroll | / filter | s sort | Enter act | r refresh | q/Esc close"))
+	sb.WriteString("\n" + dimStyle.Render("  Alt+A/Alt+Z scroll | / filter | s sort | Enter act | r refresh | q/Esc close"))
 	return sb.String()
 }
 
@@ -459,6 +459,6 @@ func renderActionPicker(m tuiModel) string {
 	sb.WriteString("  Spawn new session:\n")
 	sb.WriteString(prefix + "[New session with this task]\n")
 
-	sb.WriteString("\n" + dimStyle.Render("  ^A/^Z select | Enter confirm | Esc cancel"))
+	sb.WriteString("\n" + dimStyle.Render("  Alt+A/Alt+Z select | Enter confirm | Esc cancel"))
 	return sb.String()
 }
