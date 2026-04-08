@@ -90,6 +90,15 @@ func main() {
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 
+	// In TUI mode, HTTP errors are non-fatal (e.g. port already in use)
+	if term {
+		go func() {
+			if err := <-serverErr; err != nil {
+				log.Printf("HTTP server error (non-fatal): %v", err)
+			}
+		}()
+	}
+
 	// TUI runs in a goroutine so main can select on all shutdown triggers
 	tuiDone := make(chan error, 1)
 	if term {
@@ -106,7 +115,7 @@ func main() {
 		}
 	case <-sig:
 		log.Printf("Received shutdown signal")
-	case err := <-serverErr:
+	case err := <-serverErr: // headless only (TUI mode drains above)
 		log.Printf("HTTP server error: %v", err)
 	}
 
