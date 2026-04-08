@@ -402,14 +402,14 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch m.mode {
 	case modePassthrough:
 		switch key {
-		case "ctrl+a":
+		case "alt+a":
 			if m.cursor > 0 {
 				m.cursor--
 				m.flash = ""
 				m.updateContentCache()
 			}
 			return m, nil
-		case "ctrl+z":
+		case "alt+z":
 			if m.cursor < len(m.items)-1 {
 				m.cursor++
 				m.flash = ""
@@ -446,7 +446,7 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.flash = ""
 			m.icingaReqID++
 			return m, fetchIcingaProblems(m.icingaReqID)
-		case "ctrl+\\":
+		case "alt+q":
 			return m, tea.Quit
 		default:
 			// Only pass keys to session items (not pool slots)
@@ -490,11 +490,11 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case modeContextPick:
 		switch key {
-		case "ctrl+a", "up":
+		case "alt+a", "up":
 			if m.ctxCursor > 0 {
 				m.ctxCursor--
 			}
-		case "ctrl+z", "down":
+		case "alt+z", "down":
 			if m.ctxCursor < len(m.contexts) {
 				m.ctxCursor++
 			}
@@ -553,11 +553,11 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch key {
 		case "esc":
 			m.mode = m.actionPrevMode
-		case "ctrl+a", "up":
+		case "alt+a", "up":
 			if m.actionCursor > 0 {
 				m.actionCursor--
 			}
-		case "ctrl+z", "down":
+		case "alt+z", "down":
 			if m.actionCursor < maxIdx {
 				m.actionCursor++
 			}
@@ -712,12 +712,12 @@ func handlePopupKeyShared(m *tuiModel, msg tea.KeyMsg, filteredLen int, sortLabe
 		m.popupFilter.SetValue("")
 		m.popupSortMode = 0
 		return popupKeyResult{handled: true}
-	case "ctrl+a", "up":
+	case "alt+a", "up":
 		if filteredLen > 0 && m.popupCursor > 0 {
 			m.popupCursor--
 		}
 		return popupKeyResult{handled: true}
-	case "ctrl+z", "down":
+	case "alt+z", "down":
 		if filteredLen > 0 && m.popupCursor < filteredLen-1 {
 			m.popupCursor++
 		}
@@ -818,7 +818,7 @@ func (m tuiModel) View() string {
 		if m.flash != "" {
 			statusLine = dimStyle.Render(m.flash)
 		} else {
-			statusLine = dimStyle.Render("^A/^Z switch │ Alt+N new │ Alt+D delete │ Alt+P plane │ Alt+I icinga │ ^\\ quit")
+			statusLine = dimStyle.Render("Alt+A/Alt+Z switch │ Alt+N new │ Alt+D delete │ Alt+P plane │ Alt+I icinga │ Alt+Q quit")
 		}
 	}
 
