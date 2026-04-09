@@ -130,6 +130,14 @@ func updateSessionStatus(ctx context.Context, id, status string) error {
 	return err
 }
 
+func renameSession(ctx context.Context, id, name string) error {
+	_, err := database.ExecContext(ctx,
+		"UPDATE managed_sessions SET name = ?, updated_at = ? WHERE id = ?",
+		name, time.Now().Unix(), id,
+	)
+	return err
+}
+
 // refreshSessionStatuses checks each session's tmux and updates status accordingly.
 func refreshSessionStatuses(ctx context.Context) {
 	sessions, err := listSessions(ctx)

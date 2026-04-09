@@ -1,28 +1,28 @@
- SwarmOps  1 running, 1 stopped                                                        
- Pool: off                                                           00:00:00          
-──────────────────────────────────────────────────────────────────────────────         
-                        │                                                              
-  Sessions              │                                                              
-                        │                                                              
-  ● my-project          │                                                              
-  ○ old-task            │                                                              
-                        │                                                              
-                        │                                                              
-                        │                                                              
-                        │                                                              
-                        │                                                              
-                        │                                                              
-                        │                                                              
-                        │                                                              
-                        │                                                              
-                        │                                                              
-                        │                                                              
-                        │                                                              
-                        │                                                              
-                        │                                                              
-                        │                                                              
-                        │                                                              
-                        │                                                              
-                        │                                                              
-                        │                                                              
-Alt+A/Alt+Z switch │ Alt+N new │ Alt+D delete │ Alt+P plane │ Alt+I icinga │ Alt+Q quit
+ SwarmOps  1 running, 1 stopped                                                                       
+ Pool: off                                                           00:00:00                         
+──────────────────────────────────────────────────────────────────────────────                        
+                        │                                                                             
+  Sessions              │                                                                             
+                        │                                                                             
+  ○ my-project          │                                                                             
+  ○ old-task            │                                                                             
+                        │                                                                             
+                        │                                                                             
+                        │                                                                             
+                        │                                                                             
+                        │                                                                             
+                        │                                                                             
+                        │                                                                             
+                        │                                                                             
+                        │                                                                             
+                        │                                                                             
+                        │                                                                             
+                        │                                                                             
+                        │                                                                             
+                        │                                                                             
+                        │                                                                             
+                        │                                                                             
+                        │                                                                             
+                        │                                                                             
+                        │                                                                             
+Alt+A/Alt+Z switch │ Alt+N new │ Alt+R rename │ Alt+D delete │ Alt+P plane │ Alt+I icinga │ Alt+Q quit

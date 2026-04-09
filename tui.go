@@ -72,6 +72,7 @@ type sidebarItem struct {
 	sessionID   string
 	tmuxSession string
 	status      string
+	activity    string // "stopped", "working", "awaiting"
 	// Pool slot fields
 	slotID   string
 	model    string
@@ -106,6 +107,7 @@ const (
 	modePlaneIssues
 	modeIcingaAlerts
 	modePopupAction
+	modeRename
 )
 
 // Spawner abstracts session creation for testability.
@@ -167,6 +169,15 @@ type tuiModel struct {
 	actionSessions  []sidebarItem // running sessions to choose from
 	actionCursor    int           // cursor in action picker (sessions + "new" option)
 
+	// Scroll state
+	userScrolled bool
+
+	// Animation frame (cycles on tick)
+	animFrame int
+
+	// Rename session
+	renameInput textinput.Model
+
 	// Dependency injection for testing
 	spawner Spawner
 }
@@ -185,11 +196,16 @@ func initialModel() tuiModel {
 	fi.Placeholder = "filter..."
 	fi.CharLimit = 128
 
+	ri := textinput.New()
+	ri.Placeholder = "New name"
+	ri.CharLimit = 64
+
 	return tuiModel{
 		mode:         modePassthrough,
 		newNameInput: ni,
 		newDirInput:  di,
 		popupFilter:  fi,
+		renameInput:  ri,
 		spawner:      defaultSpawner{},
 	}
 }
@@ -213,6 +229,7 @@ func loadItems() tea.Msg {
 	var items []sidebarItem
 
 	for _, s := range sessions {
+		activity := "stopped"
 		indicator := statusStopped
 		if s.Status == "running" {
 			indicator = statusRunning
@@ -224,6 +241,7 @@ func loadItems() tea.Msg {
 			sessionID:   s.ID,
 			tmuxSession: s.TmuxSession,
 			status:      s.Status,
+			activity:    activity,
 		})
 	}
 
@@ -317,6 +335,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tickMsg:
+		m.animFrame++
 		var cmds []tea.Cmd
 		cmds = append(cmds, tickCmd(), loadItems)
 		if m.cursor < len(m.items) {
@@ -340,7 +359,9 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.contentCache = m.termContent
 		if m.vpReady {
 			m.vp.SetContent(m.contentCache)
-			m.vp.GotoBottom() // auto-scroll for terminal output
+			if !m.userScrolled {
+				m.vp.GotoBottom()
+			}
 		}
 		return m, nil
 
@@ -406,6 +427,7 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if m.cursor > 0 {
 				m.cursor--
 				m.flash = ""
+				m.userScrolled = false
 				m.updateContentCache()
 			}
 			return m, nil
@@ -413,6 +435,7 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if m.cursor < len(m.items)-1 {
 				m.cursor++
 				m.flash = ""
+				m.userScrolled = false
 				m.updateContentCache()
 			}
 			return m, nil
@@ -428,6 +451,15 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				deleteSession(context.Background(), item.sessionID)
 				m.flash = fmt.Sprintf("Deleted %s", item.label)
 				return m, loadItems
+			}
+			return m, nil
+		case "alt+r":
+			if m.cursor < len(m.items) && m.items[m.cursor].kind == itemSession {
+				m.mode = modeRename
+				m.renameInput.SetValue(m.items[m.cursor].label)
+				m.renameInput.Focus()
+				m.flash = "Rename session (esc to cancel)"
+				return m, textinput.Blink
 			}
 			return m, nil
 		case "alt+p":
@@ -488,6 +520,26 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 
+
+	case modeRename:
+		switch key {
+		case "enter":
+			newName := m.renameInput.Value()
+			if newName != "" && m.cursor < len(m.items) {
+				item := m.items[m.cursor]
+				renameSession(context.Background(), item.sessionID, newName)
+				m.flash = fmt.Sprintf("Renamed to %s", newName)
+			}
+			m.mode = modePassthrough
+			return m, loadItems
+		case "esc":
+			m.mode = modePassthrough
+			m.flash = ""
+		default:
+			var cmd tea.Cmd
+			m.renameInput, cmd = m.renameInput.Update(msg)
+			return m, cmd
+		}
 	case modeContextPick:
 		switch key {
 		case "alt+a", "up":
@@ -812,13 +864,15 @@ func (m tuiModel) View() string {
 		statusLine = "Name: " + m.newNameInput.View()
 	case modeNewDir:
 		statusLine = "Dir: " + m.newDirInput.View()
+	case modeRename:
+		statusLine = "Rename: " + m.renameInput.View()
 	case modeContextPick:
 		statusLine = m.renderContextPicker()
 	default:
 		if m.flash != "" {
 			statusLine = dimStyle.Render(m.flash)
 		} else {
-			statusLine = dimStyle.Render("Alt+A/Alt+Z switch │ Alt+N new │ Alt+D delete │ Alt+P plane │ Alt+I icinga │ Alt+Q quit")
+			statusLine = dimStyle.Render("Alt+A/Alt+Z switch │ Alt+N new │ Alt+R rename │ Alt+D delete │ Alt+P plane │ Alt+I icinga │ Alt+Q quit")
 		}
 	}
 
@@ -887,7 +941,11 @@ func (m tuiModel) renderSidebar() string {
 			label = label[:17] + "..."
 		}
 
-		line := fmt.Sprintf(" %s %s", item.indicator, label)
+		ind := item.indicator
+		if item.kind == itemSession {
+			ind = animatedIndicator(item.activity, m.animFrame)
+		}
+		line := fmt.Sprintf(" %s %s", ind, label)
 
 		// Show slot state inline for pool items
 		if item.kind == itemPoolSlot {
@@ -979,6 +1037,46 @@ func (m tuiModel) renderContextPicker() string {
 }
 
 // runTUI starts the Bubbletea TUI. Database, config, and pool must be initialised by main().
+
+// detectActivity checks the last non-empty line of a tmux session to classify activity.
+func detectActivity(tmuxSession string) string {
+	out, err := exec.Command("tmux", "capture-pane", "-p", "-S", "-5", "-t", tmuxSession).Output()
+	if err != nil {
+		return "working"
+	}
+	lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line == "" {
+			continue
+		}
+		// Claude Code prompt patterns
+		if strings.HasPrefix(line, "❯") || strings.HasPrefix(line, ">") || strings.HasPrefix(line, "?") || strings.Contains(line, "(y/n)") || strings.Contains(line, "Pick a") {
+			return "awaiting"
+		}
+		return "working"
+	}
+	return "working"
+}
+
+var (
+	spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"}
+	pulseFrames   = []string{"●", "○"}
+)
+
+// animatedIndicator returns the indicator string for a session based on its activity and the current animation frame.
+func animatedIndicator(activity string, frame int) string {
+	switch activity {
+	case "awaiting":
+		f := pulseFrames[frame%len(pulseFrames)]
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("#ffaa00")).Render(f)
+	case "working":
+		f := spinnerFrames[frame%len(spinnerFrames)]
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("#00ff00")).Render(f)
+	default:
+		return statusStopped
+	}
+}
 func runTUI() error {
 	p := tea.NewProgram(initialModel(), tea.WithAltScreen(), tea.WithMouseCellMotion())
 	_, err := p.Run()
