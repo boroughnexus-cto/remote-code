@@ -112,6 +112,9 @@ func getSession(ctx context.Context, id string) (*Session, error) {
 }
 
 func deleteSession(ctx context.Context, id string) error {
+	if database == nil {
+		return nil
+	}
 	s, err := getSession(ctx, id)
 	if err != nil {
 		return err
@@ -131,6 +134,9 @@ func updateSessionStatus(ctx context.Context, id, status string) error {
 }
 
 func renameSession(ctx context.Context, id, name string) error {
+	if database == nil {
+		return nil
+	}
 	_, err := database.ExecContext(ctx,
 		"UPDATE managed_sessions SET name = ?, updated_at = ? WHERE id = ?",
 		name, time.Now().Unix(), id,

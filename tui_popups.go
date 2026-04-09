@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"crypto/tls"
+	"log"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -461,4 +463,44 @@ func renderActionPicker(m tuiModel) string {
 
 	sb.WriteString("\n" + dimStyle.Render("  Alt+A/Alt+Z select | Enter confirm | Esc cancel"))
 	return sb.String()
+}
+
+// submitFeedback creates a Plane issue in the SwarmOps feedback project.
+func submitFeedback(kind, summary string) {
+	if globalConfigService == nil {
+		log.Printf("feedback: config service not initialized")
+		return
+	}
+	apiURL := globalConfigService.GetString("plane.api_url", "")
+	apiKey := globalConfigService.GetString("plane.api_key", "")
+	workspace := globalConfigService.GetString("plane.workspace", "thomkernet")
+	projectID := globalConfigService.GetString("feedback.project_id", "")
+	if apiURL == "" || apiKey == "" || projectID == "" {
+		log.Printf("feedback: not configured (need plane.api_url, plane.api_key, feedback.project_id)")
+		return
+	}
+	prefix := "[bug] "
+	if kind == "feature" {
+		prefix = "[feature] "
+	}
+	url := fmt.Sprintf("%s/api/v1/workspaces/%s/projects/%s/issues/", strings.TrimRight(apiURL, "/"), workspace, projectID)
+	body, _ := json.Marshal(map[string]string{"name": prefix + summary})
+	req, err := http.NewRequest("POST", url, bytes.NewReader(body))
+	if err != nil {
+		log.Printf("feedback: request error: %v", err)
+		return
+	}
+	req.Header.Set("X-API-Key", apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("feedback: HTTP error: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		respBody, _ := io.ReadAll(resp.Body)
+		log.Printf("feedback: Plane returned %d: %s", resp.StatusCode, string(respBody))
+	}
 }

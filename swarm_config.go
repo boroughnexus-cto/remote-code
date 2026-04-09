@@ -119,6 +119,7 @@ var configRegistry = map[string]configMeta{
 	"plane.api_key":    {Default: "", EnvVar: "PLANE_API_KEY", DangerLevel: 2, Description: "Plane API token"},
 	"plane.workspace":  {Default: "thomkernet", EnvVar: "PLANE_WORKSPACE", DangerLevel: 0, Description: "Plane workspace slug"},
 	"plane.project_id": {Default: "", EnvVar: "PLANE_PROJECT_ID", DangerLevel: 0, Description: "Plane project UUID for TUI popup"},
+	"feedback.project_id": {Default: "", EnvVar: "FEEDBACK_PROJECT_ID", DangerLevel: 0, Description: "Plane project UUID for feedback issues (SwarmOps)"},
 
 	// Icinga integration (TUI popup)
 	"icinga.api_url":  {Default: "", EnvVar: "ICINGA_API_URL", DangerLevel: 0, Description: "Icinga API base URL (e.g. https://icinga.example.com:5665)"},

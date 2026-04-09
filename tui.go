@@ -108,6 +108,8 @@ const (
 	modeIcingaAlerts
 	modePopupAction
 	modeRename
+	modeFeedbackType
+	modeFeedbackText
 )
 
 // Spawner abstracts session creation for testability.
@@ -178,6 +180,10 @@ type tuiModel struct {
 	// Rename session
 	renameInput textinput.Model
 
+	// Feedback submission
+	feedbackInput textinput.Model
+	feedbackType  int // 0=bug, 1=feature
+
 	// Dependency injection for testing
 	spawner Spawner
 }
@@ -200,12 +206,17 @@ func initialModel() tuiModel {
 	ri.Placeholder = "New name"
 	ri.CharLimit = 64
 
+	fi2 := textinput.New()
+	fi2.Placeholder = "Describe the bug or feature..."
+	fi2.CharLimit = 256
+
 	return tuiModel{
 		mode:         modePassthrough,
 		newNameInput: ni,
 		newDirInput:  di,
 		popupFilter:  fi,
-		renameInput:  ri,
+		renameInput:   ri,
+		feedbackInput: fi2,
 		spawner:      defaultSpawner{},
 	}
 }
@@ -462,6 +473,11 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, textinput.Blink
 			}
 			return m, nil
+		case "alt+f":
+			m.mode = modeFeedbackType
+			m.feedbackType = 0
+			m.flash = "Feedback: ←/→ Bug or Feature, Enter to continue, Esc to cancel"
+			return m, nil
 		case "alt+p":
 			m.mode = modePlaneIssues
 			m.planeIssues = nil
@@ -538,6 +554,42 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		default:
 			var cmd tea.Cmd
 			m.renameInput, cmd = m.renameInput.Update(msg)
+			return m, cmd
+		}
+
+	case modeFeedbackType:
+		switch key {
+		case "left", "right":
+			m.feedbackType = 1 - m.feedbackType
+		case "enter":
+			m.mode = modeFeedbackText
+			m.feedbackInput.SetValue("")
+			m.feedbackInput.Focus()
+			kinds := []string{"bug", "feature"}
+			m.flash = fmt.Sprintf("Describe the %s (Enter to submit, Esc to cancel)", kinds[m.feedbackType])
+			return m, textinput.Blink
+		case "esc":
+			m.mode = modePassthrough
+			m.flash = ""
+		}
+
+	case modeFeedbackText:
+		switch key {
+		case "enter":
+			summary := m.feedbackInput.Value()
+			if summary != "" {
+				kinds := []string{"bug", "feature"}
+				go submitFeedback(kinds[m.feedbackType], summary)
+				m.flash = fmt.Sprintf("Submitted %s: %s", kinds[m.feedbackType], summary)
+			}
+			m.mode = modePassthrough
+			return m, nil
+		case "esc":
+			m.mode = modePassthrough
+			m.flash = ""
+		default:
+			var cmd tea.Cmd
+			m.feedbackInput, cmd = m.feedbackInput.Update(msg)
 			return m, cmd
 		}
 	case modeContextPick:
@@ -866,13 +918,26 @@ func (m tuiModel) View() string {
 		statusLine = "Dir: " + m.newDirInput.View()
 	case modeRename:
 		statusLine = "Rename: " + m.renameInput.View()
+	case modeFeedbackType:
+		kinds := []string{"🐛 Bug", "✨ Feature"}
+		var parts []string
+		for i, k := range kinds {
+			if i == m.feedbackType {
+				parts = append(parts, selectedStyle.Render("> "+k))
+			} else {
+				parts = append(parts, dimStyle.Render("  "+k))
+			}
+		}
+		statusLine = "Feedback: " + strings.Join(parts, "  ")
+	case modeFeedbackText:
+		statusLine = "Feedback: " + m.feedbackInput.View()
 	case modeContextPick:
 		statusLine = m.renderContextPicker()
 	default:
 		if m.flash != "" {
 			statusLine = dimStyle.Render(m.flash)
 		} else {
-			statusLine = dimStyle.Render("Alt+A/Alt+Z switch │ Alt+N new │ Alt+R rename │ Alt+D delete │ Alt+P plane │ Alt+I icinga │ Alt+Q quit")
+			statusLine = dimStyle.Render("Alt+A/Alt+Z switch │ Alt+N new │ Alt+R rename │ Alt+D delete │ Alt+P plane │ Alt+I icinga │ Alt+F feedback │ Alt+Q quit")
 		}
 	}
 

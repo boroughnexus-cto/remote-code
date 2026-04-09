@@ -62,6 +62,8 @@ func newTestModel(items []sidebarItem) tuiModel {
 		newNameInput: ni,
 		newDirInput:  di,
 		popupFilter:  fi,
+		renameInput:   textinput.New(),
+		feedbackInput: textinput.New(),
 		spawner:      &mockSpawner{},
 		items:        items,
 		w:            testWidth,
