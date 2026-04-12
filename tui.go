@@ -61,7 +61,7 @@ var (
 				Foreground(lipgloss.Color("#15a8a8"))
 )
 
-const headerHeight = 3 // top bar: 2 content lines + 1 border line
+const headerHeight = 0 // top bar integrated into sidebar
 
 // ─── Sidebar item: unified type for sessions + pool slots ────────────────────
 
@@ -1101,7 +1101,6 @@ func (m tuiModel) View() string {
 		return renderActionPicker(m)
 	}
 
-	topBar := m.renderTopBar()
 	sidebar := m.renderSidebar()
 	content := m.renderContent()
 
@@ -1138,11 +1137,7 @@ func (m tuiModel) View() string {
 		}
 	}
 
-	full := lipgloss.JoinVertical(lipgloss.Left, topBar, main, statusLine)
-
-	// Hard-constrain output to terminal dimensions to prevent scrolling
-	// (iPad SSH clients in particular will scroll the top bar off-screen)
-	return lipgloss.Place(m.w, m.h, lipgloss.Left, lipgloss.Top, full)
+	return lipgloss.JoinVertical(lipgloss.Left, main, statusLine)
 }
 
 func (m tuiModel) renderTopBar() string {
@@ -1195,7 +1190,45 @@ func (m tuiModel) renderTopBar() string {
 
 func (m tuiModel) renderSidebar() string {
 	var lines []string
-	lines = append(lines, headerStyle.Render("Sessions"))
+
+	// Top header: SwarmOps + time
+	ts := time.Now().Format("15:04:05")
+	titleLine := topBarTitleStyle.Render("SwarmOps")
+	gap := 22 - lipgloss.Width(titleLine) - len(ts) // 22 = sidebar inner width
+	if gap < 1 {
+		gap = 1
+	}
+	lines = append(lines, titleLine+strings.Repeat(" ", gap)+dimStyle.Render(ts))
+
+	// Summary line
+	running := 0
+	stopped := 0
+	poolAlive := 0
+	poolTotal := 0
+	for _, item := range m.items {
+		switch item.kind {
+		case itemSession:
+			if item.status == "running" {
+				running++
+			} else {
+				stopped++
+			}
+		case itemPoolSlot:
+			poolTotal++
+			if item.alive {
+				poolAlive++
+			}
+		}
+	}
+	var summary []string
+	if running+stopped > 0 {
+		summary = append(summary, fmt.Sprintf("%d sess", running+stopped))
+	}
+	if poolTotal > 0 {
+		summary = append(summary, fmt.Sprintf("%d/%d pool", poolAlive, poolTotal))
+	}
+	lines = append(lines, dimStyle.Render(strings.Join(summary, " · ")))
+	lines = append(lines, dimStyle.Render("────────────────────"))
 	lines = append(lines, "")
 
 	// Track whether we've printed the pool separator
@@ -1332,20 +1365,31 @@ func (m tuiModel) renderContextPicker() string {
 // stripANSI removes ANSI escape sequences from a string.
 var ansiRe = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
 
-// detectActivity checks the last non-empty line of a tmux session to classify activity.
+// detectActivity scans the last 15 lines of a tmux session to classify activity.
 // Returns "awaiting" (idle prompt), "working" (processing), or "stopped".
 func detectActivity(tmuxSession string) string {
-	out, err := exec.Command("tmux", "capture-pane", "-p", "-S", "-5", "-t", tmuxSession).Output()
+	out, err := exec.Command("tmux", "capture-pane", "-p", "-S", "-15", "-t", tmuxSession).Output()
 	if err != nil {
 		return "working"
 	}
 	lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
-	for i := len(lines) - 1; i >= 0; i-- {
+
+	// Scan ALL recent lines (not just last) — Claude Code's status bar
+	// renders below the prompt, so ❯ may be several lines up.
+	for i := len(lines) - 1; i >= 0 && i >= len(lines)-15; i-- {
 		line := strings.TrimSpace(ansiRe.ReplaceAllString(lines[i], ""))
 		if line == "" {
 			continue
 		}
-		// Claude Code awaiting input patterns
+		// Skip Claude Code chrome (status bar, separator lines)
+		if strings.HasPrefix(line, "──") || // separator
+			strings.HasPrefix(line, "[") || // status bar [Opus 4.6...]
+			strings.HasPrefix(line, "Claude") || // Claude MAX | ...
+			strings.Contains(line, "bypass permissions") || // settings hint
+			strings.HasPrefix(line, "◐") || strings.HasPrefix(line, "◑") { // effort indicator
+			continue
+		}
+		// Awaiting input patterns
 		if strings.HasPrefix(line, "❯") || // main prompt
 			strings.HasPrefix(line, ">") || // continuation prompt
 			strings.HasPrefix(line, "?") || // question prompt
@@ -1354,10 +1398,19 @@ func detectActivity(tmuxSession string) string {
 			strings.Contains(line, "Pick a") ||
 			strings.Contains(line, "Do you want to proceed") ||
 			strings.Contains(line, "Esc to cancel") || // permission dialog
+			strings.Contains(line, "Yes, and don't ask") || // permission choices
 			strings.HasSuffix(line, "$ ") || // shell prompt
 			strings.HasSuffix(line, "# ") {
 			return "awaiting"
 		}
+		// Working patterns
+		if strings.Contains(line, "Running") || // tool running
+			strings.Contains(line, "Thinking") || // thinking indicator
+			strings.HasPrefix(line, "●") || // tool call in progress
+			strings.HasPrefix(line, "✻") { // worked for Ns
+			return "working"
+		}
+		// If we hit a content line that's not chrome and not a prompt, it's working
 		return "working"
 	}
 	return "working"

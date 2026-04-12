@@ -1,16 +1,13 @@
- SwarmOps                                                            00:00:00                                          
- 1 sessions (1 running)  ·  2/2 pool slots                                                                             
-──────────────────────────────────────────────────────────────────────────────                                         
                         │                                                                                              
-  Sessions              │                                                                                              
+ SwarmOps      00:00:00 │                                                                                              
+ 1 sess · 2/2 pool      │                                                                                              
+ ────────────────────   │                                                                                              
                         │                                                                                              
  ▸ ○ dev-session        │                                                                                              
                         │                                                                                              
  ─── Pool ───           │                                                                                              
    ◆ [api] haiku idle   │                                                                                              
    ◆ [api] sonnet busy  │                                                                                              
-                        │                                                                                              
-                        │                                                                                              
                         │                                                                                              
                         │                                                                                              
                         │                                                                                              
