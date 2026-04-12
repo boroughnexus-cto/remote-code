@@ -242,7 +242,7 @@ func newHTTPServer() *http.Server {
 	}
 
 	return &http.Server{
-		Addr:    ":" + port,
+		Addr:    ":" + port, // Binds 0.0.0.0 — pool API used by Hermes over Tailscale
 		Handler: mux,
 	}
 }
