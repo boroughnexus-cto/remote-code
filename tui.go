@@ -415,13 +415,13 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if contentWidth < 20 {
 			contentWidth = 20
 		}
-		// Match sidebar: top bar (headerHeight) + status line (1) + sidebar padding (2)
-		contentHeight := m.h - headerHeight - 1 - 2
+		// Match sidebar: status line (1) + sidebar padding (2) + content header (2)
+		contentHeight := m.h - headerHeight - 1 - 2 - 2
 		if contentHeight < 5 {
 			contentHeight = 5
 		}
 		m.vp = viewport.New(contentWidth, contentHeight)
-		// Resize all tmux sessions to match the content pane
+		// Resize tmux sessions to viewport size (not including content header)
 		go m.resizeTmuxSessions(contentWidth, contentHeight)
 		m.vp.MouseWheelEnabled = true
 		m.vpReady = true
@@ -457,7 +457,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if contentWidth < 20 {
 				contentWidth = 20
 			}
-			contentHeight := m.h - headerHeight - 1 - 2
+			contentHeight := m.h - headerHeight - 1 - 2 - 2
 			if contentHeight < 5 {
 				contentHeight = 5
 			}
@@ -1350,7 +1350,36 @@ func (m tuiModel) renderContent() string {
 	if contentWidth < 20 {
 		contentWidth = 20
 	}
-	return lipgloss.NewStyle().Width(contentWidth).Render(m.vp.View())
+
+	// Header: session/slot name + status on line 1, separator on line 2
+	var headerLine string
+	if m.cursor < len(m.items) {
+		item := m.items[m.cursor]
+		switch item.kind {
+		case itemSession:
+			status := dimStyle.Render("stopped")
+			if item.status == "running" {
+				status = lipgloss.NewStyle().Foreground(lipgloss.Color("#00ff00")).Render("running")
+			}
+			headerLine = topBarTitleStyle.Render(item.label) + "  " + status
+		case itemPoolSlot:
+			state := dimStyle.Render(item.state)
+			if item.state == "idle" {
+				state = lipgloss.NewStyle().Foreground(lipgloss.Color("#00ff00")).Render("idle")
+			} else if item.state == "busy" {
+				state = lipgloss.NewStyle().Foreground(lipgloss.Color("#ffaa00")).Render("busy")
+			}
+			headerLine = topBarTitleStyle.Render(item.model) + "  " + state
+		}
+	}
+	if headerLine == "" {
+		headerLine = dimStyle.Render("No selection")
+	}
+
+	sep := dimStyle.Render(strings.Repeat("─", contentWidth))
+	header := headerLine + "\n" + sep + "\n"
+
+	return lipgloss.NewStyle().Width(contentWidth).Render(header + m.vp.View())
 }
 
 func (m tuiModel) renderPoolSlotDetail(item sidebarItem) string {
