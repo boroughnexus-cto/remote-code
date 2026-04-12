@@ -37,7 +37,13 @@ func init() {
 var database *sql.DB
 
 func main() {
-	// Shared initialisation
+	// Client mode: "tui" subcommand or TTY detected — connect to backend via HTTP
+	if len(os.Args) > 1 && os.Args[1] == "tui" || isTerminal() {
+		runTUIClient()
+		return
+	}
+
+	// Server mode: database, config, pool, HTTP API
 	database = initDatabase()
 	defer database.Close()
 
@@ -48,7 +54,7 @@ func main() {
 
 	initPool(ctx)
 
-	// Periodic session status sync (both modes)
+	// Periodic session status sync
 	go func() {
 		ticker := time.NewTicker(10 * time.Second)
 		defer ticker.Stop()
@@ -62,21 +68,9 @@ func main() {
 		}
 	}()
 
-	term := isTerminal()
-
-	// Redirect logs before starting HTTP server so TUI alt-screen is not corrupted
-	if term {
-		f, err := os.OpenFile("swarmops.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-		if err == nil {
-			log.SetOutput(f)
-			defer f.Close()
-		}
-	}
-
-	// HTTP server on a private mux
+	// Headless server mode
 	server := newHTTPServer()
 
-	// Start HTTP server in background
 	serverErr := make(chan error, 1)
 	go func() {
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -84,47 +78,52 @@ func main() {
 		}
 	}()
 
-	log.Printf("SwarmOps starting on %s", server.Addr)
+	log.Printf("SwarmOps server starting on %s", server.Addr)
 
-	// Signal handler for graceful shutdown
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 
-	// In TUI mode, HTTP errors are non-fatal (e.g. port already in use)
-	if term {
-		go func() {
-			if err := <-serverErr; err != nil {
-				log.Printf("HTTP server error (non-fatal): %v", err)
-			}
-		}()
-	}
-
-	// TUI runs in a goroutine so main can select on all shutdown triggers
-	tuiDone := make(chan error, 1)
-	if term {
-		go func() {
-			tuiDone <- runTUI()
-		}()
-	}
-
-	// Unified shutdown: wait for TUI exit, signal, or HTTP error
 	select {
-	case err := <-tuiDone:
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "TUI error: %v\n", err)
-		}
 	case <-sig:
 		log.Printf("Received shutdown signal")
-	case err := <-serverErr: // headless only (TUI mode drains above)
+	case err := <-serverErr:
 		log.Printf("HTTP server error: %v", err)
 	}
 
-	// Graceful shutdown
 	cancel()
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer shutdownCancel()
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		log.Printf("HTTP shutdown error: %v", err)
+	}
+}
+
+// runTUIClient starts the TUI as an HTTP client against the backend.
+func runTUIClient() {
+	baseURL := os.Getenv("SWARM_API_BASE_URL")
+	if baseURL == "" {
+		baseURL = "http://localhost:8080"
+	}
+
+	api := newAPIClient(baseURL)
+
+	// Health check before launching TUI
+	if err := api.healthCheck(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Start the backend with: systemctl --user start swarmops\n")
+		os.Exit(1)
+	}
+
+	// Redirect logs so TUI alt-screen is clean
+	f, err := os.OpenFile("swarmops.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err == nil {
+		log.SetOutput(f)
+		defer f.Close()
+	}
+
+	if err := runTUI(api); err != nil {
+		fmt.Fprintf(os.Stderr, "TUI error: %v\n", err)
+		os.Exit(1)
 	}
 }
 func newHTTPServer() *http.Server {

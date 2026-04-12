@@ -186,9 +186,12 @@ type tuiModel struct {
 
 	// Dependency injection for testing
 	spawner Spawner
+
+	// HTTP client for backend API (client mode)
+	api *apiClient
 }
 
-func initialModel() tuiModel {
+func initialModel(api *apiClient) tuiModel {
 	ni := textinput.New()
 	ni.Placeholder = "Session name"
 	ni.CharLimit = 64
@@ -210,6 +213,13 @@ func initialModel() tuiModel {
 	fi2.Placeholder = "Describe the bug or feature..."
 	fi2.CharLimit = 256
 
+	var spawner Spawner
+	if api != nil {
+		spawner = api
+	} else {
+		spawner = defaultSpawner{}
+	}
+
 	return tuiModel{
 		mode:         modePassthrough,
 		newNameInput: ni,
@@ -217,12 +227,13 @@ func initialModel() tuiModel {
 		popupFilter:  fi,
 		renameInput:   ri,
 		feedbackInput: fi2,
-		spawner:      defaultSpawner{},
+		spawner:      spawner,
+		api:          api,
 	}
 }
 
 func (m tuiModel) Init() tea.Cmd {
-	return tea.Batch(tickCmd(), loadItems)
+	return tea.Batch(tickCmd(), loadItemsCmd(m.api))
 }
 
 func tickCmd() tea.Cmd {
@@ -231,41 +242,65 @@ func tickCmd() tea.Cmd {
 	})
 }
 
-// loadItems builds the unified sidebar list: sessions first, then pool slots.
-func loadItems() tea.Msg {
-	ctx := context.Background()
-	refreshSessionStatuses(ctx)
-	sessions, _ := listSessions(ctx)
-
-	var items []sidebarItem
-
-	for _, s := range sessions {
-		activity := "stopped"
-		indicator := statusStopped
-		if s.Status == "running" {
-			indicator = statusRunning
+// loadItemsCmd returns a tea.Cmd that builds the unified sidebar list.
+// In client mode it fetches via HTTP; in server mode it calls in-process.
+func loadItemsCmd(api *apiClient) tea.Cmd {
+	return func() tea.Msg {
+		var sessions []Session
+		if api != nil {
+			sessions, _ = api.listSessions()
+		} else {
+			ctx := context.Background()
+			refreshSessionStatuses(ctx)
+			sessions, _ = listSessions(ctx)
 		}
-		items = append(items, sidebarItem{
-			kind:        itemSession,
-			label:       s.Name,
-			indicator:   indicator,
-			sessionID:   s.ID,
-			tmuxSession: s.TmuxSession,
-			status:      s.Status,
-			activity:    activity,
-		})
-	}
 
-	if globalPool != nil {
-		status := globalPool.Status()
-		if models, ok := status["models"].(map[string]interface{}); ok {
-			for model, info := range models {
-				if minfo, ok := info.(map[string]interface{}); ok {
-					if slots, ok := minfo["slots"].([]map[string]interface{}); ok {
-						for _, slot := range slots {
+		var items []sidebarItem
+
+		for _, s := range sessions {
+			activity := "stopped"
+			indicator := statusStopped
+			if s.Status == "running" {
+				indicator = statusRunning
+			}
+			items = append(items, sidebarItem{
+				kind:        itemSession,
+				label:       s.Name,
+				indicator:   indicator,
+				sessionID:   s.ID,
+				tmuxSession: s.TmuxSession,
+				status:      s.Status,
+				activity:    activity,
+			})
+		}
+
+		var poolData map[string]interface{}
+		if api != nil {
+			poolData, _ = api.poolStatus()
+		} else if globalPool != nil {
+			poolData = globalPool.Status()
+		}
+
+		if poolData != nil {
+			if models, ok := poolData["models"].(map[string]interface{}); ok {
+				for model, info := range models {
+					if minfo, ok := info.(map[string]interface{}); ok {
+						// Handle slots as []interface{} (JSON unmarshal) or []map[string]interface{} (in-process)
+						var slotMaps []map[string]interface{}
+						if typed, ok := minfo["slots"].([]map[string]interface{}); ok {
+							slotMaps = typed
+						} else if raw, ok := minfo["slots"].([]interface{}); ok {
+							for _, r := range raw {
+								if m, ok := r.(map[string]interface{}); ok {
+									slotMaps = append(slotMaps, m)
+								}
+							}
+						}
+						for _, slot := range slotMaps {
 							sid, _ := slot["id"].(string)
 							state, _ := slot["state"].(string)
-							reqs, _ := slot["requests"].(int64)
+							// JSON numbers are float64; in-process are int64
+							reqs := toInt64(slot["requests"])
 							cost, _ := slot["cost_usd"].(float64)
 							alive, _ := slot["alive"].(bool)
 
@@ -291,9 +326,24 @@ func loadItems() tea.Msg {
 				}
 			}
 		}
-	}
 
-	return itemsMsg(items)
+		return itemsMsg(items)
+	}
+}
+
+// toInt64 converts a value that may be int64 (in-process) or float64 (JSON) to int64.
+func toInt64(v interface{}) int64 {
+	switch n := v.(type) {
+	case int64:
+		return n
+	case float64:
+		return int64(n)
+	case json.Number:
+		i, _ := n.Int64()
+		return i
+	default:
+		return 0
+	}
 }
 
 func loadTerminal(tmuxName string) tea.Cmd {
@@ -348,7 +398,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tickMsg:
 		m.animFrame++
 		var cmds []tea.Cmd
-		cmds = append(cmds, tickCmd(), loadItems)
+		cmds = append(cmds, tickCmd(), loadItemsCmd(m.api))
 		if m.cursor < len(m.items) {
 			item := m.items[m.cursor]
 			if item.kind == itemSession && item.status == "running" {
@@ -412,7 +462,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.doSpawn(nil, nil)
 			m.mode = modePassthrough
 		}
-		return m, loadItems
+		return m, loadItemsCmd(m.api)
 
 	case tea.MouseMsg:
 		if m.mode == modePassthrough && m.vpReady {
@@ -459,9 +509,13 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "alt+d":
 			if m.cursor < len(m.items) && m.items[m.cursor].kind == itemSession {
 				item := m.items[m.cursor]
-				deleteSession(context.Background(), item.sessionID)
+				if m.api != nil {
+					m.api.deleteSession(item.sessionID)
+				} else {
+					deleteSession(context.Background(), item.sessionID)
+				}
 				m.flash = fmt.Sprintf("Deleted %s", item.label)
-				return m, loadItems
+				return m, loadItemsCmd(m.api)
 			}
 			return m, nil
 		case "alt+r":
@@ -485,7 +539,7 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.popupCursor = 0
 			m.flash = ""
 			m.planeReqID++
-			return m, fetchPlaneIssues(m.planeReqID)
+			return m, fetchPlaneIssues(m.planeReqID, m.api)
 		case "alt+i":
 			m.mode = modeIcingaAlerts
 			m.icingaProblems = nil
@@ -493,7 +547,7 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.popupCursor = 0
 			m.flash = ""
 			m.icingaReqID++
-			return m, fetchIcingaProblems(m.icingaReqID)
+			return m, fetchIcingaProblems(m.icingaReqID, m.api)
 		case "alt+q":
 			return m, tea.Quit
 		default:
@@ -543,11 +597,15 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			newName := m.renameInput.Value()
 			if newName != "" && m.cursor < len(m.items) {
 				item := m.items[m.cursor]
-				renameSession(context.Background(), item.sessionID, newName)
+				if m.api != nil {
+					m.api.renameSession(item.sessionID, newName)
+				} else {
+					renameSession(context.Background(), item.sessionID, newName)
+				}
 				m.flash = fmt.Sprintf("Renamed to %s", newName)
 			}
 			m.mode = modePassthrough
-			return m, loadItems
+			return m, loadItemsCmd(m.api)
 		case "esc":
 			m.mode = modePassthrough
 			m.flash = ""
@@ -579,7 +637,7 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			summary := m.feedbackInput.Value()
 			if summary != "" {
 				kinds := []string{"bug", "feature"}
-				go submitFeedback(kinds[m.feedbackType], summary)
+				go submitFeedback(kinds[m.feedbackType], summary, m.api)
 				m.flash = fmt.Sprintf("Submitted %s: %s", kinds[m.feedbackType], summary)
 			}
 			m.mode = modePassthrough
@@ -611,7 +669,7 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			m.mode = modePassthrough
 			m.flash = ""
-			return m, loadItems
+			return m, loadItemsCmd(m.api)
 		case "esc":
 			m.mode = modePassthrough
 			m.flash = ""
@@ -628,7 +686,7 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		} else if r.action == "refresh" {
 			m.planeIssues = nil
 			m.planeReqID++
-			return m, fetchPlaneIssues(m.planeReqID)
+			return m, fetchPlaneIssues(m.planeReqID, m.api)
 		}
 		if r.handled {
 			return m, r.cmd
@@ -646,7 +704,7 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		} else if r.action == "refresh" {
 			m.icingaProblems = nil
 			m.icingaReqID++
-			return m, fetchIcingaProblems(m.icingaReqID)
+			return m, fetchIcingaProblems(m.icingaReqID, m.api)
 		}
 		if r.handled {
 			return m, r.cmd
@@ -689,7 +747,7 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					m.flash = fmt.Sprintf("Spawned %s — injecting task", s.Name)
 				}
 				m.mode = modePassthrough
-				return m, loadItems
+				return m, loadItemsCmd(m.api)
 			}
 		}
 	}
@@ -1142,8 +1200,8 @@ func animatedIndicator(activity string, frame int) string {
 		return statusStopped
 	}
 }
-func runTUI() error {
-	p := tea.NewProgram(initialModel(), tea.WithAltScreen(), tea.WithMouseCellMotion())
+func runTUI(api *apiClient) error {
+	p := tea.NewProgram(initialModel(api), tea.WithAltScreen(), tea.WithMouseCellMotion())
 	_, err := p.Run()
 	return err
 }

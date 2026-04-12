@@ -401,6 +401,20 @@ func handleSwarmSessionsAPI(w http.ResponseWriter, r *http.Request, ctx context.
 			}
 			w.WriteHeader(http.StatusNoContent)
 
+		case http.MethodPatch:
+			var body struct {
+				Name string `json:"name"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Name == "" {
+				http.Error(w, `{"error":"name required"}`, http.StatusBadRequest)
+				return
+			}
+			if err := renameSession(ctx, sessionID, body.Name); err != nil {
+				http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+
 		default:
 			w.WriteHeader(http.StatusMethodNotAllowed)
 		}

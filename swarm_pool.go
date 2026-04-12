@@ -256,14 +256,27 @@ func (pm *PoolManager) spawnSlot(model, slotID string) (*PoolSlot, error) {
 	workDir := filepath.Join(os.TempDir(), "swarmops-pool", slotID)
 	os.MkdirAll(workDir, 0755)
 
+	// Load MCP config from file for models that can handle it.
+	// Haiku's context is too small for 1200+ tool definitions — skip MCP for it.
+	mcpConfig := `{"mcpServers":{}}`
+	if !strings.Contains(model, "haiku") {
+		mcpConfigPath := filepath.Join(os.Getenv("HOME"), ".swarmops", "mcp-config.json")
+		if data, err := os.ReadFile(mcpConfigPath); err == nil {
+			mcpConfig = string(data)
+			log.Printf("pool: loaded MCP config from %s (%d bytes)", mcpConfigPath, len(data))
+		}
+	}
+
 	cmd := exec.CommandContext(pm.ctx, "claude",
 		"-p",
 		"--input-format", "stream-json",
 		"--output-format", "stream-json",
 		"--verbose",
 		"--model", model,
+		"--dangerously-skip-permissions",
+		"--no-session-persistence",
 		"--strict-mcp-config",
-		"--mcp-config", `{"mcpServers":{}}`,
+		"--mcp-config", mcpConfig,
 	)
 	cmd.Dir = workDir
 	cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}

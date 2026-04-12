@@ -53,16 +53,25 @@ type popupErrMsg struct {
 
 // ─── Data fetching ──────────────────────────────────────────────────────────
 
-func fetchPlaneIssues(reqID uint64) tea.Cmd {
+func fetchPlaneIssues(reqID uint64, api *apiClient) tea.Cmd {
 	return func() tea.Msg {
-		if globalConfigService == nil {
+		var apiURL, apiKey, workspace, projectID string
+		if api != nil {
+			apiURL, _ = api.getConfig("plane.api_url")
+			apiKey, _ = api.getConfig("plane.api_key")
+			workspace, _ = api.getConfig("plane.workspace")
+			projectID, _ = api.getConfig("plane.project_id")
+			if workspace == "" {
+				workspace = "thomkernet"
+			}
+		} else if globalConfigService != nil {
+			apiURL = globalConfigService.GetString("plane.api_url", "")
+			apiKey = globalConfigService.GetString("plane.api_key", "")
+			workspace = globalConfigService.GetString("plane.workspace", "thomkernet")
+			projectID = globalConfigService.GetString("plane.project_id", "")
+		} else {
 			return popupErrMsg{reqID, "plane", "config service not initialized"}
 		}
-
-		apiURL := globalConfigService.GetString("plane.api_url", "")
-		apiKey := globalConfigService.GetString("plane.api_key", "")
-		workspace := globalConfigService.GetString("plane.workspace", "thomkernet")
-		projectID := globalConfigService.GetString("plane.project_id", "")
 
 		if apiURL == "" || apiKey == "" || projectID == "" {
 			return popupErrMsg{reqID, "plane", "Plane not configured (set plane.api_url, plane.api_key, plane.project_id)"}
@@ -109,15 +118,20 @@ func fetchPlaneIssues(reqID uint64) tea.Cmd {
 	}
 }
 
-func fetchIcingaProblems(reqID uint64) tea.Cmd {
+func fetchIcingaProblems(reqID uint64, api *apiClient) tea.Cmd {
 	return func() tea.Msg {
-		if globalConfigService == nil {
+		var apiURL, apiUser, apiPass string
+		if api != nil {
+			apiURL, _ = api.getConfig("icinga.api_url")
+			apiUser, _ = api.getConfig("icinga.api_user")
+			apiPass, _ = api.getConfig("icinga.api_pass")
+		} else if globalConfigService != nil {
+			apiURL = globalConfigService.GetString("icinga.api_url", "")
+			apiUser = globalConfigService.GetString("icinga.api_user", "")
+			apiPass = globalConfigService.GetString("icinga.api_pass", "")
+		} else {
 			return popupErrMsg{reqID, "icinga", "config service not initialized"}
 		}
-
-		apiURL := globalConfigService.GetString("icinga.api_url", "")
-		apiUser := globalConfigService.GetString("icinga.api_user", "")
-		apiPass := globalConfigService.GetString("icinga.api_pass", "")
 
 		if apiURL == "" || apiUser == "" || apiPass == "" {
 			return popupErrMsg{reqID, "icinga", "Icinga not configured (set icinga.api_url, icinga.api_user, icinga.api_pass)"}
@@ -466,15 +480,25 @@ func renderActionPicker(m tuiModel) string {
 }
 
 // submitFeedback creates a Plane issue in the SwarmOps feedback project.
-func submitFeedback(kind, summary string) {
-	if globalConfigService == nil {
+func submitFeedback(kind, summary string, api *apiClient) {
+	var apiURL, apiKey, workspace, projectID string
+	if api != nil {
+		apiURL, _ = api.getConfig("plane.api_url")
+		apiKey, _ = api.getConfig("plane.api_key")
+		workspace, _ = api.getConfig("plane.workspace")
+		projectID, _ = api.getConfig("feedback.project_id")
+		if workspace == "" {
+			workspace = "thomkernet"
+		}
+	} else if globalConfigService != nil {
+		apiURL = globalConfigService.GetString("plane.api_url", "")
+		apiKey = globalConfigService.GetString("plane.api_key", "")
+		workspace = globalConfigService.GetString("plane.workspace", "thomkernet")
+		projectID = globalConfigService.GetString("feedback.project_id", "")
+	} else {
 		log.Printf("feedback: config service not initialized")
 		return
 	}
-	apiURL := globalConfigService.GetString("plane.api_url", "")
-	apiKey := globalConfigService.GetString("plane.api_key", "")
-	workspace := globalConfigService.GetString("plane.workspace", "thomkernet")
-	projectID := globalConfigService.GetString("feedback.project_id", "")
 	if apiURL == "" || apiKey == "" || projectID == "" {
 		log.Printf("feedback: not configured (need plane.api_url, plane.api_key, feedback.project_id)")
 		return
