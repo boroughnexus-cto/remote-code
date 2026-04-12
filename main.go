@@ -179,8 +179,14 @@ func runRedeploy() {
 		os.Exit(1)
 	}
 
-	// Launch TUI
-	runTUIClient()
+	// Exec the NEW binary for TUI — the current process is the old binary
+	exe, err := filepath.Abs(filepath.Join(srcDir, "swarmops"))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Cannot resolve binary path: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("  Launching TUI from %s\n", exe)
+	syscall.Exec(exe, []string{exe, "tui"}, os.Environ())
 }
 
 // runTUIClient starts the TUI as an HTTP client against the backend.
