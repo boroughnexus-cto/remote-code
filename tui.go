@@ -410,6 +410,8 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			contentHeight = 5
 		}
 		m.vp = viewport.New(contentWidth, contentHeight)
+		// Resize all tmux sessions to match the content pane
+		go m.resizeTmuxSessions(contentWidth, contentHeight)
 		m.vp.MouseWheelEnabled = true
 		m.vpReady = true
 		m.updateContentCache()
@@ -791,6 +793,16 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 // sendKeyToSession translates a Bubbletea key string to tmux send-keys.
+// resizeTmuxSessions resizes all tmux session windows to match the TUI content pane.
+func (m *tuiModel) resizeTmuxSessions(width, height int) {
+	for _, item := range m.items {
+		if item.kind == itemSession && item.tmuxSession != "" {
+			exec.Command("tmux", "resize-window", "-t", item.tmuxSession,
+				"-x", fmt.Sprintf("%d", width), "-y", fmt.Sprintf("%d", height)).Run()
+		}
+	}
+}
+
 func (m *tuiModel) sendKeyToSession(key string) {
 	if m.cursor >= len(m.items) {
 		return

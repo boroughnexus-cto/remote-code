@@ -16,8 +16,9 @@ func spawnSession(ctx context.Context, name, directory string, contextID, contex
 		return nil, fmt.Errorf("create session: %w", err)
 	}
 
-	// Create tmux session in the target directory
-	cmd := exec.Command("tmux", "new-session", "-d", "-s", s.TmuxSession, "-c", directory)
+	// Create tmux session in the target directory with a reasonable default size.
+	// The TUI will resize it to match the content pane via resizeTmuxSessions.
+	cmd := exec.Command("tmux", "new-session", "-d", "-s", s.TmuxSession, "-c", directory, "-x", "200", "-y", "50")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		// Clean up DB entry on failure
 		deleteSession(ctx, s.ID)
