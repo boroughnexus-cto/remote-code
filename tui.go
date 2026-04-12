@@ -486,8 +486,12 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.MouseMsg:
 		if m.mode == modePassthrough && m.vpReady {
+			oldOffset := m.vp.YOffset
 			var cmd tea.Cmd
 			m.vp, cmd = m.vp.Update(msg)
+			if m.vp.YOffset != oldOffset {
+				m.userScrolled = true
+			}
 			return m, cmd
 		}
 
@@ -572,6 +576,13 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, fetchIcingaProblems(m.icingaReqID, m.api)
 		case "alt+q":
 			return m, tea.Quit
+		case "alt+b":
+			// Snap viewport to bottom and resume auto-scroll
+			if m.vpReady {
+				m.userScrolled = false
+				m.vp.GotoBottom()
+			}
+			return m, nil
 		default:
 			// Only pass keys to session items (not pool slots)
 			if m.cursor < len(m.items) && m.items[m.cursor].kind == itemSession {
