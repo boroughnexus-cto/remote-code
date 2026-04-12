@@ -136,7 +136,7 @@ func TestIntegration_FeedbackFlow(t *testing.T) {
 	if m.mode != modePassthrough {
 		t.Errorf("after submit: want passthrough, got %d", m.mode)
 	}
-	if m.flash != "Submitted bug: scroll snaps back" {
+	if m.flash != "✓ Submitted bug: scroll snaps back" {
 		t.Errorf("want submit flash, got %q", m.flash)
 	}
 }
@@ -195,7 +195,7 @@ func TestIntegration_DeleteSession(t *testing.T) {
 	m := newTestModel([]sidebarItem{fakeSessionItem("to-delete", "stopped")})
 	updated, _ := m.Update(altKey('d'))
 	m = updated.(tuiModel)
-	if m.flash != "Deleted to-delete" {
+	if m.flash != "✓ Deleted to-delete" {
 		t.Errorf("want delete flash, got %q", m.flash)
 	}
 }

@@ -94,6 +94,7 @@ type sidebarItem struct {
 
 type tickMsg time.Time     // fast animation tick (150ms)
 type dataTickMsg time.Time // slow data refresh tick (2s)
+type flashClearMsg struct{} // auto-clear flash message
 type sessionsMsg []Session
 type terminalMsg string
 type contextListMsg []contextItem
@@ -255,6 +256,12 @@ func tickCmd() tea.Cmd {
 func dataTickCmd() tea.Cmd {
 	return tea.Tick(2*time.Second, func(t time.Time) tea.Msg {
 		return dataTickMsg(t)
+	})
+}
+
+func flashClearCmd() tea.Cmd {
+	return tea.Tick(3*time.Second, func(t time.Time) tea.Msg {
+		return flashClearMsg{}
 	})
 }
 
@@ -445,6 +452,10 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Slow tick (2s): HTTP data refresh (sessions, pool status, activity detection)
 		return m, tea.Batch(dataTickCmd(), loadItemsCmd(m.api))
 
+	case flashClearMsg:
+		m.flash = ""
+		return m, nil
+
 	case itemsMsg:
 		m.items = msg
 		if m.cursor >= len(m.items) && len(m.items) > 0 {
@@ -568,19 +579,25 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				} else {
 					deleteSession(context.Background(), item.sessionID)
 				}
-				m.flash = fmt.Sprintf("Deleted %s", item.label)
-				return m, loadItemsCmd(m.api)
+				m.flash = fmt.Sprintf("✓ Deleted %s", item.label)
+				return m, tea.Batch(loadItemsCmd(m.api), flashClearCmd())
 			}
 			return m, nil
 		case "alt+s":
 			if m.cursor < len(m.items) && m.items[m.cursor].kind == itemSession {
 				item := m.items[m.cursor]
 				if item.tmuxSession != "" {
-					// Send Ctrl+C to interrupt the running process
-					exec.Command("tmux", "send-keys", "-t", item.tmuxSession, "C-c").Run()
-					m.flash = fmt.Sprintf("Sent interrupt to %s (Alt+S again to kill & restart)", item.label)
+					if item.status == "running" {
+						// Running: send Ctrl+C to interrupt
+						exec.Command("tmux", "send-keys", "-t", item.tmuxSession, "C-c").Run()
+						m.flash = fmt.Sprintf("Sent interrupt to %s (Alt+Shift+S to kill & restart)", item.label)
+					} else {
+						// Stopped: restart claude in the existing tmux session
+						exec.Command("tmux", "send-keys", "-t", item.tmuxSession, "claude --dangerously-skip-permissions", "Enter").Run()
+						m.flash = fmt.Sprintf("Restarting Claude in %s", item.label)
+					}
 				}
-				return m, nil
+				return m, flashClearCmd()
 			}
 			return m, nil
 		case "alt+S": // Shift variant — kill and restart claude in the session
@@ -772,7 +789,9 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if summary != "" {
 				kinds := []string{"bug", "feature"}
 				go submitFeedback(kinds[m.feedbackType], summary, m.api, m.feedbackSnapshot)
-				m.flash = fmt.Sprintf("Submitted %s: %s", kinds[m.feedbackType], summary)
+				m.flash = fmt.Sprintf("✓ Submitted %s: %s", kinds[m.feedbackType], summary)
+				m.mode = modePassthrough
+				return m, flashClearCmd()
 			}
 			m.mode = modePassthrough
 			return m, nil
