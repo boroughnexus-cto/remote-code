@@ -25,8 +25,8 @@ func spawnSession(ctx context.Context, name, directory string, contextID, contex
 		return nil, fmt.Errorf("tmux new-session: %v: %s", err, out)
 	}
 
-	// Launch claude inside the tmux session
-	claudeCmd := "claude"
+	// Launch claude inside the tmux session with permissions skipped (headless, no approval UI)
+	claudeCmd := "claude --dangerously-skip-permissions"
 	if err := exec.Command("tmux", "send-keys", "-t", s.TmuxSession, claudeCmd, "Enter").Run(); err != nil {
 		log.Printf("spawn: failed to start claude in %s: %v", s.TmuxSession, err)
 	}

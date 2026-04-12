@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -621,6 +622,47 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "esc":
 			m.mode = modePassthrough
 			m.flash = ""
+		case "tab":
+			// Directory tab-completion
+			val := m.newDirInput.Value()
+			if val != "" {
+				matches, _ := filepath.Glob(val + "*")
+				if len(matches) == 1 {
+					// Single match — complete it
+					completed := matches[0]
+					info, err := os.Stat(completed)
+					if err == nil && info.IsDir() {
+						completed += "/"
+					}
+					m.newDirInput.SetValue(completed)
+					m.newDirInput.SetCursor(len(completed))
+				} else if len(matches) > 1 {
+					// Multiple matches — find common prefix
+					prefix := matches[0]
+					for _, match := range matches[1:] {
+						for i := 0; i < len(prefix) && i < len(match); i++ {
+							if prefix[i] != match[i] {
+								prefix = prefix[:i]
+								break
+							}
+						}
+						if len(match) < len(prefix) {
+							prefix = prefix[:len(match)]
+						}
+					}
+					if len(prefix) > len(val) {
+						m.newDirInput.SetValue(prefix)
+						m.newDirInput.SetCursor(len(prefix))
+					}
+					// Show matches in flash
+					var names []string
+					for _, match := range matches {
+						names = append(names, filepath.Base(match))
+					}
+					m.flash = strings.Join(names, "  ")
+				}
+			}
+			return m, nil
 		default:
 			var cmd tea.Cmd
 			m.newDirInput, cmd = m.newDirInput.Update(msg)
@@ -1074,11 +1116,12 @@ func (m tuiModel) View() string {
 
 func (m tuiModel) renderTopBar() string {
 	barWidth := m.w - 2
+	innerWidth := barWidth - 2 // account for Padding(0, 1) left+right
 
 	// Line 1: SwarmOps (left) + time (right)
 	title := topBarTitleStyle.Render("SwarmOps")
 	ts := dimStyle.Render(time.Now().Format("15:04:05"))
-	gap1 := barWidth - lipgloss.Width(title) - lipgloss.Width(ts)
+	gap1 := innerWidth - lipgloss.Width(title) - lipgloss.Width(ts)
 	if gap1 < 1 {
 		gap1 = 1
 	}
