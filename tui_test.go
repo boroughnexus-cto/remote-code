@@ -835,7 +835,7 @@ func TestStatusBar_DefaultHelp(t *testing.T) {
 	m := newTestModel(nil)
 	view := viewStripped(m)
 
-	assertContains(t, view, "switch")
+	assertContains(t, view, "nav")
 	assertContains(t, view, "new")
 	assertContains(t, view, "delete")
 	assertContains(t, view, "quit")

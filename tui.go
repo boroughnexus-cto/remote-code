@@ -572,6 +572,34 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, loadItemsCmd(m.api)
 			}
 			return m, nil
+		case "alt+s":
+			if m.cursor < len(m.items) && m.items[m.cursor].kind == itemSession {
+				item := m.items[m.cursor]
+				if item.tmuxSession != "" {
+					// Send Ctrl+C to interrupt the running process
+					exec.Command("tmux", "send-keys", "-t", item.tmuxSession, "C-c").Run()
+					m.flash = fmt.Sprintf("Sent interrupt to %s (Alt+S again to kill & restart)", item.label)
+				}
+				return m, nil
+			}
+			return m, nil
+		case "alt+S": // Shift variant — kill and restart claude in the session
+			if m.cursor < len(m.items) && m.items[m.cursor].kind == itemSession {
+				item := m.items[m.cursor]
+				if item.tmuxSession != "" {
+					// Kill all processes in the tmux pane, then restart claude
+					exec.Command("tmux", "send-keys", "-t", item.tmuxSession, "C-c").Run()
+					time.Sleep(200 * time.Millisecond)
+					exec.Command("tmux", "send-keys", "-t", item.tmuxSession, "C-c").Run()
+					time.Sleep(200 * time.Millisecond)
+					exec.Command("tmux", "send-keys", "-t", item.tmuxSession, "exit", "Enter").Run()
+					time.Sleep(500 * time.Millisecond)
+					exec.Command("tmux", "send-keys", "-t", item.tmuxSession, "claude --dangerously-skip-permissions", "Enter").Run()
+					m.flash = fmt.Sprintf("Restarted Claude in %s", item.label)
+				}
+				return m, nil
+			}
+			return m, nil
 		case "alt+r":
 			if m.cursor < len(m.items) && m.items[m.cursor].kind == itemSession {
 				m.mode = modeRename
@@ -1133,7 +1161,7 @@ func (m tuiModel) View() string {
 		if m.flash != "" {
 			statusLine = dimStyle.Render(m.flash)
 		} else {
-			statusLine = dimStyle.Render("Alt+A/Alt+Z switch │ Alt+N new │ Alt+R rename │ Alt+D delete │ Alt+P plane │ Alt+I icinga │ Alt+F feedback │ Alt+Q quit")
+			statusLine = dimStyle.Render("Alt+A/Z nav │ Alt+N new │ Alt+S stop │ Alt+R rename │ Alt+D delete │ Alt+P plane │ Alt+I icinga │ Alt+F feedback │ Alt+Q quit")
 		}
 	}
 

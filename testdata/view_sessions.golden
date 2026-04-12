@@ -1,25 +1,25 @@
-                        │                                                                                              
- SwarmOps      00:00:00 │                                                                                              
- 2 sess                 │                                                                                              
- ────────────────────   │                                                                                              
-                        │                                                                                              
- ▸ ○ my-project         │                                                                                              
-   ○ old-task           │                                                                                              
-                        │                                                                                              
-                        │                                                                                              
-                        │                                                                                              
-                        │                                                                                              
-                        │                                                                                              
-                        │                                                                                              
-                        │                                                                                              
-                        │                                                                                              
-                        │                                                                                              
-                        │                                                                                              
-                        │                                                                                              
-                        │                                                                                              
-                        │                                                                                              
-                        │                                                                                              
-                        │                                                                                              
-                        │                                                                                              
-                        │                                                                                              
-Alt+A/Alt+Z switch │ Alt+N new │ Alt+R rename │ Alt+D delete │ Alt+P plane │ Alt+I icinga │ Alt+F feedback │ Alt+Q quit
+                        │                                                                                                    
+ SwarmOps      00:00:00 │                                                                                                    
+ 2 sess                 │                                                                                                    
+ ────────────────────   │                                                                                                    
+                        │                                                                                                    
+ ▸ ○ my-project         │                                                                                                    
+   ○ old-task           │                                                                                                    
+                        │                                                                                                    
+                        │                                                                                                    
+                        │                                                                                                    
+                        │                                                                                                    
+                        │                                                                                                    
+                        │                                                                                                    
+                        │                                                                                                    
+                        │                                                                                                    
+                        │                                                                                                    
+                        │                                                                                                    
+                        │                                                                                                    
+                        │                                                                                                    
+                        │                                                                                                    
+                        │                                                                                                    
+                        │                                                                                                    
+                        │                                                                                                    
+                        │                                                                                                    
+Alt+A/Z nav │ Alt+N new │ Alt+S stop │ Alt+R rename │ Alt+D delete │ Alt+P plane │ Alt+I icinga │ Alt+F feedback │ Alt+Q quit

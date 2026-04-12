@@ -247,7 +247,7 @@ func TestIntegration_StatusBarHints(t *testing.T) {
 	m.w = 140
 	m.h = 30
 	view := m.View()
-	for _, hint := range []string{"Alt+A", "Alt+Z", "Alt+N", "Alt+R", "Alt+D", "Alt+P", "Alt+I", "Alt+F", "Alt+Q"} {
+	for _, hint := range []string{"Alt+A", "Alt+N", "Alt+S", "Alt+R", "Alt+D", "Alt+P", "Alt+I", "Alt+F", "Alt+Q"} {
 		if !strings.Contains(view, hint) {
 			t.Errorf("status bar should contain %q", hint)
 		}
