@@ -59,16 +59,18 @@ func newTestModel(items []sidebarItem) tuiModel {
 	fi.CharLimit = 128
 
 	m := tuiModel{
-		mode:         modePassthrough,
-		newNameInput: ni,
-		newDirInput:  di,
-		popupFilter:  fi,
-		renameInput:   textinput.New(),
-		feedbackInput: textinput.New(),
-		spawner:      &mockSpawner{},
-		items:        items,
-		w:            testWidth,
-		h:            testHeight,
+		mode:            modePassthrough,
+		newNameInput:    ni,
+		newDirInput:     di,
+		newMissionInput: textinput.New(),
+		popupFilter:     fi,
+		renameInput:     textinput.New(),
+		feedbackInput:   textinput.New(),
+		activityStates:  make(map[string]*activityState),
+		spawner:         &mockSpawner{},
+		items:           items,
+		w:               testWidth,
+		h:               testHeight,
 	}
 
 	// Initialize viewport
@@ -988,5 +990,180 @@ func TestMouse_IgnoredInPopupModes(t *testing.T) {
 
 	if m.mode != modePlaneIssues {
 		t.Errorf("mouse in popup should stay in popup, got %d", m.mode)
+	}
+}
+
+// ─── Activity detector tests ───────────────────────────────────────────────
+
+func TestClassifyActivity_SpinnerWorking(t *testing.T) {
+	capture := `● Bash(cd /home/sbarker/swarmops && go build ./... 2>&1)
+  ⎿  Running…
+
+✶ Percolating… (2m 11s · ↑ 840 tokens)
+
+──────────────────────────────────────────────────────────────────────
+❯
+──────────────────────────────────────────────────────────────────────
+  [Opus 4.6 (1M context)] nuc-ubuntu-dev:git-bnx/TKN | ctx 33% 325k
+  Claude MAX | Ant $0.00/1d $0.00/7d
+  ⏵⏵ bypass permissions on (shift+tab to cycle)
+`
+	state := &activityState{}
+	result := classifyActivity(capture, state)
+	if result != "working" {
+		t.Errorf("spinner should be working, got %q", result)
+	}
+}
+
+func TestClassifyActivity_ToolRunning(t *testing.T) {
+	capture := `● Read(/home/sbarker/swarmops/tui.go)
+  ⎿  Running…
+
+──────────────────────────────────────────────────────────────────────
+❯
+──────────────────────────────────────────────────────────────────────
+  [Opus 4.6] nuc | ctx 5% 50k
+`
+	state := &activityState{}
+	result := classifyActivity(capture, state)
+	if result != "working" {
+		t.Errorf("tool running should be working, got %q", result)
+	}
+}
+
+func TestClassifyActivity_IdlePrompt(t *testing.T) {
+	capture := `  some previous output
+
+──────────────────────────────────────────────────────────────────────
+❯
+──────────────────────────────────────────────────────────────────────
+  [Opus 4.6 (1M context)] nuc-ubuntu-dev:git-bnx/TKN | ctx 33% 325k
+  Claude MAX | Ant $0.00/1d $0.00/7d
+  ⏵⏵ bypass permissions on (shift+tab to cycle)
+`
+	state := &activityState{}
+	// First call: prevHash is 0, so contentChanged is false but stablePolls starts at 0
+	classifyActivity(capture, state)
+	// Second call: same content, stablePolls=1
+	classifyActivity(capture, state)
+	// Third call: same content, stablePolls=2 → should be idle
+	result := classifyActivity(capture, state)
+	if result != "idle" {
+		t.Errorf("stable prompt should be idle after 3 polls, got %q", result)
+	}
+}
+
+func TestClassifyActivity_PermissionBlocked(t *testing.T) {
+	capture := `● Edit(/home/sbarker/swarmops/main.go)
+  Do you want to proceed? (y/n)
+
+──────────────────────────────────────────────────────────────────────
+❯
+──────────────────────────────────────────────────────────────────────
+  [Sonnet 4.6] nuc | ctx 10% 100k
+`
+	state := &activityState{}
+	result := classifyActivity(capture, state)
+	if result != "blocked" {
+		t.Errorf("permission prompt should be blocked, got %q", result)
+	}
+}
+
+func TestClassifyActivity_ContentChanged(t *testing.T) {
+	state := &activityState{}
+	// First poll
+	capture1 := `some output line 1
+❯
+`
+	classifyActivity(capture1, state)
+
+	// Second poll: different content
+	capture2 := `some output line 1
+some output line 2
+❯
+`
+	result := classifyActivity(capture2, state)
+	if result != "working" {
+		t.Errorf("content change should be working, got %q", result)
+	}
+}
+
+func TestClassifyActivity_WorkingTTL(t *testing.T) {
+	state := &activityState{}
+
+	// Trigger a working signal
+	capture1 := `✶ Thinking… (5s)
+❯
+`
+	result := classifyActivity(capture1, state)
+	if result != "working" {
+		t.Errorf("spinner should be working, got %q", result)
+	}
+
+	// Same content (spinner gone, just prompt) — should still be working due to TTL
+	capture2 := `some old output
+❯
+`
+	result = classifyActivity(capture2, state)
+	if result != "working" {
+		t.Errorf("should be working due to TTL, got %q", result)
+	}
+}
+
+func TestClassifyActivity_EmptyCapture(t *testing.T) {
+	state := &activityState{}
+	// Empty pane with just chrome — all lines filtered out
+	capture := `──────────────────────────────────────────────────────────────────────
+  [Opus 4.6] nuc | ctx 1% 10k
+  Claude MAX
+  ⏵⏵ bypass permissions on
+`
+	// Call 1: stablePolls=1 (not enough), returns working
+	result := classifyActivity(capture, state)
+	if result != "working" {
+		t.Errorf("first poll should be working (not stable yet), got %q", result)
+	}
+	// Call 2: stablePolls=2 >= threshold, returns idle
+	result = classifyActivity(capture, state)
+	if result != "idle" {
+		t.Errorf("second poll should be idle (stable), got %q", result)
+	}
+}
+
+func TestClassifyActivity_FnvHashDiffers(t *testing.T) {
+	h1 := fnvHash("hello world")
+	h2 := fnvHash("hello world!")
+	if h1 == h2 {
+		t.Error("different strings should produce different hashes")
+	}
+	h3 := fnvHash("hello world")
+	if h1 != h3 {
+		t.Error("same strings should produce same hash")
+	}
+}
+
+func TestAnimatedIndicator_Blocked(t *testing.T) {
+	ind := animatedIndicator("blocked", 0)
+	stripped := xansi.Strip(ind)
+	if stripped != "⊘" {
+		t.Errorf("blocked indicator should be ⊘, got %q", stripped)
+	}
+}
+
+func TestAnimatedIndicator_AllStates(t *testing.T) {
+	tests := []struct {
+		activity string
+		expect   string
+	}{
+		{"idle", "●"},
+		{"working", "⠋"},
+		{"blocked", "⊘"},
+		{"stopped", "○"},
+	}
+	for _, tt := range tests {
+		stripped := xansi.Strip(animatedIndicator(tt.activity, 0))
+		if stripped != tt.expect {
+			t.Errorf("activity %q: expected %q, got %q", tt.activity, tt.expect, stripped)
+		}
 	}
 }
