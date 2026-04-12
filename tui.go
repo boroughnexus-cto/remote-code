@@ -1050,10 +1050,22 @@ func (m tuiModel) View() string {
 }
 
 func (m tuiModel) renderTopBar() string {
-	// Line 1: Title + session count
+	barWidth := m.w - 2
+
+	// Line 1: SwarmOps (left) + time (right)
+	title := topBarTitleStyle.Render("SwarmOps")
+	ts := dimStyle.Render(time.Now().Format("15:04:05"))
+	gap1 := barWidth - lipgloss.Width(title) - lipgloss.Width(ts)
+	if gap1 < 1 {
+		gap1 = 1
+	}
+	line1 := title + strings.Repeat(" ", gap1) + ts
+
+	// Line 2: session/pool summary
 	running := 0
 	stopped := 0
 	poolSlots := 0
+	poolAlive := 0
 	for _, item := range m.items {
 		switch item.kind {
 		case itemSession:
@@ -1064,29 +1076,24 @@ func (m tuiModel) renderTopBar() string {
 			}
 		case itemPoolSlot:
 			poolSlots++
+			if item.alive {
+				poolAlive++
+			}
 		}
 	}
-
-	title := topBarTitleStyle.Render("SwarmOps")
-	sessInfo := dimStyle.Render(fmt.Sprintf("  %d running, %d stopped", running, stopped))
-	line1 := title + sessInfo
-
-	// Line 2: Pool info + timestamp
-	var line2 string
+	var parts []string
+	if running > 0 || stopped > 0 {
+		parts = append(parts, fmt.Sprintf("%d sessions (%d running)", running+stopped, running))
+	}
 	if poolSlots > 0 {
-		line2 = dimStyle.Render(fmt.Sprintf("Pool: %d slots", poolSlots))
+		parts = append(parts, fmt.Sprintf("%d/%d pool slots", poolAlive, poolSlots))
 	} else {
-		line2 = dimStyle.Render("Pool: off")
+		parts = append(parts, "pool off")
 	}
-	ts := dimStyle.Render(time.Now().Format("15:04:05"))
-	gap := m.w - lipgloss.Width(line2) - lipgloss.Width(ts) - 4
-	if gap < 1 {
-		gap = 1
-	}
-	line2 = line2 + strings.Repeat(" ", gap) + ts
+	line2 := dimStyle.Render(strings.Join(parts, "  ·  "))
 
 	content := line1 + "\n" + line2
-	return topBarStyle.Width(m.w - 2).Render(content)
+	return topBarStyle.Width(barWidth).Render(content)
 }
 
 func (m tuiModel) renderSidebar() string {

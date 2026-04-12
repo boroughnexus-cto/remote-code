@@ -881,8 +881,7 @@ func TestTopBar_ShowsSessionCounts(t *testing.T) {
 	m := newTestModel(items)
 	view := viewStripped(m)
 
-	assertContains(t, view, "2 running")
-	assertContains(t, view, "1 stopped")
+	assertContains(t, view, "3 sessions (2 running)")
 }
 
 func TestTopBar_ShowsPoolInfo(t *testing.T) {
@@ -893,14 +892,14 @@ func TestTopBar_ShowsPoolInfo(t *testing.T) {
 	m := newTestModel(items)
 	view := viewStripped(m)
 
-	assertContains(t, view, "Pool: 2 slots")
+	assertContains(t, view, "2/2 pool slots")
 }
 
 func TestTopBar_PoolOffWhenNoSlots(t *testing.T) {
 	m := newTestModel(nil)
 	view := viewStripped(m)
 
-	assertContains(t, view, "Pool: off")
+	assertContains(t, view, "pool off")
 }
 
 func TestTopBar_ShowsTimestamp(t *testing.T) {
