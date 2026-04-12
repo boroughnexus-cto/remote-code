@@ -74,25 +74,7 @@ func handleDashboardAPI(w http.ResponseWriter, r *http.Request, ctx context.Cont
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-
-	sessions, _ := listSessions(ctx)
-	running := 0
-	for _, s := range sessions {
-		if s.Status == "running" {
-			running++
-		}
-	}
-
-	stats := DashboardStats{
-		ActiveSessions:           running,
-		Agents:                   0,
-		Projects:                 0,
-		TaskExecutions:           0,
-		GitChangesAwaitingReview: []interface{}{},
-		AgentsWaitingForInput:    []interface{}{},
-		RemotePorts:              []interface{}{},
-		DirectoryDevServers:      []interface{}{},
-	}
+	stats, _ := globalServices.Dashboard(ctx)
 	json.NewEncoder(w).Encode(stats)
 }
 
@@ -103,27 +85,8 @@ func handleSessionsAsAgentsAPI(w http.ResponseWriter, r *http.Request, ctx conte
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-
-	// MCP expects: {configured: [], detected: {agents: [...]}}
-	type detectedAgent struct {
-		Available bool   `json:"available"`
-		Command   string `json:"command"`
-		Name      string `json:"name"`
-		Path      string `json:"path"`
-	}
-
-	claudePath, _ := exec.LookPath("claude")
-	agents := []detectedAgent{{
-		Available: claudePath != "",
-		Command:   "claude",
-		Name:      "claude",
-		Path:      claudePath,
-	}}
-
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"configured": []interface{}{},
-		"detected":   map[string]interface{}{"agents": agents},
-	})
+	agents, _ := globalServices.ListAgents(ctx)
+	json.NewEncoder(w).Encode(agents)
 }
 
 // ─── Task Executions (MCP compat) ───────────────────────────────────────────
@@ -203,28 +166,7 @@ func handleTmuxSessionsAPI(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-
-	out, err := exec.Command("tmux", "list-sessions", "-F", "#{session_name}\t#{session_created_string}").Output()
-	if err != nil {
-		json.NewEncoder(w).Encode([]TmuxSessionInfo{})
-		return
-	}
-
-	var sessions []TmuxSessionInfo
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		if line == "" {
-			continue
-		}
-		parts := strings.SplitN(line, "\t", 2)
-		created := ""
-		if len(parts) > 1 {
-			created = parts[1]
-		}
-		sessions = append(sessions, TmuxSessionInfo{
-			Name:    parts[0],
-			Created: created,
-		})
-	}
+	sessions, _ := globalServices.TmuxSessions()
 	json.NewEncoder(w).Encode(sessions)
 }
 
@@ -243,34 +185,28 @@ func handleGitAPI(w http.ResponseWriter, r *http.Request, pathParts []string) {
 
 	switch pathParts[0] {
 	case "status":
-		out, err := runGitCommand(dir, "status", "--porcelain=v1")
+		status, err := globalServices.GitStatus(dir)
 		if err != nil {
 			http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
 			return
 		}
-		branch, _ := runGitCommand(dir, "rev-parse", "--abbrev-ref", "HEAD")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"branch":   strings.TrimSpace(branch),
-			"output":   out,
-			"is_dirty": strings.TrimSpace(out) != "",
-		})
+		json.NewEncoder(w).Encode(status)
 
 	case "branches":
-		out, err := runGitCommand(dir, "branch", "--format=%(refname:short)")
+		branches, err := globalServices.GitBranches(dir, false)
 		if err != nil {
 			http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
 			return
 		}
-		branches := strings.Split(strings.TrimSpace(out), "\n")
 		json.NewEncoder(w).Encode(map[string]interface{}{"branches": branches})
 
 	case "diff":
-		out, _ := runGitCommand(dir, "diff")
-		json.NewEncoder(w).Encode(map[string]string{"diff": out})
+		diff, _ := globalServices.GitDiff(dir, false)
+		json.NewEncoder(w).Encode(map[string]string{"diff": diff})
 
 	case "log":
-		out, _ := runGitCommand(dir, "log", "--oneline", "-20")
-		json.NewEncoder(w).Encode(map[string]string{"log": out})
+		gitLog, _ := globalServices.GitLog(dir)
+		json.NewEncoder(w).Encode(map[string]string{"log": gitLog})
 
 	default:
 		http.Error(w, `{"error":"unknown git subcommand"}`, http.StatusBadRequest)
@@ -291,19 +227,7 @@ func handleRootsAPI(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	// Return unique directories from sessions
-	sessions, _ := listSessions(context.Background())
-	seen := make(map[string]bool)
-	var roots []map[string]string
-	for _, s := range sessions {
-		if !seen[s.Directory] {
-			seen[s.Directory] = true
-			roots = append(roots, map[string]string{"path": s.Directory})
-		}
-	}
-	if roots == nil {
-		roots = []map[string]string{}
-	}
+	roots, _ := globalServices.ListRoots(context.Background())
 	json.NewEncoder(w).Encode(roots)
 }
 
@@ -444,26 +368,8 @@ func handleSwarmSessionsAPI(w http.ResponseWriter, r *http.Request, ctx context.
 }
 
 func handleSwarmDashboardAPI(w http.ResponseWriter, r *http.Request, ctx context.Context) {
-	sessions, _ := listSessions(ctx)
-	running := 0
-	for _, s := range sessions {
-		if s.Status == "running" && !s.Hidden {
-			running++
-		}
-	}
-
-	poolInfo := map[string]interface{}{"enabled": false}
-	if globalPool != nil {
-		poolInfo = globalPool.Status()
-		poolInfo["enabled"] = true
-	}
-
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"sessions": sessions,
-		"running":  running,
-		"total":    len(sessions),
-		"pool":     poolInfo,
-	})
+	dashboard, _ := globalServices.SwarmDashboard(ctx)
+	json.NewEncoder(w).Encode(dashboard)
 }
 
 func init() {

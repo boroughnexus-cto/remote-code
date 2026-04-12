@@ -48,6 +48,13 @@ func main() {
 		case "redeploy":
 			runRedeploy()
 			return
+		case "mcp":
+			if len(os.Args) > 2 && os.Args[2] == "serve" {
+				runMCPStdioMode()
+				return
+			}
+			fmt.Fprintf(os.Stderr, "Usage: swarmops mcp serve\n")
+			os.Exit(1)
 		}
 	}
 
@@ -80,6 +87,11 @@ func main() {
 
 	// Pool init is slow (spawns 6 Claude CLI sessions) — runs after HTTP is up
 	initPool(ctx)
+
+	// Update services with pool reference (pool was nil when HTTP server started)
+	if globalServices != nil && globalPool != nil {
+		globalServices.pool = globalPool
+	}
 
 	// Periodic session status sync
 	go func() {
@@ -217,6 +229,32 @@ func runTUIClient() {
 		os.Exit(1)
 	}
 }
+// runMCPStdioMode runs the MCP server over stdin/stdout (for Claude Code stdio transport).
+func runMCPStdioMode() {
+	database = initDatabase()
+	defer database.Close()
+
+	globalConfigService = newConfigService(database)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	initPool(ctx)
+
+	enablePoolTools := os.Getenv("SWARMOPS_MCP_POOL_TOOLS") == "true"
+	svc := &Services{db: database, pool: globalPool, config: globalConfigService}
+	server := NewMCPServer(svc, enablePoolTools)
+
+	log.Printf("SwarmOps MCP stdio server starting")
+	runMCPStdio(server)
+}
+
+// globalServices is the shared service layer, initialized in server mode.
+var globalServices *Services
+
+// globalMCPServer is the MCP server instance, initialized in server mode.
+var globalMCPServer *MCPServer
+
 func newHTTPServer() *http.Server {
 	mux := http.NewServeMux()
 
@@ -230,6 +268,12 @@ func newHTTPServer() *http.Server {
 	})
 
 	mux.HandleFunc("/api/", handleAPI)
+
+	// MCP server endpoint
+	enablePoolTools := os.Getenv("SWARMOPS_MCP_POOL_TOOLS") == "true"
+	globalServices = &Services{db: database, pool: globalPool, config: globalConfigService}
+	globalMCPServer = NewMCPServer(globalServices, enablePoolTools)
+	mux.HandleFunc("/mcp", handleMCPHTTP(globalMCPServer))
 
 	// OpenAI-compatible pool API
 	mux.HandleFunc("/v1/chat/completions", handlePoolChatCompletions)
