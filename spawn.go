@@ -10,8 +10,8 @@ import (
 // spawnSession creates a new tmux session and launches claude inside it.
 // The session is registered in the database and the tmux session is created
 // with the given working directory. Claude Code is started inside the session.
-func spawnSession(ctx context.Context, name, directory string, contextID, contextName *string) (*Session, error) {
-	s, err := createSession(ctx, name, directory, contextID, contextName, false)
+func spawnSession(ctx context.Context, name, directory string, contextID, contextName, mission *string) (*Session, error) {
+	s, err := createSession(ctx, name, directory, contextID, contextName, mission, false)
 	if err != nil {
 		return nil, fmt.Errorf("create session: %w", err)
 	}

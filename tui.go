@@ -81,6 +81,7 @@ type sidebarItem struct {
 	tmuxSession string
 	status      string
 	activity    string // "stopped", "working", "awaiting"
+	mission     string // optional mission statement
 	// Pool slot fields
 	slotID   string
 	model    string
@@ -113,6 +114,7 @@ const (
 	modePassthrough tuiMode = iota
 	modeNewName
 	modeNewDir
+	modeNewMission
 	modeContextPick
 	modePlaneIssues
 	modeIcingaAlerts
@@ -124,14 +126,14 @@ const (
 
 // Spawner abstracts session creation for testability.
 type Spawner interface {
-	Spawn(ctx context.Context, name, dir string, contextID, contextName *string) (*Session, error)
+	Spawn(ctx context.Context, name, dir string, contextID, contextName, mission *string) (*Session, error)
 }
 
 // defaultSpawner calls the real spawnSession function.
 type defaultSpawner struct{}
 
-func (defaultSpawner) Spawn(ctx context.Context, name, dir string, contextID, contextName *string) (*Session, error) {
-	return spawnSession(ctx, name, dir, contextID, contextName)
+func (defaultSpawner) Spawn(ctx context.Context, name, dir string, contextID, contextName, mission *string) (*Session, error) {
+	return spawnSession(ctx, name, dir, contextID, contextName, mission)
 }
 
 type tuiModel struct {
@@ -144,10 +146,11 @@ type tuiModel struct {
 	vpReady bool
 
 	// New session wizard
-	newNameInput textinput.Model
-	newDirInput  textinput.Model
-	contexts     []contextItem
-	ctxCursor    int
+	newNameInput    textinput.Model
+	newDirInput     textinput.Model
+	newMissionInput textinput.Model
+	contexts        []contextItem
+	ctxCursor       int
 
 	// Terminal content cache
 	termContent string
@@ -212,6 +215,10 @@ func initialModel(api *apiClient) tuiModel {
 	di.CharLimit = 256
 	di.SetValue(os.Getenv("HOME"))
 
+	mi := textinput.New()
+	mi.Placeholder = "Mission (optional, enter to skip)"
+	mi.CharLimit = 256
+
 	fi := textinput.New()
 	fi.Placeholder = "filter..."
 	fi.CharLimit = 128
@@ -232,14 +239,15 @@ func initialModel(api *apiClient) tuiModel {
 	}
 
 	return tuiModel{
-		mode:         modePassthrough,
-		newNameInput: ni,
-		newDirInput:  di,
-		popupFilter:  fi,
-		renameInput:   ri,
-		feedbackInput: fi2,
-		spawner:      spawner,
-		api:          api,
+		mode:            modePassthrough,
+		newNameInput:    ni,
+		newDirInput:     di,
+		newMissionInput: mi,
+		popupFilter:     fi,
+		renameInput:     ri,
+		feedbackInput:   fi2,
+		spawner:         spawner,
+		api:             api,
 	}
 }
 
@@ -287,6 +295,10 @@ func loadItemsCmd(api *apiClient) tea.Cmd {
 				indicator = statusRunning
 				activity = detectActivity(s.TmuxSession)
 			}
+			mission := ""
+			if s.Mission != nil {
+				mission = *s.Mission
+			}
 			items = append(items, sidebarItem{
 				kind:        itemSession,
 				label:       s.Name,
@@ -295,6 +307,7 @@ func loadItemsCmd(api *apiClient) tea.Cmd {
 				tmuxSession: s.TmuxSession,
 				status:      s.Status,
 				activity:    activity,
+				mission:     mission,
 			})
 		}
 
@@ -689,8 +702,11 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case modeNewDir:
 		switch key {
 		case "enter":
-			m.flash = "Fetching contexts..."
-			return m, fetchContexts()
+			m.mode = modeNewMission
+			m.newMissionInput.SetValue("")
+			m.newMissionInput.Focus()
+			m.flash = "Mission statement (optional, enter to skip)"
+			return m, textinput.Blink
 		case "esc":
 			m.mode = modePassthrough
 			m.flash = ""
@@ -741,6 +757,19 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 
+	case modeNewMission:
+		switch key {
+		case "enter":
+			m.flash = "Fetching contexts..."
+			return m, fetchContexts()
+		case "esc":
+			m.mode = modePassthrough
+			m.flash = ""
+		default:
+			var cmd tea.Cmd
+			m.newMissionInput, cmd = m.newMissionInput.Update(msg)
+			return m, cmd
+		}
 
 	case modeRename:
 		switch key {
@@ -888,7 +917,7 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			} else {
 				// Spawn new session
 				name := sanitizeSessionName(m.actionTarget)
-				s, err := m.spawner.Spawn(context.Background(), name, os.Getenv("HOME"), nil, nil)
+				s, err := m.spawner.Spawn(context.Background(), name, os.Getenv("HOME"), nil, nil, nil)
 				if err != nil {
 					m.flash = "Spawn error: " + err.Error()
 				} else {
@@ -989,7 +1018,11 @@ func (m *tuiModel) doSpawn(contextID, contextName *string) {
 	if dir == "" {
 		dir = os.Getenv("HOME")
 	}
-	s, err := m.spawner.Spawn(context.Background(), name, dir, contextID, contextName)
+	var mission *string
+	if v := m.newMissionInput.Value(); v != "" {
+		mission = &v
+	}
+	s, err := m.spawner.Spawn(context.Background(), name, dir, contextID, contextName, mission)
 	if err != nil {
 		m.flash = "Spawn error: " + err.Error()
 	} else {
@@ -1159,6 +1192,8 @@ func (m tuiModel) View() string {
 		statusLine = "Name: " + m.newNameInput.View()
 	case modeNewDir:
 		statusLine = "Dir: " + m.newDirInput.View()
+	case modeNewMission:
+		statusLine = "Mission: " + m.newMissionInput.View()
 	case modeRename:
 		statusLine = "Rename: " + m.renameInput.View()
 	case modeFeedbackType:
@@ -1381,6 +1416,9 @@ func (m tuiModel) renderContent() string {
 				status = lipgloss.NewStyle().Foreground(lipgloss.Color("#00ff00")).Render("running")
 			}
 			headerLine = topBarTitleStyle.Render(item.label) + "  " + status
+			if item.mission != "" {
+				headerLine += "\n" + dimStyle.Render(item.mission)
+			}
 		case itemPoolSlot:
 			state := dimStyle.Render(item.state)
 			if item.state == "idle" {

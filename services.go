@@ -71,6 +71,7 @@ func (s *Services) ListAgents(ctx context.Context) (AgentsResponse, error) {
 // ─── Executions (sessions) ──────────────────────────────────────────────────
 
 func (s *Services) ListExecutions(ctx context.Context) ([]Session, error) {
+	refreshSessionStatuses(ctx)
 	sessions, err := listSessions(ctx)
 	if err != nil {
 		return nil, err
@@ -85,14 +86,18 @@ func (s *Services) GetExecution(ctx context.Context, id string) (*Session, error
 	return getSession(ctx, id)
 }
 
-func (s *Services) RunTask(ctx context.Context, name, directory string) (*Session, error) {
+func (s *Services) RunTask(ctx context.Context, name, directory string, mission *string) (*Session, error) {
 	if name == "" {
 		name = "session-" + generateID()
 	}
 	if directory == "" {
 		directory = "."
 	}
-	return spawnSession(ctx, name, directory, nil, nil)
+	return spawnSession(ctx, name, directory, nil, nil, mission)
+}
+
+func (s *Services) UpdateSessionMission(ctx context.Context, id, mission string) error {
+	return updateSessionMission(ctx, id, mission)
 }
 
 func (s *Services) SendInput(ctx context.Context, sessionID, input string) error {

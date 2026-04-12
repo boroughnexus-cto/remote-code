@@ -31,10 +31,11 @@ type mockSpawner struct {
 type spawnCall struct {
 	name, dir              string
 	contextID, contextName *string
+	mission                *string
 }
 
-func (m *mockSpawner) Spawn(_ context.Context, name, dir string, contextID, contextName *string) (*Session, error) {
-	m.calls = append(m.calls, spawnCall{name, dir, contextID, contextName})
+func (m *mockSpawner) Spawn(_ context.Context, name, dir string, contextID, contextName, mission *string) (*Session, error) {
+	m.calls = append(m.calls, spawnCall{name, dir, contextID, contextName, mission})
 	if m.err != nil {
 		return nil, m.err
 	}

@@ -21,6 +21,7 @@ type Session struct {
 	Directory   string  `json:"directory"`
 	ContextID   *string `json:"context_id,omitempty"`
 	ContextName *string `json:"context_name,omitempty"`
+	Mission     *string `json:"mission,omitempty"`
 	Hidden      bool    `json:"hidden"`
 	Status      string  `json:"status"`
 	CreatedAt   int64   `json:"created_at"`
@@ -33,15 +34,15 @@ func generateID() string {
 	return hex.EncodeToString(b)
 }
 
-func createSession(ctx context.Context, name, directory string, contextID, contextName *string, hidden bool) (*Session, error) {
+func createSession(ctx context.Context, name, directory string, contextID, contextName, mission *string, hidden bool) (*Session, error) {
 	id := generateID()
 	tmuxName := "sw-" + id
 	now := time.Now().Unix()
 
 	_, err := database.ExecContext(ctx,
-		`INSERT INTO managed_sessions (id, name, tmux_session, directory, context_id, context_name, hidden, status, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)`,
-		id, name, tmuxName, directory, contextID, contextName, boolToInt(hidden), now, now,
+		`INSERT INTO managed_sessions (id, name, tmux_session, directory, context_id, context_name, mission, hidden, status, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)`,
+		id, name, tmuxName, directory, contextID, contextName, mission, boolToInt(hidden), now, now,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert session: %w", err)
@@ -54,6 +55,7 @@ func createSession(ctx context.Context, name, directory string, contextID, conte
 		Directory:   directory,
 		ContextID:   contextID,
 		ContextName: contextName,
+		Mission:     mission,
 		Hidden:      hidden,
 		Status:      "running",
 		CreatedAt:   now,
@@ -63,7 +65,7 @@ func createSession(ctx context.Context, name, directory string, contextID, conte
 
 func listSessions(ctx context.Context) ([]Session, error) {
 	rows, err := database.QueryContext(ctx,
-		`SELECT id, name, tmux_session, directory, context_id, context_name, hidden, status, created_at, updated_at
+		`SELECT id, name, tmux_session, directory, context_id, context_name, mission, hidden, status, created_at, updated_at
 		 FROM managed_sessions ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
@@ -73,9 +75,9 @@ func listSessions(ctx context.Context) ([]Session, error) {
 	var sessions []Session
 	for rows.Next() {
 		var s Session
-		var ctxID, ctxName sql.NullString
+		var ctxID, ctxName, mission sql.NullString
 		var hiddenInt int
-		if err := rows.Scan(&s.ID, &s.Name, &s.TmuxSession, &s.Directory, &ctxID, &ctxName, &hiddenInt, &s.Status, &s.CreatedAt, &s.UpdatedAt); err != nil {
+		if err := rows.Scan(&s.ID, &s.Name, &s.TmuxSession, &s.Directory, &ctxID, &ctxName, &mission, &hiddenInt, &s.Status, &s.CreatedAt, &s.UpdatedAt); err != nil {
 			return nil, err
 		}
 		if ctxID.Valid {
@@ -83,6 +85,9 @@ func listSessions(ctx context.Context) ([]Session, error) {
 		}
 		if ctxName.Valid {
 			s.ContextName = &ctxName.String
+		}
+		if mission.Valid {
+			s.Mission = &mission.String
 		}
 		s.Hidden = hiddenInt != 0
 		sessions = append(sessions, s)
@@ -92,12 +97,12 @@ func listSessions(ctx context.Context) ([]Session, error) {
 
 func getSession(ctx context.Context, id string) (*Session, error) {
 	var s Session
-	var ctxID, ctxName sql.NullString
+	var ctxID, ctxName, mission sql.NullString
 	var hiddenInt int
 	err := database.QueryRowContext(ctx,
-		`SELECT id, name, tmux_session, directory, context_id, context_name, hidden, status, created_at, updated_at
+		`SELECT id, name, tmux_session, directory, context_id, context_name, mission, hidden, status, created_at, updated_at
 		 FROM managed_sessions WHERE id = ?`, id,
-	).Scan(&s.ID, &s.Name, &s.TmuxSession, &s.Directory, &ctxID, &ctxName, &hiddenInt, &s.Status, &s.CreatedAt, &s.UpdatedAt)
+	).Scan(&s.ID, &s.Name, &s.TmuxSession, &s.Directory, &ctxID, &ctxName, &mission, &hiddenInt, &s.Status, &s.CreatedAt, &s.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -106,6 +111,9 @@ func getSession(ctx context.Context, id string) (*Session, error) {
 	}
 	if ctxName.Valid {
 		s.ContextName = &ctxName.String
+	}
+	if mission.Valid {
+		s.Mission = &mission.String
 	}
 	s.Hidden = hiddenInt != 0
 	return &s, nil
@@ -129,6 +137,17 @@ func updateSessionStatus(ctx context.Context, id, status string) error {
 	_, err := database.ExecContext(ctx,
 		"UPDATE managed_sessions SET status = ?, updated_at = ? WHERE id = ?",
 		status, time.Now().Unix(), id,
+	)
+	return err
+}
+
+func updateSessionMission(ctx context.Context, id, mission string) error {
+	if database == nil {
+		return nil
+	}
+	_, err := database.ExecContext(ctx,
+		"UPDATE managed_sessions SET mission = ?, updated_at = ? WHERE id = ?",
+		mission, time.Now().Unix(), id,
 	)
 	return err
 }

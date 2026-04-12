@@ -17,12 +17,18 @@ func registerWriteTools(reg *ToolRegistry, svc *Services, enablePoolTools bool) 
 			InputSchema: jsonSchema(map[string]interface{}{
 				"name":      stringProp("Session name (auto-generated if empty)"),
 				"directory": stringProp("Working directory for the session (default: current directory)"),
+				"mission":   stringProp("Optional mission statement (1-3 sentences describing session purpose)"),
 			}, nil),
 		},
 		func(ctx context.Context, args map[string]interface{}) (interface{}, error) {
 			name := getStringArg(args, "name", "")
 			directory := getStringArg(args, "directory", "")
-			return svc.RunTask(ctx, name, directory)
+			missionStr := getStringArg(args, "mission", "")
+			var mission *string
+			if missionStr != "" {
+				mission = &missionStr
+			}
+			return svc.RunTask(ctx, name, directory, mission)
 		},
 	)
 

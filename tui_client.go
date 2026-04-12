@@ -25,13 +25,16 @@ func newAPIClient(baseURL string) *apiClient {
 }
 
 // Spawn implements the Spawner interface via the HTTP API.
-func (c *apiClient) Spawn(ctx context.Context, name, dir string, contextID, contextName *string) (*Session, error) {
+func (c *apiClient) Spawn(ctx context.Context, name, dir string, contextID, contextName, mission *string) (*Session, error) {
 	body := map[string]interface{}{
 		"name":      name,
 		"directory": dir,
 	}
 	if contextID != nil {
 		body["context_id"] = *contextID
+	}
+	if mission != nil {
+		body["mission"] = *mission
 	}
 
 	data, err := json.Marshal(body)

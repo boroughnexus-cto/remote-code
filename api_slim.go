@@ -118,7 +118,7 @@ func handleTaskExecutionsAPI(w http.ResponseWriter, r *http.Request, ctx context
 		if req.Directory == "" {
 			req.Directory = "."
 		}
-		s, err := spawnSession(ctx, req.Name, req.Directory, nil, nil)
+		s, err := spawnSession(ctx, req.Name, req.Directory, nil, nil, nil)
 		if err != nil {
 			http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
 			return
@@ -267,6 +267,7 @@ func handleSwarmSessionsAPI(w http.ResponseWriter, r *http.Request, ctx context.
 	if len(pathParts) == 0 {
 		switch r.Method {
 		case http.MethodGet:
+			refreshSessionStatuses(ctx)
 			sessions, err := listSessions(ctx)
 			if err != nil {
 				http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
@@ -282,6 +283,7 @@ func handleSwarmSessionsAPI(w http.ResponseWriter, r *http.Request, ctx context.
 				Name      string  `json:"name"`
 				Directory string  `json:"directory"`
 				ContextID *string `json:"context_id"`
+				Mission   *string `json:"mission"`
 			}
 			json.NewDecoder(r.Body).Decode(&req)
 			if req.Name == "" {
@@ -291,7 +293,7 @@ func handleSwarmSessionsAPI(w http.ResponseWriter, r *http.Request, ctx context.
 			if req.Directory == "" {
 				req.Directory = "."
 			}
-			s, err := spawnSession(ctx, req.Name, req.Directory, req.ContextID, nil)
+			s, err := spawnSession(ctx, req.Name, req.Directory, req.ContextID, nil, req.Mission)
 			if err != nil {
 				http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
 				return
@@ -327,15 +329,24 @@ func handleSwarmSessionsAPI(w http.ResponseWriter, r *http.Request, ctx context.
 
 		case http.MethodPatch:
 			var body struct {
-				Name string `json:"name"`
+				Name    string  `json:"name"`
+				Mission *string `json:"mission"`
 			}
-			if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Name == "" {
-				http.Error(w, `{"error":"name required"}`, http.StatusBadRequest)
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				http.Error(w, `{"error":"invalid JSON"}`, http.StatusBadRequest)
 				return
 			}
-			if err := renameSession(ctx, sessionID, body.Name); err != nil {
-				http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
-				return
+			if body.Name != "" {
+				if err := renameSession(ctx, sessionID, body.Name); err != nil {
+					http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
+					return
+				}
+			}
+			if body.Mission != nil {
+				if err := updateSessionMission(ctx, sessionID, *body.Mission); err != nil {
+					http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
+					return
+				}
 			}
 			w.WriteHeader(http.StatusNoContent)
 

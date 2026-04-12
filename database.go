@@ -160,6 +160,7 @@ func applyMigrations(database *sql.DB) error {
 		"db/migrations/049_swarm_mode.sql",
 		"db/migrations/050_pool.sql",
 		"db/migrations/051_sessions.sql",
+		"db/migrations/052_session_mission.sql",
 	}
 
 	for _, migrationPath := range migrations {
