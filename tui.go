@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 	"time"
 
@@ -28,6 +29,7 @@ var (
 
 	selectedStyle = lipgloss.NewStyle().
 			Bold(true).
+			Underline(true).
 			Foreground(lipgloss.Color("#15a8a8"))
 
 	dimStyle = lipgloss.NewStyle().
@@ -283,7 +285,14 @@ func loadItemsCmd(api *apiClient) tea.Cmd {
 
 		if poolData != nil {
 			if models, ok := poolData["models"].(map[string]interface{}); ok {
-				for model, info := range models {
+				// Sort model names for stable sidebar order
+				modelNames := make([]string, 0, len(models))
+				for name := range models {
+					modelNames = append(modelNames, name)
+				}
+				sort.Strings(modelNames)
+				for _, model := range modelNames {
+					info := models[model]
 					if minfo, ok := info.(map[string]interface{}); ok {
 						// Handle slots as []interface{} (JSON unmarshal) or []map[string]interface{} (in-process)
 						var slotMaps []map[string]interface{}
@@ -296,6 +305,12 @@ func loadItemsCmd(api *apiClient) tea.Cmd {
 								}
 							}
 						}
+						// Sort slots by ID for stable order
+						sort.Slice(slotMaps, func(i, j int) bool {
+							a, _ := slotMaps[i]["id"].(string)
+							b, _ := slotMaps[j]["id"].(string)
+							return a < b
+						})
 						for _, slot := range slotMaps {
 							sid, _ := slot["id"].(string)
 							state, _ := slot["state"].(string)
@@ -884,6 +899,29 @@ func handlePopupKeyShared(m *tuiModel, msg tea.KeyMsg, filteredLen int, sortLabe
 			m.popupCursor++
 		}
 		return popupKeyResult{handled: true}
+	case "pgup":
+		m.popupCursor -= 10
+		if m.popupCursor < 0 {
+			m.popupCursor = 0
+		}
+		return popupKeyResult{handled: true}
+	case "pgdown":
+		m.popupCursor += 10
+		if m.popupCursor >= filteredLen {
+			m.popupCursor = filteredLen - 1
+		}
+		if m.popupCursor < 0 {
+			m.popupCursor = 0
+		}
+		return popupKeyResult{handled: true}
+	case "home":
+		m.popupCursor = 0
+		return popupKeyResult{handled: true}
+	case "end":
+		if filteredLen > 0 {
+			m.popupCursor = filteredLen - 1
+		}
+		return popupKeyResult{handled: true}
 	case "/":
 		m.popupFilterActive = true
 		m.popupFilter.Focus()
@@ -1121,7 +1159,11 @@ func (m tuiModel) renderContent() string {
 	if !m.vpReady {
 		return ""
 	}
-	return m.vp.View()
+	contentWidth := m.w - 26
+	if contentWidth < 20 {
+		contentWidth = 20
+	}
+	return lipgloss.NewStyle().Width(contentWidth).Render(m.vp.View())
 }
 
 func (m tuiModel) renderPoolSlotDetail(item sidebarItem) string {
