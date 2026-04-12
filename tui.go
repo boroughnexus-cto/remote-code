@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -450,6 +451,18 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.cursor = len(m.items) - 1
 		}
 		m.updateContentCache()
+		// Resize tmux sessions to match content pane on data refresh
+		if m.w > 0 {
+			contentWidth := m.w - 26
+			if contentWidth < 20 {
+				contentWidth = 20
+			}
+			contentHeight := m.h - headerHeight - 1 - 2
+			if contentHeight < 5 {
+				contentHeight = 5
+			}
+			go m.resizeTmuxSessions(contentWidth, contentHeight)
+		}
 		return m, nil
 
 	case terminalMsg:
@@ -1125,7 +1138,11 @@ func (m tuiModel) View() string {
 		}
 	}
 
-	return lipgloss.JoinVertical(lipgloss.Left, topBar, main, statusLine)
+	full := lipgloss.JoinVertical(lipgloss.Left, topBar, main, statusLine)
+
+	// Hard-constrain output to terminal dimensions to prevent scrolling
+	// (iPad SSH clients in particular will scroll the top bar off-screen)
+	return lipgloss.Place(m.w, m.h, lipgloss.Left, lipgloss.Top, full)
 }
 
 func (m tuiModel) renderTopBar() string {
@@ -1312,6 +1329,9 @@ func (m tuiModel) renderContextPicker() string {
 
 // runTUI starts the Bubbletea TUI. Database, config, and pool must be initialised by main().
 
+// stripANSI removes ANSI escape sequences from a string.
+var ansiRe = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
+
 // detectActivity checks the last non-empty line of a tmux session to classify activity.
 // Returns "awaiting" (idle prompt), "working" (processing), or "stopped".
 func detectActivity(tmuxSession string) string {
@@ -1321,7 +1341,7 @@ func detectActivity(tmuxSession string) string {
 	}
 	lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
 	for i := len(lines) - 1; i >= 0; i-- {
-		line := strings.TrimSpace(lines[i])
+		line := strings.TrimSpace(ansiRe.ReplaceAllString(lines[i], ""))
 		if line == "" {
 			continue
 		}
@@ -1334,7 +1354,7 @@ func detectActivity(tmuxSession string) string {
 			strings.Contains(line, "Pick a") ||
 			strings.Contains(line, "Do you want to proceed") ||
 			strings.Contains(line, "Esc to cancel") || // permission dialog
-			strings.HasSuffix(line, "$ ") || // shell prompt (session has no claude running)
+			strings.HasSuffix(line, "$ ") || // shell prompt
 			strings.HasSuffix(line, "# ") {
 			return "awaiting"
 		}
