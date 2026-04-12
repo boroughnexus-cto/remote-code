@@ -4,11 +4,11 @@
                         │                                                                                              
   Sessions              │                                                                                              
                         │                                                                                              
-  ○ dev-session         │                                                                                              
+ ▸ ○ dev-session        │                                                                                              
                         │                                                                                              
  ─── Pool ───           │                                                                                              
-  ◆ [api] haiku idle    │                                                                                              
-  ◆ [api] sonnet busy   │                                                                                              
+   ◆ [api] haiku idle   │                                                                                              
+   ◆ [api] sonnet busy  │                                                                                              
                         │                                                                                              
                         │                                                                                              
                         │                                                                                              

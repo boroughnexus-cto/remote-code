@@ -29,8 +29,12 @@ var (
 
 	selectedStyle = lipgloss.NewStyle().
 			Bold(true).
-			Underline(true).
 			Foreground(lipgloss.Color("#15a8a8"))
+
+	selectedLabelStyle = lipgloss.NewStyle().
+				Bold(true).
+				Underline(true).
+				Foreground(lipgloss.Color("#15a8a8"))
 
 	dimStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("241"))
@@ -183,8 +187,9 @@ type tuiModel struct {
 	renameInput textinput.Model
 
 	// Feedback submission
-	feedbackInput textinput.Model
-	feedbackType  int // 0=bug, 1=feature
+	feedbackInput    textinput.Model
+	feedbackType     int // 0=bug, 1=feature
+	feedbackSnapshot string // TUI state captured at Alt+F press
 
 	// Dependency injection for testing
 	spawner Spawner
@@ -543,6 +548,8 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case "alt+f":
+			// Capture TUI state before switching to feedback mode
+			m.feedbackSnapshot = m.View()
 			m.mode = modeFeedbackType
 			m.feedbackType = 0
 			m.flash = "Feedback: ←/→ Bug or Feature, Enter to continue, Esc to cancel"
@@ -569,6 +576,8 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			// Only pass keys to session items (not pool slots)
 			if m.cursor < len(m.items) && m.items[m.cursor].kind == itemSession {
 				m.sendKeyToSession(key)
+				// Immediately refresh terminal content after sending a key
+				return m, loadTerminal(m.items[m.cursor].tmuxSession)
 			}
 			return m, nil
 		}
@@ -652,7 +661,7 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			summary := m.feedbackInput.Value()
 			if summary != "" {
 				kinds := []string{"bug", "feature"}
-				go submitFeedback(kinds[m.feedbackType], summary, m.api)
+				go submitFeedback(kinds[m.feedbackType], summary, m.api, m.feedbackSnapshot)
 				m.flash = fmt.Sprintf("Submitted %s: %s", kinds[m.feedbackType], summary)
 			}
 			m.mode = modePassthrough
@@ -1106,16 +1115,24 @@ func (m tuiModel) renderSidebar() string {
 		if item.kind == itemSession {
 			ind = animatedIndicator(item.activity, m.animFrame)
 		}
-		line := fmt.Sprintf(" %s %s", ind, label)
-
-		// Show slot state inline for pool items
-		if item.kind == itemPoolSlot {
-			stateTag := item.state
-			line = fmt.Sprintf(" %s %s %s", item.indicator, label, dimStyle.Render(stateTag))
-		}
 
 		if i == m.cursor {
-			line = selectedStyle.Render(line)
+			// Selected: cursor arrow + underlined label
+			if item.kind == itemPoolSlot {
+				line := fmt.Sprintf(" %s %s %s", ind, selectedLabelStyle.Render(label), dimStyle.Render(item.state))
+				lines = append(lines, selectedStyle.Render("▸") + line)
+				continue
+			}
+			line := fmt.Sprintf(" %s %s", ind, selectedLabelStyle.Render(label))
+			lines = append(lines, selectedStyle.Render("▸") + line)
+			continue
+		}
+
+		var line string
+		if item.kind == itemPoolSlot {
+			line = fmt.Sprintf("  %s %s %s", ind, label, dimStyle.Render(item.state))
+		} else {
+			line = fmt.Sprintf("  %s %s", ind, label)
 		}
 		lines = append(lines, line)
 	}

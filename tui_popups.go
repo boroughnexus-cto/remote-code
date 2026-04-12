@@ -480,7 +480,7 @@ func renderActionPicker(m tuiModel) string {
 }
 
 // submitFeedback creates a Plane issue in the SwarmOps feedback project.
-func submitFeedback(kind, summary string, api *apiClient) {
+func submitFeedback(kind, summary string, api *apiClient, tuiSnapshot string) {
 	var apiURL, apiKey, workspace, projectID string
 	if api != nil {
 		apiURL, _ = api.getConfig("plane.api_url")
@@ -508,7 +508,12 @@ func submitFeedback(kind, summary string, api *apiClient) {
 		prefix = "[feature] "
 	}
 	url := fmt.Sprintf("%s/api/v1/workspaces/%s/projects/%s/issues/", strings.TrimRight(apiURL, "/"), workspace, projectID)
-	body, _ := json.Marshal(map[string]string{"name": prefix + summary})
+	issueData := map[string]string{"name": prefix + summary}
+	if tuiSnapshot != "" {
+		issueData["description_html"] = fmt.Sprintf("<p>%s</p><h3>TUI State at Report Time</h3><pre>%s</pre>",
+			summary, tuiSnapshot)
+	}
+	body, _ := json.Marshal(issueData)
 	req, err := http.NewRequest("POST", url, bytes.NewReader(body))
 	if err != nil {
 		log.Printf("feedback: request error: %v", err)
