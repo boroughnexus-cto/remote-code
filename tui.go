@@ -270,6 +270,7 @@ func loadItemsCmd(api *apiClient) tea.Cmd {
 			indicator := statusStopped
 			if s.Status == "running" {
 				indicator = statusRunning
+				activity = detectActivity(s.TmuxSession)
 			}
 			items = append(items, sidebarItem{
 				kind:        itemSession,
@@ -1294,6 +1295,7 @@ func (m tuiModel) renderContextPicker() string {
 // runTUI starts the Bubbletea TUI. Database, config, and pool must be initialised by main().
 
 // detectActivity checks the last non-empty line of a tmux session to classify activity.
+// Returns "awaiting" (idle prompt), "working" (processing), or "stopped".
 func detectActivity(tmuxSession string) string {
 	out, err := exec.Command("tmux", "capture-pane", "-p", "-S", "-5", "-t", tmuxSession).Output()
 	if err != nil {
@@ -1305,8 +1307,17 @@ func detectActivity(tmuxSession string) string {
 		if line == "" {
 			continue
 		}
-		// Claude Code prompt patterns
-		if strings.HasPrefix(line, "❯") || strings.HasPrefix(line, ">") || strings.HasPrefix(line, "?") || strings.Contains(line, "(y/n)") || strings.Contains(line, "Pick a") {
+		// Claude Code awaiting input patterns
+		if strings.HasPrefix(line, "❯") || // main prompt
+			strings.HasPrefix(line, ">") || // continuation prompt
+			strings.HasPrefix(line, "?") || // question prompt
+			strings.Contains(line, "(y/n)") || // yes/no approval
+			strings.Contains(line, "(Y/n)") ||
+			strings.Contains(line, "Pick a") ||
+			strings.Contains(line, "Do you want to proceed") ||
+			strings.Contains(line, "Esc to cancel") || // permission dialog
+			strings.HasSuffix(line, "$ ") || // shell prompt (session has no claude running)
+			strings.HasSuffix(line, "# ") {
 			return "awaiting"
 		}
 		return "working"
