@@ -57,7 +57,7 @@ func main() {
 		return
 	}
 
-	// Server mode: database, config, pool, HTTP API
+	// Server mode: database, config, HTTP API, then pool (pool spawns are slow)
 	database = initDatabase()
 	defer database.Close()
 
@@ -66,6 +66,19 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// Start HTTP server BEFORE pool so health checks pass during pool startup
+	server := newHTTPServer()
+
+	serverErr := make(chan error, 1)
+	go func() {
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			serverErr <- err
+		}
+	}()
+
+	log.Printf("SwarmOps server starting on %s", server.Addr)
+
+	// Pool init is slow (spawns 6 Claude CLI sessions) — runs after HTTP is up
 	initPool(ctx)
 
 	// Periodic session status sync
@@ -81,18 +94,6 @@ func main() {
 			}
 		}
 	}()
-
-	// Headless server mode
-	server := newHTTPServer()
-
-	serverErr := make(chan error, 1)
-	go func() {
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			serverErr <- err
-		}
-	}()
-
-	log.Printf("SwarmOps server starting on %s", server.Addr)
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
@@ -156,19 +157,26 @@ func runRedeploy() {
 		fmt.Printf(" done\n")
 	}
 
-	// Wait for service to come up
+	// Wait for service to come up (pool spawns 6 Claude sessions — can take 60s+)
 	fmt.Printf("  Waiting for backend...")
-	for i := 0; i < 20; i++ {
+	ready := false
+	for i := 0; i < 120; i++ {
 		time.Sleep(500 * time.Millisecond)
 		resp, err := http.Get("http://localhost:8080/")
 		if err == nil {
 			resp.Body.Close()
-			fmt.Printf(" ready\n\n")
+			fmt.Printf(" ready (%ds)\n\n", (i+1)/2)
+			ready = true
 			break
 		}
-		if i == 19 {
-			fmt.Printf(" timeout — service may still be starting\n\n")
+		if i%10 == 9 {
+			fmt.Printf(".")
 		}
+	}
+	if !ready {
+		fmt.Printf(" timeout after 60s\n")
+		fmt.Fprintf(os.Stderr, "Check: journalctl --user -u swarmops -n 20\n")
+		os.Exit(1)
 	}
 
 	// Launch TUI
