@@ -91,7 +91,8 @@ type sidebarItem struct {
 
 // ─── Messages ────────────────────────────────────────────────────────────────
 
-type tickMsg time.Time
+type tickMsg time.Time     // fast animation tick (150ms)
+type dataTickMsg time.Time // slow data refresh tick (2s)
 type sessionsMsg []Session
 type terminalMsg string
 type contextListMsg []contextItem
@@ -241,12 +242,18 @@ func initialModel(api *apiClient) tuiModel {
 }
 
 func (m tuiModel) Init() tea.Cmd {
-	return tea.Batch(tickCmd(), loadItemsCmd(m.api))
+	return tea.Batch(tickCmd(), dataTickCmd(), loadItemsCmd(m.api))
 }
 
 func tickCmd() tea.Cmd {
-	return tea.Tick(500*time.Millisecond, func(t time.Time) tea.Msg {
+	return tea.Tick(150*time.Millisecond, func(t time.Time) tea.Msg {
 		return tickMsg(t)
+	})
+}
+
+func dataTickCmd() tea.Cmd {
+	return tea.Tick(2*time.Second, func(t time.Time) tea.Msg {
+		return dataTickMsg(t)
 	})
 }
 
@@ -420,9 +427,10 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tickMsg:
+		// Fast tick (150ms): animation frames + terminal refresh only
 		m.animFrame++
 		var cmds []tea.Cmd
-		cmds = append(cmds, tickCmd(), loadItemsCmd(m.api))
+		cmds = append(cmds, tickCmd())
 		if m.cursor < len(m.items) {
 			item := m.items[m.cursor]
 			if item.kind == itemSession && item.status == "running" {
@@ -430,6 +438,10 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, tea.Batch(cmds...)
+
+	case dataTickMsg:
+		// Slow tick (2s): HTTP data refresh (sessions, pool status, activity detection)
+		return m, tea.Batch(dataTickCmd(), loadItemsCmd(m.api))
 
 	case itemsMsg:
 		m.items = msg
