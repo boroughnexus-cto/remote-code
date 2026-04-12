@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -120,6 +121,7 @@ const (
 	modeIcingaAlerts
 	modePopupAction
 	modeRename
+	modeEditMission
 	modeFeedbackType
 	modeFeedbackText
 )
@@ -639,6 +641,15 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, textinput.Blink
 			}
 			return m, nil
+		case "alt+m":
+			if m.cursor < len(m.items) && m.items[m.cursor].kind == itemSession {
+				m.mode = modeEditMission
+				m.newMissionInput.SetValue(m.items[m.cursor].mission)
+				m.newMissionInput.Focus()
+				m.flash = "Edit mission (esc to cancel, enter to save)"
+				return m, textinput.Blink
+			}
+			return m, nil
 		case "alt+f":
 			// Capture TUI state before switching to feedback mode
 			m.feedbackSnapshot = m.View()
@@ -792,6 +803,37 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		default:
 			var cmd tea.Cmd
 			m.renameInput, cmd = m.renameInput.Update(msg)
+			return m, cmd
+		}
+
+	case modeEditMission:
+		switch key {
+		case "enter":
+			mission := m.newMissionInput.Value()
+			if m.cursor < len(m.items) {
+				item := m.items[m.cursor]
+				if m.api != nil {
+					data, _ := json.Marshal(map[string]interface{}{"mission": mission})
+					req, _ := http.NewRequest("PATCH", m.api.baseURL+"/api/swarm/sessions/"+item.sessionID, bytes.NewReader(data))
+					req.Header.Set("Content-Type", "application/json")
+					m.api.http.Do(req)
+				} else {
+					updateSessionMission(context.Background(), item.sessionID, mission)
+				}
+				if mission == "" {
+					m.flash = "Mission cleared"
+				} else {
+					m.flash = "Mission updated"
+				}
+			}
+			m.mode = modePassthrough
+			return m, tea.Batch(loadItemsCmd(m.api), flashClearCmd())
+		case "esc":
+			m.mode = modePassthrough
+			m.flash = ""
+		default:
+			var cmd tea.Cmd
+			m.newMissionInput, cmd = m.newMissionInput.Update(msg)
 			return m, cmd
 		}
 
@@ -1194,6 +1236,8 @@ func (m tuiModel) View() string {
 		statusLine = "Dir: " + m.newDirInput.View()
 	case modeNewMission:
 		statusLine = "Mission: " + m.newMissionInput.View()
+	case modeEditMission:
+		statusLine = "Mission: " + m.newMissionInput.View()
 	case modeRename:
 		statusLine = "Rename: " + m.renameInput.View()
 	case modeFeedbackType:
@@ -1215,7 +1259,7 @@ func (m tuiModel) View() string {
 		if m.flash != "" {
 			statusLine = dimStyle.Render(m.flash)
 		} else {
-			statusLine = dimStyle.Render("Alt+A/Z nav │ Alt+N new │ Alt+S stop │ Alt+R rename │ Alt+D delete │ Alt+P plane │ Alt+I icinga │ Alt+F feedback │ Alt+Q quit")
+			statusLine = dimStyle.Render("Alt+A/Z nav │ Alt+N new │ Alt+S stop │ Alt+R rename │ Alt+M mission │ Alt+D delete │ Alt+P plane │ Alt+I icinga │ Alt+F feedback │ Alt+Q quit")
 		}
 	}
 
