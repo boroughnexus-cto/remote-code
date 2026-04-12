@@ -231,8 +231,14 @@ func TestIntegration_AnimatedIndicator(t *testing.T) {
 	if animatedIndicator("working", 0) == animatedIndicator("working", 1) {
 		t.Error("working should animate between frames")
 	}
-	if animatedIndicator("awaiting", 0) == animatedIndicator("awaiting", 1) {
-		t.Error("awaiting should animate between frames")
+	// "idle" is a static green dot — same on every frame
+	idle0 := animatedIndicator("idle", 0)
+	idle1 := animatedIndicator("idle", 1)
+	if idle0 != idle1 {
+		t.Error("idle should be static (same on every frame)")
+	}
+	if idle0 == statusStopped {
+		t.Error("idle should not look like stopped")
 	}
 }
 

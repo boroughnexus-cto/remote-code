@@ -1366,68 +1366,79 @@ func (m tuiModel) renderContextPicker() string {
 var ansiRe = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
 
 // detectActivity scans the last 15 lines of a tmux session to classify activity.
-// Returns "awaiting" (idle prompt), "working" (processing), or "stopped".
+// Returns "idle" (empty prompt, nothing happening), "working" (anything active),
+// or "stopped" (session not running).
 func detectActivity(tmuxSession string) string {
 	out, err := exec.Command("tmux", "capture-pane", "-p", "-S", "-15", "-t", tmuxSession).Output()
 	if err != nil {
-		return "working"
+		return "stopped"
 	}
 	lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
 
-	// Scan ALL recent lines (not just last) — Claude Code's status bar
-	// renders below the prompt, so ❯ may be several lines up.
+	// Collect cleaned non-chrome lines from the bottom
+	var meaningful []string
 	for i := len(lines) - 1; i >= 0 && i >= len(lines)-15; i-- {
 		line := strings.TrimSpace(ansiRe.ReplaceAllString(lines[i], ""))
 		if line == "" {
 			continue
 		}
-		// Skip Claude Code chrome (status bar, separator lines)
-		if strings.HasPrefix(line, "──") || // separator
-			strings.HasPrefix(line, "[") || // status bar [Opus 4.6...]
-			strings.HasPrefix(line, "Claude") || // Claude MAX | ...
-			strings.Contains(line, "bypass permissions") || // settings hint
-			strings.HasPrefix(line, "◐") || strings.HasPrefix(line, "◑") { // effort indicator
+		// Skip Claude Code chrome (status bar, separator lines, effort indicator)
+		if strings.HasPrefix(line, "──") ||
+			strings.HasPrefix(line, "[") ||
+			strings.HasPrefix(line, "Claude") ||
+			strings.Contains(line, "bypass permissions") ||
+			strings.HasPrefix(line, "◐") || strings.HasPrefix(line, "◑") ||
+			strings.HasPrefix(line, "◒") || strings.HasPrefix(line, "◓") {
 			continue
 		}
-		// Awaiting input patterns
-		if strings.HasPrefix(line, "❯") || // main prompt
-			strings.HasPrefix(line, ">") || // continuation prompt
-			strings.HasPrefix(line, "?") || // question prompt
-			strings.Contains(line, "(y/n)") || // yes/no approval
-			strings.Contains(line, "(Y/n)") ||
-			strings.Contains(line, "Pick a") ||
-			strings.Contains(line, "Do you want to proceed") ||
-			strings.Contains(line, "Esc to cancel") || // permission dialog
-			strings.Contains(line, "Yes, and don't ask") || // permission choices
-			strings.HasSuffix(line, "$ ") || // shell prompt
-			strings.HasSuffix(line, "# ") {
-			return "awaiting"
+		meaningful = append(meaningful, line)
+		if len(meaningful) >= 5 {
+			break
 		}
-		// Working patterns
-		if strings.Contains(line, "Running") || // tool running
-			strings.Contains(line, "Thinking") || // thinking indicator
-			strings.HasPrefix(line, "●") || // tool call in progress
-			strings.HasPrefix(line, "✻") { // worked for Ns
-			return "working"
-		}
-		// If we hit a content line that's not chrome and not a prompt, it's working
+	}
+
+	if len(meaningful) == 0 {
 		return "working"
 	}
+
+	// "idle" = the ONLY meaningful content is a bare ❯ prompt or shell prompt
+	// with no tool calls, no output, no permission dialogs above it
+	first := meaningful[0] // closest to bottom
+
+	// Bare prompt with nothing or just whitespace/cursor after ❯
+	isBareprompt := (strings.HasPrefix(first, "❯") && len(strings.TrimSpace(strings.TrimPrefix(first, "❯"))) <= 1) ||
+		strings.HasSuffix(first, "$ ") ||
+		strings.HasSuffix(first, "# ")
+
+	if isBareprompt {
+		// Check if anything above the prompt suggests active work
+		for _, line := range meaningful[1:] {
+			if strings.Contains(line, "Running") ||
+				strings.HasPrefix(line, "●") ||
+				strings.Contains(line, "Esc to cancel") ||
+				strings.Contains(line, "Do you want to proceed") {
+				return "working" // permission dialog or tool running above prompt
+			}
+		}
+		return "idle"
+	}
+
+	// Everything else is "working" — tool calls, output, permission dialogs, etc.
 	return "working"
 }
 
 var (
 	spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"}
-	pulseFrames   = []string{"●", "○"}
 )
 
 // animatedIndicator returns the indicator string for a session based on its activity and the current animation frame.
 func animatedIndicator(activity string, frame int) string {
 	switch activity {
-	case "awaiting":
-		f := pulseFrames[frame%len(pulseFrames)]
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("#ffaa00")).Render(f)
+	case "idle":
+		// Truly idle — static green dot
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("#00ff00")).Render("●")
 	case "working":
+		// Active (processing, tool calls, permission dialogs) — spinner
 		f := spinnerFrames[frame%len(spinnerFrames)]
 		return lipgloss.NewStyle().Foreground(lipgloss.Color("#00ff00")).Render(f)
 	default:
