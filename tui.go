@@ -60,7 +60,7 @@ var (
 				Foreground(lipgloss.Color("#15a8a8"))
 )
 
-const headerHeight = 4 // top bar occupies 4 lines (content + border)
+const headerHeight = 3 // top bar: 2 content lines + 1 border line
 
 // ─── Sidebar item: unified type for sessions + pool slots ────────────────────
 
@@ -414,7 +414,8 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if contentWidth < 20 {
 			contentWidth = 20
 		}
-		contentHeight := m.h - 2 - headerHeight
+		// Match sidebar: top bar (headerHeight) + status line (1) + sidebar padding (2)
+		contentHeight := m.h - headerHeight - 1 - 2
 		if contentHeight < 5 {
 			contentHeight = 5
 		}
@@ -1231,7 +1232,12 @@ func (m tuiModel) renderSidebar() string {
 		lines = append(lines, "")
 	}
 
-	return sidebarStyle.Height(m.h - 2 - headerHeight).Render(strings.Join(lines, "\n"))
+	// Height accounts for: top bar (headerHeight), status line (1), sidebar vertical padding (2)
+	sideHeight := m.h - headerHeight - 1 - 2
+	if sideHeight < 3 {
+		sideHeight = 3
+	}
+	return sidebarStyle.Height(sideHeight).Render(strings.Join(lines, "\n"))
 }
 
 // updateContentCache computes the right-pane content string based on current state
