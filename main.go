@@ -8,7 +8,9 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -37,8 +39,20 @@ func init() {
 var database *sql.DB
 
 func main() {
-	// Client mode: "tui" subcommand or TTY detected — connect to backend via HTTP
-	if len(os.Args) > 1 && os.Args[1] == "tui" || isTerminal() {
+	// Subcommand routing
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "tui":
+			runTUIClient()
+			return
+		case "redeploy":
+			runRedeploy()
+			return
+		}
+	}
+
+	// TTY with no subcommand → TUI client
+	if isTerminal() {
 		runTUIClient()
 		return
 	}
@@ -96,6 +110,69 @@ func main() {
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		log.Printf("HTTP shutdown error: %v", err)
 	}
+}
+
+// runRedeploy pulls latest from git, rebuilds, restarts the backend service, then launches the TUI.
+func runRedeploy() {
+	dir, _ := os.Getwd()
+	// Find the swarmops source directory (where main.go lives)
+	srcDir := dir
+	if _, err := os.Stat(filepath.Join(dir, "main.go")); err != nil {
+		// Try the binary's directory
+		exe, _ := os.Executable()
+		srcDir = filepath.Dir(exe)
+		if _, err := os.Stat(filepath.Join(srcDir, "main.go")); err != nil {
+			fmt.Fprintf(os.Stderr, "Cannot find swarmops source directory\n")
+			os.Exit(1)
+		}
+	}
+
+	steps := []struct {
+		name string
+		cmd  string
+		args []string
+	}{
+		{"Pulling latest", "git", []string{"pull", "--ff-only", "origin", "main"}},
+		{"Building", "go", []string{"build", "-o", "swarmops", "."}},
+		{"Running tests", "go", []string{"test", "./...", "-count=1", "-timeout=60s"}},
+		{"Restarting service", "systemctl", []string{"--user", "restart", "swarmops"}},
+	}
+
+	for _, step := range steps {
+		fmt.Printf("  %s...", step.name)
+		cmd := exec.Command(step.cmd, step.args...)
+		cmd.Dir = srcDir
+		cmd.Env = os.Environ()
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			fmt.Printf(" FAILED\n")
+			fmt.Fprintf(os.Stderr, "%s\n", string(out))
+			if step.name == "Running tests" {
+				fmt.Printf("  (continuing despite test failure)\n")
+				continue
+			}
+			os.Exit(1)
+		}
+		fmt.Printf(" done\n")
+	}
+
+	// Wait for service to come up
+	fmt.Printf("  Waiting for backend...")
+	for i := 0; i < 20; i++ {
+		time.Sleep(500 * time.Millisecond)
+		resp, err := http.Get("http://localhost:8080/")
+		if err == nil {
+			resp.Body.Close()
+			fmt.Printf(" ready\n\n")
+			break
+		}
+		if i == 19 {
+			fmt.Printf(" timeout — service may still be starting\n\n")
+		}
+	}
+
+	// Launch TUI
+	runTUIClient()
 }
 
 // runTUIClient starts the TUI as an HTTP client against the backend.
