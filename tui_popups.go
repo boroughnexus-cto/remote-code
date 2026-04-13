@@ -3,10 +3,10 @@ package main
 import (
 	"bytes"
 	"crypto/tls"
-	"log"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"sort"
 	"strings"
@@ -19,18 +19,34 @@ import (
 // ─── Types ──────────────────────────────────────────────────────────────────
 
 type planeIssue struct {
-	ID         string `json:"id"`
-	Title      string `json:"name"`
-	Priority   string `json:"priority"`
-	SequenceID int    `json:"sequence_id"`
-	StateGroup string
+	ID              string   `json:"id"`
+	Title           string   `json:"name"`
+	Priority        string   `json:"priority"`
+	SequenceID      int      `json:"sequence_id"`
+	DescriptionHTML string   `json:"description_html"`
+	Assignees       []string `json:"assignees"`
+	Labels          []string `json:"labels"`
+	CreatedAt       string   `json:"created_at"`
+	UpdatedAt       string   `json:"updated_at"`
+	StateGroup      string
+	Identifier      string // e.g. "SWM-42" — built from project prefix + sequence_id
 }
 
 type icingaProblem struct {
-	Host    string
-	Service string
-	State   int // 1=warning, 2=critical, 3=unknown
-	Output  string
+	Host          string
+	Service       string
+	State         int // 1=warning, 2=critical, 3=unknown
+	Output        string
+	FullOutput    string // untruncated plugin output
+	LastCheck     time.Time
+	Duration      time.Duration
+	CheckAttempt  int
+	MaxAttempts   int
+	Acknowledged  bool
+	AckAuthor     string
+	AckComment    string
+	InDowntime    bool
+	ObjectName    string // full object name for API calls (host!service)
 }
 
 // ─── Messages ───────────────────────────────────────────────────────────────
@@ -51,44 +67,111 @@ type popupErrMsg struct {
 	text   string
 }
 
+type popupActionDoneMsg struct {
+	flash string
+}
+
+// ─── Plane config helper ────────────────────────────────────────────────────
+
+type planeConfig struct {
+	apiURL, apiKey, workspace, projectID string
+}
+
+func getPlaneConfig(api *apiClient) (planeConfig, error) {
+	var c planeConfig
+	if api != nil {
+		c.apiURL, _ = api.getConfig("plane.api_url")
+		c.apiKey, _ = api.getConfig("plane.api_key")
+		c.workspace, _ = api.getConfig("plane.workspace")
+		c.projectID, _ = api.getConfig("plane.project_id")
+		if c.workspace == "" {
+			c.workspace = "thomkernet"
+		}
+	} else if globalConfigService != nil {
+		c.apiURL = globalConfigService.GetString("plane.api_url", "")
+		c.apiKey = globalConfigService.GetString("plane.api_key", "")
+		c.workspace = globalConfigService.GetString("plane.workspace", "thomkernet")
+		c.projectID = globalConfigService.GetString("plane.project_id", "")
+	} else {
+		return c, fmt.Errorf("config service not initialized")
+	}
+	if c.apiURL == "" || c.apiKey == "" || c.projectID == "" {
+		return c, fmt.Errorf("Plane not configured (set plane.api_url, plane.api_key, plane.project_id)")
+	}
+	return c, nil
+}
+
+// ─── Icinga config helper ───────────────────────────────────────────────────
+
+type icingaConfig struct {
+	apiURL, apiUser, apiPass string
+}
+
+func getIcingaConfig(api *apiClient) (icingaConfig, error) {
+	var c icingaConfig
+	if api != nil {
+		c.apiURL, _ = api.getConfig("icinga.api_url")
+		c.apiUser, _ = api.getConfig("icinga.api_user")
+		c.apiPass, _ = api.getConfig("icinga.api_pass")
+	} else if globalConfigService != nil {
+		c.apiURL = globalConfigService.GetString("icinga.api_url", "")
+		c.apiUser = globalConfigService.GetString("icinga.api_user", "")
+		c.apiPass = globalConfigService.GetString("icinga.api_pass", "")
+	} else {
+		return c, fmt.Errorf("config service not initialized")
+	}
+	if c.apiURL == "" || c.apiUser == "" || c.apiPass == "" {
+		return c, fmt.Errorf("Icinga not configured (set icinga.api_url, icinga.api_user, icinga.api_pass)")
+	}
+	return c, nil
+}
+
+func icingaHTTPClient() *http.Client {
+	return &http.Client{
+		Timeout: 10 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		},
+	}
+}
+
 // ─── Data fetching ──────────────────────────────────────────────────────────
 
 func fetchPlaneIssues(reqID uint64, api *apiClient) tea.Cmd {
 	return func() tea.Msg {
-		var apiURL, apiKey, workspace, projectID string
-		if api != nil {
-			apiURL, _ = api.getConfig("plane.api_url")
-			apiKey, _ = api.getConfig("plane.api_key")
-			workspace, _ = api.getConfig("plane.workspace")
-			projectID, _ = api.getConfig("plane.project_id")
-			if workspace == "" {
-				workspace = "thomkernet"
-			}
-		} else if globalConfigService != nil {
-			apiURL = globalConfigService.GetString("plane.api_url", "")
-			apiKey = globalConfigService.GetString("plane.api_key", "")
-			workspace = globalConfigService.GetString("plane.workspace", "thomkernet")
-			projectID = globalConfigService.GetString("plane.project_id", "")
-		} else {
-			return popupErrMsg{reqID, "plane", "config service not initialized"}
-		}
-
-		if apiURL == "" || apiKey == "" || projectID == "" {
-			return popupErrMsg{reqID, "plane", "Plane not configured (set plane.api_url, plane.api_key, plane.project_id)"}
+		cfg, err := getPlaneConfig(api)
+		if err != nil {
+			return popupErrMsg{reqID, "plane", err.Error()}
 		}
 
 		client := &http.Client{Timeout: 10 * time.Second}
 		var allIssues []planeIssue
 
+		// Fetch project identifier prefix (e.g. "SWM")
+		var projectPrefix string
+		projURL := fmt.Sprintf("%s/api/v1/workspaces/%s/projects/%s/",
+			strings.TrimRight(cfg.apiURL, "/"), cfg.workspace, cfg.projectID)
+		if req, err := http.NewRequest("GET", projURL, nil); err == nil {
+			req.Header.Set("X-API-Key", cfg.apiKey)
+			if resp, err := client.Do(req); err == nil {
+				defer resp.Body.Close()
+				var proj struct {
+					Identifier string `json:"identifier"`
+				}
+				json.NewDecoder(resp.Body).Decode(&proj)
+				projectPrefix = proj.Identifier
+			}
+		}
+
 		for _, group := range []string{"backlog", "unstarted", "started"} {
-			url := fmt.Sprintf("%s/api/v1/workspaces/%s/projects/%s/issues/?state_group=%s&per_page=50",
-				strings.TrimRight(apiURL, "/"), workspace, projectID, group)
+			url := fmt.Sprintf("%s/api/v1/workspaces/%s/projects/%s/issues/?state_group=%s&per_page=50&expand=assignees,labels",
+				strings.TrimRight(cfg.apiURL, "/"), cfg.workspace, cfg.projectID, group)
 
 			req, err := http.NewRequest("GET", url, nil)
 			if err != nil {
 				continue
 			}
-			req.Header.Set("X-API-Key", apiKey)
+			req.Header.Set("X-API-Key", cfg.apiKey)
 			req.Header.Set("Accept", "application/json")
 
 			resp, err := client.Do(req)
@@ -110,6 +193,9 @@ func fetchPlaneIssues(reqID uint64, api *apiClient) tea.Cmd {
 			}
 			for i := range parsed.Results {
 				parsed.Results[i].StateGroup = group
+				if projectPrefix != "" {
+					parsed.Results[i].Identifier = fmt.Sprintf("%s-%d", projectPrefix, parsed.Results[i].SequenceID)
+				}
 			}
 			allIssues = append(allIssues, parsed.Results...)
 		}
@@ -120,42 +206,22 @@ func fetchPlaneIssues(reqID uint64, api *apiClient) tea.Cmd {
 
 func fetchIcingaProblems(reqID uint64, api *apiClient) tea.Cmd {
 	return func() tea.Msg {
-		var apiURL, apiUser, apiPass string
-		if api != nil {
-			apiURL, _ = api.getConfig("icinga.api_url")
-			apiUser, _ = api.getConfig("icinga.api_user")
-			apiPass, _ = api.getConfig("icinga.api_pass")
-		} else if globalConfigService != nil {
-			apiURL = globalConfigService.GetString("icinga.api_url", "")
-			apiUser = globalConfigService.GetString("icinga.api_user", "")
-			apiPass = globalConfigService.GetString("icinga.api_pass", "")
-		} else {
-			return popupErrMsg{reqID, "icinga", "config service not initialized"}
+		cfg, err := getIcingaConfig(api)
+		if err != nil {
+			return popupErrMsg{reqID, "icinga", err.Error()}
 		}
 
-		if apiURL == "" || apiUser == "" || apiPass == "" {
-			return popupErrMsg{reqID, "icinga", "Icinga not configured (set icinga.api_url, icinga.api_user, icinga.api_pass)"}
-		}
-
-		url := fmt.Sprintf("%s/v1/objects/services?attrs=display_name&attrs=state&attrs=last_check_result&attrs=host_name&filter=service.state!=0",
-			strings.TrimRight(apiURL, "/"))
+		url := fmt.Sprintf("%s/v1/objects/services?attrs=display_name&attrs=state&attrs=last_check_result&attrs=host_name&attrs=last_check&attrs=last_state_change&attrs=check_attempt&attrs=max_check_attempts&attrs=acknowledgement&attrs=acknowledgement_last_change&attrs=downtime_depth&attrs=name&filter=service.state!=0",
+			strings.TrimRight(cfg.apiURL, "/"))
 
 		req, err := http.NewRequest("GET", url, nil)
 		if err != nil {
 			return popupErrMsg{reqID, "icinga", fmt.Sprintf("request error: %v", err)}
 		}
-		req.SetBasicAuth(apiUser, apiPass)
+		req.SetBasicAuth(cfg.apiUser, cfg.apiPass)
 		req.Header.Set("Accept", "application/json")
 
-		// Icinga uses self-signed certs
-		client := &http.Client{
-			Timeout: 10 * time.Second,
-			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-			},
-		}
-
-		resp, err := client.Do(req)
+		resp, err := icingaHTTPClient().Do(req)
 		if err != nil {
 			return popupErrMsg{reqID, "icinga", fmt.Sprintf("HTTP error: %v", err)}
 		}
@@ -168,6 +234,7 @@ func fetchIcingaProblems(reqID uint64, api *apiClient) tea.Cmd {
 
 		var parsed struct {
 			Results []struct {
+				Name  string `json:"name"`
 				Attrs struct {
 					DisplayName     string  `json:"display_name"`
 					State           float64 `json:"state"`
@@ -175,6 +242,12 @@ func fetchIcingaProblems(reqID uint64, api *apiClient) tea.Cmd {
 					LastCheckResult struct {
 						Output string `json:"output"`
 					} `json:"last_check_result"`
+					LastCheck          float64 `json:"last_check"`
+					LastStateChange    float64 `json:"last_state_change"`
+					CheckAttempt       float64 `json:"check_attempt"`
+					MaxCheckAttempts   float64 `json:"max_check_attempts"`
+					Acknowledgement    float64 `json:"acknowledgement"`
+					DowntimeDepth      float64 `json:"downtime_depth"`
 				} `json:"attrs"`
 			} `json:"results"`
 		}
@@ -182,17 +255,37 @@ func fetchIcingaProblems(reqID uint64, api *apiClient) tea.Cmd {
 			return popupErrMsg{reqID, "icinga", fmt.Sprintf("parse error: %v", err)}
 		}
 
+		now := time.Now()
 		var problems []icingaProblem
 		for _, r := range parsed.Results {
 			output := r.Attrs.LastCheckResult.Output
-			if len(output) > 120 {
-				output = output[:117] + "..."
+			shortOutput := output
+			if len(shortOutput) > 120 {
+				shortOutput = shortOutput[:117] + "..."
 			}
+
+			var lastCheck time.Time
+			if r.Attrs.LastCheck > 0 {
+				lastCheck = time.Unix(int64(r.Attrs.LastCheck), 0)
+			}
+			var duration time.Duration
+			if r.Attrs.LastStateChange > 0 {
+				duration = now.Sub(time.Unix(int64(r.Attrs.LastStateChange), 0))
+			}
+
 			problems = append(problems, icingaProblem{
-				Host:    r.Attrs.HostName,
-				Service: r.Attrs.DisplayName,
-				State:   int(r.Attrs.State),
-				Output:  output,
+				Host:         r.Attrs.HostName,
+				Service:      r.Attrs.DisplayName,
+				State:        int(r.Attrs.State),
+				Output:       shortOutput,
+				FullOutput:   output,
+				LastCheck:    lastCheck,
+				Duration:     duration,
+				CheckAttempt: int(r.Attrs.CheckAttempt),
+				MaxAttempts:  int(r.Attrs.MaxCheckAttempts),
+				Acknowledged: r.Attrs.Acknowledgement > 0,
+				InDowntime:   r.Attrs.DowntimeDepth > 0,
+				ObjectName:   r.Name,
 			})
 		}
 
@@ -200,10 +293,176 @@ func fetchIcingaProblems(reqID uint64, api *apiClient) tea.Cmd {
 	}
 }
 
-// ─── Rendering ──────────────────────────────────────────────────────────────
+// ─── Write actions ──────────────────────────────────────────────────────────
+
+// planeUpdateIssue updates a Plane issue's state or assignees.
+func planeUpdateIssue(api *apiClient, issueID string, updates map[string]interface{}) tea.Cmd {
+	return func() tea.Msg {
+		cfg, err := getPlaneConfig(api)
+		if err != nil {
+			return popupActionDoneMsg{flash: "Error: " + err.Error()}
+		}
+
+		url := fmt.Sprintf("%s/api/v1/workspaces/%s/projects/%s/issues/%s/",
+			strings.TrimRight(cfg.apiURL, "/"), cfg.workspace, cfg.projectID, issueID)
+
+		body, _ := json.Marshal(updates)
+		req, err := http.NewRequest("PATCH", url, bytes.NewReader(body))
+		if err != nil {
+			return popupActionDoneMsg{flash: "Error: " + err.Error()}
+		}
+		req.Header.Set("X-API-Key", cfg.apiKey)
+		req.Header.Set("Content-Type", "application/json")
+
+		client := &http.Client{Timeout: 10 * time.Second}
+		resp, err := client.Do(req)
+		if err != nil {
+			return popupActionDoneMsg{flash: "Error: " + err.Error()}
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode >= 300 {
+			respBody, _ := io.ReadAll(resp.Body)
+			return popupActionDoneMsg{flash: fmt.Sprintf("Plane %d: %s", resp.StatusCode, string(respBody))}
+		}
+		return popupActionDoneMsg{flash: "✓ Issue updated"}
+	}
+}
+
+// planeGetStates fetches the state IDs for a project to enable state transitions.
+func planeGetStates(api *apiClient) map[string]string {
+	cfg, err := getPlaneConfig(api)
+	if err != nil {
+		return nil
+	}
+
+	url := fmt.Sprintf("%s/api/v1/workspaces/%s/projects/%s/states/",
+		strings.TrimRight(cfg.apiURL, "/"), cfg.workspace, cfg.projectID)
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil
+	}
+	req.Header.Set("X-API-Key", cfg.apiKey)
+	req.Header.Set("Accept", "application/json")
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+
+	var parsed struct {
+		Results []struct {
+			ID    string `json:"id"`
+			Group string `json:"group"`
+			Name  string `json:"name"`
+		} `json:"results"`
+	}
+	body, _ := io.ReadAll(resp.Body)
+	json.Unmarshal(body, &parsed)
+
+	// Map group name to first matching state ID
+	states := make(map[string]string)
+	for _, s := range parsed.Results {
+		if _, exists := states[s.Group]; !exists {
+			states[s.Group] = s.ID
+		}
+	}
+	return states
+}
+
+// icingaAcknowledge acknowledges an Icinga service problem.
+func icingaAcknowledge(api *apiClient, objectName, comment string) tea.Cmd {
+	return func() tea.Msg {
+		cfg, err := getIcingaConfig(api)
+		if err != nil {
+			return popupActionDoneMsg{flash: "Error: " + err.Error()}
+		}
+
+		url := fmt.Sprintf("%s/v1/actions/acknowledge-problem",
+			strings.TrimRight(cfg.apiURL, "/"))
+
+		payload := map[string]interface{}{
+			"type":    "Service",
+			"filter":  fmt.Sprintf(`service.__name==%q`, objectName),
+			"author":  "SwarmOps TUI",
+			"comment": comment,
+			"sticky":  true,
+		}
+		body, _ := json.Marshal(payload)
+		req, err := http.NewRequest("POST", url, bytes.NewReader(body))
+		if err != nil {
+			return popupActionDoneMsg{flash: "Error: " + err.Error()}
+		}
+		req.SetBasicAuth(cfg.apiUser, cfg.apiPass)
+		req.Header.Set("Accept", "application/json")
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := icingaHTTPClient().Do(req)
+		if err != nil {
+			return popupActionDoneMsg{flash: "Ack error: " + err.Error()}
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode >= 300 {
+			respBody, _ := io.ReadAll(resp.Body)
+			return popupActionDoneMsg{flash: fmt.Sprintf("Ack failed %d: %s", resp.StatusCode, string(respBody))}
+		}
+		return popupActionDoneMsg{flash: "✓ Acknowledged"}
+	}
+}
+
+// icingaScheduleDowntime schedules a downtime for an Icinga service.
+func icingaScheduleDowntime(api *apiClient, objectName string, duration time.Duration, comment string) tea.Cmd {
+	return func() tea.Msg {
+		cfg, err := getIcingaConfig(api)
+		if err != nil {
+			return popupActionDoneMsg{flash: "Error: " + err.Error()}
+		}
+
+		now := time.Now()
+		url := fmt.Sprintf("%s/v1/actions/schedule-downtime",
+			strings.TrimRight(cfg.apiURL, "/"))
+
+		payload := map[string]interface{}{
+			"type":       "Service",
+			"filter":     fmt.Sprintf(`service.__name==%q`, objectName),
+			"author":     "SwarmOps TUI",
+			"comment":    comment,
+			"start_time": now.Unix(),
+			"end_time":   now.Add(duration).Unix(),
+			"fixed":      true,
+		}
+		body, _ := json.Marshal(payload)
+		req, err := http.NewRequest("POST", url, bytes.NewReader(body))
+		if err != nil {
+			return popupActionDoneMsg{flash: "Error: " + err.Error()}
+		}
+		req.SetBasicAuth(cfg.apiUser, cfg.apiPass)
+		req.Header.Set("Accept", "application/json")
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := icingaHTTPClient().Do(req)
+		if err != nil {
+			return popupActionDoneMsg{flash: "Downtime error: " + err.Error()}
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode >= 300 {
+			respBody, _ := io.ReadAll(resp.Body)
+			return popupActionDoneMsg{flash: fmt.Sprintf("Downtime failed %d: %s", resp.StatusCode, string(respBody))}
+		}
+		return popupActionDoneMsg{flash: fmt.Sprintf("✓ Downtime scheduled (%s)", formatDuration(duration))}
+	}
+}
+
+// ─── Styles ─────────────────────────────────────────────────────────────────
 
 var (
 	popupTitleStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#15a8a8"))
+	detailLabelStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#15a8a8"))
 	stateColors     = map[int]lipgloss.Style{
 		1: lipgloss.NewStyle().Foreground(lipgloss.Color("#ffcc00")), // warning/yellow
 		2: lipgloss.NewStyle().Foreground(lipgloss.Color("#ff3333")), // critical/red
@@ -229,10 +488,7 @@ func icingaStateLabel(state int) string {
 
 // ─── Filter & Sort ──────────────────────────────────────────────────────────
 
-// planeSortLabels are the sort mode names, indexed by popupSortMode.
 var planeSortLabels = []string{"default", "priority", "state", "name"}
-
-// icingaSortLabels are the sort mode names, indexed by popupSortMode.
 var icingaSortLabels = []string{"default", "severity", "host", "service"}
 
 var priorityOrder = map[string]int{
@@ -243,19 +499,49 @@ var stateGroupOrder = map[string]int{
 	"started": 0, "unstarted": 1, "backlog": 2,
 }
 
+// Plane triage presets
+var planeTriageLabels = []string{"all", "started", "high+urgent", "backlog"}
+
 func filteredPlaneIssues(m tuiModel) []planeIssue {
 	if m.planeIssues == nil {
 		return nil
 	}
+
+	// Apply triage preset filter first
+	var base []planeIssue
+	switch m.popupTriageMode {
+	case 1: // started only
+		for _, issue := range m.planeIssues {
+			if issue.StateGroup == "started" {
+				base = append(base, issue)
+			}
+		}
+	case 2: // high + urgent priority
+		for _, issue := range m.planeIssues {
+			if issue.Priority == "high" || issue.Priority == "urgent" {
+				base = append(base, issue)
+			}
+		}
+	case 3: // backlog only
+		for _, issue := range m.planeIssues {
+			if issue.StateGroup == "backlog" {
+				base = append(base, issue)
+			}
+		}
+	default: // 0 = all
+		base = m.planeIssues
+	}
+
 	query := strings.ToLower(strings.TrimSpace(m.popupFilter.Value()))
 	if query == "" {
-		return sortPlaneIssues(m.planeIssues, m.popupSortMode)
+		return sortPlaneIssues(base, m.popupSortMode)
 	}
 	var out []planeIssue
-	for _, issue := range m.planeIssues {
+	for _, issue := range base {
 		if strings.Contains(strings.ToLower(issue.Title), query) ||
 			strings.Contains(strings.ToLower(issue.StateGroup), query) ||
-			strings.Contains(strings.ToLower(issue.Priority), query) {
+			strings.Contains(strings.ToLower(issue.Priority), query) ||
+			strings.Contains(strings.ToLower(issue.Identifier), query) {
 			out = append(out, issue)
 		}
 	}
@@ -327,96 +613,280 @@ func sortIcingaProblems(problems []icingaProblem, mode int) []icingaProblem {
 	return sorted
 }
 
-// ─── Prompt generation ──────────────────────────────────────────────────────
+// groupIcingaByHost groups problems by host with counts.
+func groupIcingaByHost(problems []icingaProblem) []icingaHostGroup {
+	hostMap := make(map[string]*icingaHostGroup)
+	var order []string
+	for _, p := range problems {
+		g, ok := hostMap[p.Host]
+		if !ok {
+			g = &icingaHostGroup{Host: p.Host}
+			hostMap[p.Host] = g
+			order = append(order, p.Host)
+		}
+		g.Problems = append(g.Problems, p)
+		if p.State == 2 {
+			g.CritCount++
+		} else if p.State == 1 {
+			g.WarnCount++
+		}
+	}
+	var groups []icingaHostGroup
+	for _, host := range order {
+		groups = append(groups, *hostMap[host])
+	}
+	return groups
+}
+
+type icingaHostGroup struct {
+	Host      string
+	Problems  []icingaProblem
+	CritCount int
+	WarnCount int
+	Expanded  bool
+}
+
+// ─── Prompt generation (richer payloads) ────────────────────────────────────
 
 func planeIssuePrompt(issue planeIssue) string {
-	return fmt.Sprintf("Work on Plane issue: %s (priority: %s, state: %s)", issue.Title, issue.Priority, issue.StateGroup)
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Work on Plane issue %s: %s\n", issue.Identifier, issue.Title))
+	sb.WriteString(fmt.Sprintf("Priority: %s | State: %s\n", issue.Priority, issue.StateGroup))
+	if issue.DescriptionHTML != "" {
+		// Strip basic HTML tags for plain text prompt
+		desc := stripHTMLTags(issue.DescriptionHTML)
+		if len(desc) > 500 {
+			desc = desc[:497] + "..."
+		}
+		sb.WriteString(fmt.Sprintf("Description: %s\n", desc))
+	}
+	return sb.String()
 }
 
 func icingaProblemPrompt(problem icingaProblem) string {
-	return fmt.Sprintf("Investigate Icinga alert: %s on %s — %s", problem.Service, problem.Host, problem.Output)
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Investigate Icinga alert: %s on %s\n", problem.Service, problem.Host))
+	sb.WriteString(fmt.Sprintf("State: %s (for %s)\n", icingaStateLabel(problem.State), formatDuration(problem.Duration)))
+	sb.WriteString(fmt.Sprintf("Output: %s\n", problem.FullOutput))
+	if problem.Acknowledged {
+		sb.WriteString(fmt.Sprintf("Already acknowledged by: %s\n", problem.AckAuthor))
+	}
+	return sb.String()
 }
 
-// ─── Rendering ──────────────────────────────────────────────────────────────
+// ─── Rendering: Plane ───────────────────────────────────────────────────────
 
 func renderPlanePopup(m tuiModel) string {
-	var sb strings.Builder
+	listWidth := m.w / 2
+	if listWidth < 40 {
+		listWidth = 40
+	}
+	detailWidth := m.w - listWidth - 3 // 3 for separator
+	if detailWidth < 20 {
+		detailWidth = 20
+	}
 
-	title := "Plane Issues — Backlog & In Progress"
+	// ── Left: issue list ──
+	var left strings.Builder
+
+	title := "Plane Issues"
 	sortLabel := planeSortLabels[m.popupSortMode%len(planeSortLabels)]
 	if m.popupSortMode > 0 {
-		title += "  [sorted: " + sortLabel + "]"
+		title += " [" + sortLabel + "]"
 	}
-	sb.WriteString(popupTitleStyle.Render(title))
-	sb.WriteString("\n")
+	triageLabel := planeTriageLabels[m.popupTriageMode%len(planeTriageLabels)]
+	if m.popupTriageMode > 0 {
+		title += " {" + triageLabel + "}"
+	}
+	left.WriteString(popupTitleStyle.Render(title) + "\n")
 
 	if m.popupFilterActive || m.popupFilter.Value() != "" {
-		sb.WriteString("  / " + m.popupFilter.View() + "\n")
+		left.WriteString(" / " + m.popupFilter.View() + "\n")
 	}
-	sb.WriteString("\n")
+	left.WriteString("\n")
 
 	if m.popupErr != "" {
-		sb.WriteString(dimStyle.Render("  Error: "+m.popupErr) + "\n")
+		left.WriteString(dimStyle.Render(" Error: "+m.popupErr) + "\n")
 	} else if m.planeIssues == nil {
-		sb.WriteString(dimStyle.Render("  Loading...") + "\n")
+		left.WriteString(dimStyle.Render(" Loading...") + "\n")
 	} else {
 		filtered := filteredPlaneIssues(m)
 		if len(filtered) == 0 {
-			sb.WriteString(dimStyle.Render("  No issues found.") + "\n")
+			left.WriteString(dimStyle.Render(" No issues found.") + "\n")
 		} else {
-			for i, issue := range filtered {
+			maxLines := m.h - 6
+			if maxLines < 5 {
+				maxLines = 5
+			}
+			start := 0
+			if m.popupCursor >= maxLines {
+				start = m.popupCursor - maxLines + 1
+			}
+			end := start + maxLines
+			if end > len(filtered) {
+				end = len(filtered)
+			}
+
+			for i := start; i < end; i++ {
+				issue := filtered[i]
 				icon := priorityIcons[issue.Priority]
 				if icon == "" {
 					icon = "  "
 				}
-
-				stateLabel := fmt.Sprintf("%-10s", issue.StateGroup)
-				issueTitle := issue.Title
-				maxTitle := m.w - 20
-				if maxTitle < 20 {
-					maxTitle = 20
+				id := issue.Identifier
+				if id == "" {
+					id = fmt.Sprintf("#%d", issue.SequenceID)
 				}
+
+				stateTag := fmt.Sprintf("%-8s", issue.StateGroup)
+				maxTitle := listWidth - 25
+				if maxTitle < 10 {
+					maxTitle = 10
+				}
+				issueTitle := issue.Title
 				if len(issueTitle) > maxTitle {
 					issueTitle = issueTitle[:maxTitle-3] + "..."
 				}
 
-				line := fmt.Sprintf("  %s [%s] %s", icon, stateLabel, issueTitle)
+				line := fmt.Sprintf(" %s %-7s [%s] %s", icon, id, stateTag, issueTitle)
 				if i == m.popupCursor {
 					line = selectedStyle.Render(line)
 				}
-				sb.WriteString(line + "\n")
+				left.WriteString(line + "\n")
+			}
+
+			if len(filtered) > maxLines {
+				left.WriteString(dimStyle.Render(fmt.Sprintf(" (%d/%d shown)", min(maxLines, len(filtered)), len(filtered))) + "\n")
 			}
 		}
 	}
 
-	sb.WriteString("\n" + dimStyle.Render("  Alt+A/Alt+Z scroll | / filter | s sort | Enter act | r refresh | q/Esc close"))
-	return sb.String()
+	// ── Right: detail pane ──
+	var right strings.Builder
+	filtered := filteredPlaneIssues(m)
+	if m.popupCursor < len(filtered) {
+		issue := filtered[m.popupCursor]
+		right.WriteString(detailLabelStyle.Render(issue.Identifier+" — "+issue.Title) + "\n\n")
+		right.WriteString(fmt.Sprintf(" State:    %s\n", issue.StateGroup))
+		right.WriteString(fmt.Sprintf(" Priority: %s\n", issue.Priority))
+		if len(issue.Assignees) > 0 {
+			right.WriteString(fmt.Sprintf(" Assigned: %s\n", strings.Join(issue.Assignees, ", ")))
+		} else {
+			right.WriteString(" Assigned: (none)\n")
+		}
+		if len(issue.Labels) > 0 {
+			right.WriteString(fmt.Sprintf(" Labels:   %s\n", strings.Join(issue.Labels, ", ")))
+		}
+		if issue.UpdatedAt != "" {
+			if t, err := time.Parse(time.RFC3339Nano, issue.UpdatedAt); err == nil {
+				right.WriteString(fmt.Sprintf(" Updated:  %s\n", t.Format("2006-01-02 15:04")))
+			}
+		}
+		right.WriteString("\n")
+
+		if issue.DescriptionHTML != "" {
+			desc := stripHTMLTags(issue.DescriptionHTML)
+			lines := strings.Split(desc, "\n")
+			maxDescLines := m.h - 12
+			if maxDescLines < 3 {
+				maxDescLines = 3
+			}
+			for i, line := range lines {
+				if i >= maxDescLines {
+					right.WriteString(dimStyle.Render(" ...") + "\n")
+					break
+				}
+				if len(line) > detailWidth-2 {
+					line = line[:detailWidth-5] + "..."
+				}
+				right.WriteString(" " + line + "\n")
+			}
+		} else {
+			right.WriteString(dimStyle.Render(" (no description)") + "\n")
+		}
+	}
+
+	// ── Compose split pane ──
+	leftStr := lipgloss.NewStyle().Width(listWidth).Render(left.String())
+	rightStr := lipgloss.NewStyle().Width(detailWidth).Render(right.String())
+
+	content := lipgloss.JoinHorizontal(lipgloss.Top, leftStr, " ", rightStr)
+
+	help := dimStyle.Render(" ↑↓ nav │ / filter │ s sort │ 1-3 triage │ p progress │ d done │ Enter dispatch │ r refresh │ q close")
+	return content + "\n" + help
 }
 
-func renderIcingaPopup(m tuiModel) string {
-	var sb strings.Builder
+// ─── Rendering: Icinga ──────────────────────────────────────────────────────
 
-	title := "Icinga Alerts — Active Problems"
+func renderIcingaPopup(m tuiModel) string {
+	listWidth := m.w / 2
+	if listWidth < 40 {
+		listWidth = 40
+	}
+	detailWidth := m.w - listWidth - 3
+	if detailWidth < 20 {
+		detailWidth = 20
+	}
+
+	// ── Left: problem list ──
+	var left strings.Builder
+
+	title := "Icinga Alerts"
 	sortLabel := icingaSortLabels[m.popupSortMode%len(icingaSortLabels)]
 	if m.popupSortMode > 0 {
-		title += "  [sorted: " + sortLabel + "]"
+		title += " [" + sortLabel + "]"
 	}
-	sb.WriteString(popupTitleStyle.Render(title))
-	sb.WriteString("\n")
+	if m.icingaGroupByHost {
+		title += " {by host}"
+	}
+	left.WriteString(popupTitleStyle.Render(title) + "\n")
 
 	if m.popupFilterActive || m.popupFilter.Value() != "" {
-		sb.WriteString("  / " + m.popupFilter.View() + "\n")
+		left.WriteString(" / " + m.popupFilter.View() + "\n")
 	}
-	sb.WriteString("\n")
+	left.WriteString("\n")
 
 	if m.popupErr != "" {
-		sb.WriteString(dimStyle.Render("  Error: "+m.popupErr) + "\n")
+		left.WriteString(dimStyle.Render(" Error: "+m.popupErr) + "\n")
 	} else if m.icingaProblems == nil {
-		sb.WriteString(dimStyle.Render("  Loading...") + "\n")
+		left.WriteString(dimStyle.Render(" Loading...") + "\n")
 	} else {
 		filtered := filteredIcingaProblems(m)
 		if len(filtered) == 0 {
-			sb.WriteString(dimStyle.Render("  No active problems. All clear!") + "\n")
+			left.WriteString(dimStyle.Render(" No active problems. All clear!") + "\n")
+		} else if m.icingaGroupByHost {
+			groups := groupIcingaByHost(filtered)
+			idx := 0
+			for _, g := range groups {
+				summary := fmt.Sprintf(" %-20s (%d svc", g.Host, len(g.Problems))
+				if g.CritCount > 0 {
+					summary += fmt.Sprintf(", %d crit", g.CritCount)
+				}
+				summary += ")"
+				if idx == m.popupCursor {
+					left.WriteString(selectedStyle.Render(summary) + "\n")
+				} else {
+					left.WriteString(summary + "\n")
+				}
+				for _, p := range g.Problems {
+					idx++
+					stateStyle := stateColors[p.State]
+					if stateStyle.GetForeground() == (lipgloss.NoColor{}) {
+						stateStyle = dimStyle
+					}
+					line := fmt.Sprintf("   %s %s", icingaStateLabel(p.State), p.Service)
+					if p.Acknowledged {
+						line += " [acked]"
+					}
+					if idx == m.popupCursor {
+						line = selectedStyle.Render(line)
+					} else {
+						line = stateStyle.Render(line)
+					}
+					left.WriteString(line + "\n")
+				}
+				idx++
+			}
 		} else {
 			for i, p := range filtered {
 				stateStyle := stateColors[p.State]
@@ -424,23 +894,84 @@ func renderIcingaPopup(m tuiModel) string {
 					stateStyle = dimStyle
 				}
 				label := icingaStateLabel(p.State)
-				header := fmt.Sprintf("  %s  %s / %s", label, p.Host, p.Service)
+				dur := formatDuration(p.Duration)
+				line := fmt.Sprintf(" %s %s / %s (%s)", label, p.Host, p.Service, dur)
+				if p.Acknowledged {
+					line += " [acked]"
+				}
+				if p.InDowntime {
+					line += " [dt]"
+				}
+				maxLine := listWidth - 2
+				if len(line) > maxLine {
+					line = line[:maxLine-3] + "..."
+				}
 				if i == m.popupCursor {
-					header = selectedStyle.Render(header)
+					line = selectedStyle.Render(line)
 				} else {
-					header = stateStyle.Render(header)
+					line = stateStyle.Render(line)
 				}
-				sb.WriteString(header + "\n")
-
-				if p.Output != "" {
-					sb.WriteString(dimStyle.Render("     -> "+p.Output) + "\n")
-				}
+				left.WriteString(line + "\n")
 			}
 		}
 	}
 
-	sb.WriteString("\n" + dimStyle.Render("  Alt+A/Alt+Z scroll | / filter | s sort | Enter act | r refresh | q/Esc close"))
-	return sb.String()
+	// ── Right: detail pane ──
+	var right strings.Builder
+	filtered := filteredIcingaProblems(m)
+	if m.popupCursor < len(filtered) {
+		p := filtered[m.popupCursor]
+		stateStyle := stateColors[p.State]
+		if stateStyle.GetForeground() == (lipgloss.NoColor{}) {
+			stateStyle = dimStyle
+		}
+
+		right.WriteString(detailLabelStyle.Render(p.Host+" / "+p.Service) + "\n\n")
+		right.WriteString(fmt.Sprintf(" State:    %s\n", stateStyle.Render(strings.TrimSpace(icingaStateLabel(p.State)))))
+		right.WriteString(fmt.Sprintf(" Duration: %s\n", formatDuration(p.Duration)))
+		right.WriteString(fmt.Sprintf(" Attempt:  %d/%d\n", p.CheckAttempt, p.MaxAttempts))
+		if !p.LastCheck.IsZero() {
+			right.WriteString(fmt.Sprintf(" Checked:  %s\n", p.LastCheck.Format("15:04:05")))
+		}
+		if p.Acknowledged {
+			right.WriteString(fmt.Sprintf(" Acked:    yes (%s)\n", p.AckAuthor))
+			if p.AckComment != "" {
+				right.WriteString(fmt.Sprintf("           %s\n", p.AckComment))
+			}
+		}
+		if p.InDowntime {
+			right.WriteString(" Downtime: active\n")
+		}
+		right.WriteString("\n")
+
+		// Full output
+		right.WriteString(detailLabelStyle.Render("Output:") + "\n")
+		output := p.FullOutput
+		if output == "" {
+			output = "(no output)"
+		}
+		// Word-wrap output to detail width
+		lines := wrapText(output, detailWidth-2)
+		maxLines := m.h - 14
+		if maxLines < 3 {
+			maxLines = 3
+		}
+		for i, line := range lines {
+			if i >= maxLines {
+				right.WriteString(dimStyle.Render(" ...") + "\n")
+				break
+			}
+			right.WriteString(" " + line + "\n")
+		}
+	}
+
+	// ── Compose split pane ──
+	leftStr := lipgloss.NewStyle().Width(listWidth).Render(left.String())
+	rightStr := lipgloss.NewStyle().Width(detailWidth).Render(right.String())
+	content := lipgloss.JoinHorizontal(lipgloss.Top, leftStr, " ", rightStr)
+
+	help := dimStyle.Render(" ↑↓ nav │ / filter │ s sort │ g group │ a ack │ d downtime │ Enter dispatch │ r refresh │ q close")
+	return content + "\n" + help
 }
 
 // ─── Action picker ──────────────────────────────────────────────────────────
@@ -475,39 +1006,34 @@ func renderActionPicker(m tuiModel) string {
 	sb.WriteString("  Spawn new session:\n")
 	sb.WriteString(prefix + "[New session with this task]\n")
 
-	sb.WriteString("\n" + dimStyle.Render("  Alt+A/Alt+Z select | Enter confirm | Esc cancel"))
+	sb.WriteString("\n" + dimStyle.Render("  ↑↓ select | Enter confirm | Esc cancel"))
 	return sb.String()
 }
 
 // submitFeedback creates a Plane issue in the SwarmOps feedback project.
 func submitFeedback(kind, summary string, api *apiClient, tuiSnapshot string) {
-	var apiURL, apiKey, workspace, projectID string
+	cfg, err := getPlaneConfig(api)
+	if err != nil {
+		log.Printf("feedback: %v", err)
+		return
+	}
+	feedbackProjectID := ""
 	if api != nil {
-		apiURL, _ = api.getConfig("plane.api_url")
-		apiKey, _ = api.getConfig("plane.api_key")
-		workspace, _ = api.getConfig("plane.workspace")
-		projectID, _ = api.getConfig("feedback.project_id")
-		if workspace == "" {
-			workspace = "thomkernet"
-		}
+		feedbackProjectID, _ = api.getConfig("feedback.project_id")
 	} else if globalConfigService != nil {
-		apiURL = globalConfigService.GetString("plane.api_url", "")
-		apiKey = globalConfigService.GetString("plane.api_key", "")
-		workspace = globalConfigService.GetString("plane.workspace", "thomkernet")
-		projectID = globalConfigService.GetString("feedback.project_id", "")
-	} else {
-		log.Printf("feedback: config service not initialized")
+		feedbackProjectID = globalConfigService.GetString("feedback.project_id", "")
+	}
+	if feedbackProjectID == "" {
+		log.Printf("feedback: feedback.project_id not configured")
 		return
 	}
-	if apiURL == "" || apiKey == "" || projectID == "" {
-		log.Printf("feedback: not configured (need plane.api_url, plane.api_key, feedback.project_id)")
-		return
-	}
+
 	prefix := "[bug] "
 	if kind == "feature" {
 		prefix = "[feature] "
 	}
-	url := fmt.Sprintf("%s/api/v1/workspaces/%s/projects/%s/issues/", strings.TrimRight(apiURL, "/"), workspace, projectID)
+	url := fmt.Sprintf("%s/api/v1/workspaces/%s/projects/%s/issues/",
+		strings.TrimRight(cfg.apiURL, "/"), cfg.workspace, feedbackProjectID)
 	issueData := map[string]string{"name": prefix + summary}
 	if tuiSnapshot != "" {
 		issueData["description_html"] = fmt.Sprintf("<p>%s</p><h3>TUI State at Report Time</h3><pre>%s</pre>",
@@ -519,7 +1045,7 @@ func submitFeedback(kind, summary string, api *apiClient, tuiSnapshot string) {
 		log.Printf("feedback: request error: %v", err)
 		return
 	}
-	req.Header.Set("X-API-Key", apiKey)
+	req.Header.Set("X-API-Key", cfg.apiKey)
 	req.Header.Set("Content-Type", "application/json")
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
@@ -532,4 +1058,74 @@ func submitFeedback(kind, summary string, api *apiClient, tuiSnapshot string) {
 		respBody, _ := io.ReadAll(resp.Body)
 		log.Printf("feedback: Plane returned %d: %s", resp.StatusCode, string(respBody))
 	}
+}
+
+// ─── Helpers ────────────────────────────────────────────────────────────────
+
+func formatDuration(d time.Duration) string {
+	if d < time.Minute {
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	}
+	if d < time.Hour {
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	}
+	if d < 24*time.Hour {
+		h := int(d.Hours())
+		m := int(d.Minutes()) % 60
+		if m > 0 {
+			return fmt.Sprintf("%dh%dm", h, m)
+		}
+		return fmt.Sprintf("%dh", h)
+	}
+	days := int(d.Hours()) / 24
+	hours := int(d.Hours()) % 24
+	if hours > 0 {
+		return fmt.Sprintf("%dd%dh", days, hours)
+	}
+	return fmt.Sprintf("%dd", days)
+}
+
+func wrapText(s string, width int) []string {
+	if width <= 0 {
+		return []string{s}
+	}
+	var lines []string
+	for _, line := range strings.Split(s, "\n") {
+		for len(line) > width {
+			// Find last space within width
+			cut := strings.LastIndex(line[:width], " ")
+			if cut <= 0 {
+				cut = width
+			}
+			lines = append(lines, line[:cut])
+			line = strings.TrimSpace(line[cut:])
+		}
+		lines = append(lines, line)
+	}
+	return lines
+}
+
+func stripHTMLTags(s string) string {
+	var out strings.Builder
+	inTag := false
+	for _, r := range s {
+		if r == '<' {
+			inTag = true
+			continue
+		}
+		if r == '>' {
+			inTag = false
+			continue
+		}
+		if !inTag {
+			out.WriteRune(r)
+		}
+	}
+	// Clean up excessive whitespace
+	result := strings.TrimSpace(out.String())
+	// Collapse multiple newlines
+	for strings.Contains(result, "\n\n\n") {
+		result = strings.ReplaceAll(result, "\n\n\n", "\n\n")
+	}
+	return result
 }

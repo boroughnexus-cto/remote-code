@@ -180,7 +180,10 @@ type tuiModel struct {
 	// Popup filter & sort
 	popupFilter       textinput.Model
 	popupFilterActive bool
-	popupSortMode     int // 0=default, 1, 2 — meaning depends on popup type
+	popupSortMode     int  // 0=default, 1, 2 — meaning depends on popup type
+	popupTriageMode   int  // Plane triage preset: 0=all, 1=started, 2=high+urgent, 3=backlog
+	icingaGroupByHost bool // Icinga: group problems by host
+	planeStates       map[string]string // state group → state ID for transitions
 
 	// Action picker (modePopupAction)
 	actionTarget    string        // display label for the selected item
@@ -537,7 +540,21 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			(msg.source == "icinga" && m.mode == modeIcingaAlerts && msg.reqID == m.icingaReqID) {
 			m.popupErr = msg.text
 		}
-		return m, nil
+
+	case popupActionDoneMsg:
+		m.flash = msg.flash
+		// Refresh data after write action
+		if m.mode == modePlaneIssues {
+			m.planeIssues = nil
+			m.planeReqID++
+			return m, tea.Batch(flashClearCmd(), fetchPlaneIssues(m.planeReqID, m.api))
+		}
+		if m.mode == modeIcingaAlerts {
+			m.icingaProblems = nil
+			m.icingaReqID++
+			return m, tea.Batch(flashClearCmd(), fetchIcingaProblems(m.icingaReqID, m.api))
+		}
+		return m, flashClearCmd()
 
 	case contextListMsg:
 		m.contexts = msg
@@ -916,7 +933,7 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if r.action == "enter" {
 			if m.popupCursor < len(filtered) {
 				issue := filtered[m.popupCursor]
-				m.openActionPicker(issue.Title, planeIssuePrompt(issue), modePlaneIssues)
+				m.openActionPicker(issue.Identifier+" "+issue.Title, planeIssuePrompt(issue), modePlaneIssues)
 			}
 		} else if r.action == "refresh" {
 			m.planeIssues = nil
@@ -925,6 +942,45 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		if r.handled {
 			return m, r.cmd
+		}
+		// Plane-specific keys (not handled by shared handler)
+		switch key {
+		case "p": // set In Progress
+			if m.popupCursor < len(filtered) {
+				issue := filtered[m.popupCursor]
+				if m.planeStates == nil {
+					m.planeStates = planeGetStates(m.api)
+				}
+				if stateID, ok := m.planeStates["started"]; ok {
+					m.flash = "Setting In Progress..."
+					return m, planeUpdateIssue(m.api, issue.ID, map[string]interface{}{"state": stateID})
+				}
+				m.flash = "No 'started' state found"
+			}
+		case "d": // set Done
+			if m.popupCursor < len(filtered) {
+				issue := filtered[m.popupCursor]
+				if m.planeStates == nil {
+					m.planeStates = planeGetStates(m.api)
+				}
+				if stateID, ok := m.planeStates["completed"]; ok {
+					m.flash = "Setting Done..."
+					return m, planeUpdateIssue(m.api, issue.ID, map[string]interface{}{"state": stateID})
+				}
+				m.flash = "No 'completed' state found"
+			}
+		case "1":
+			m.popupTriageMode = 1
+			m.popupCursor = 0
+		case "2":
+			m.popupTriageMode = 2
+			m.popupCursor = 0
+		case "3":
+			m.popupTriageMode = 3
+			m.popupCursor = 0
+		case "0":
+			m.popupTriageMode = 0
+			m.popupCursor = 0
 		}
 
 	case modeIcingaAlerts:
@@ -943,6 +999,34 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		if r.handled {
 			return m, r.cmd
+		}
+		// Icinga-specific keys
+		switch key {
+		case "a": // acknowledge
+			if m.popupCursor < len(filtered) {
+				problem := filtered[m.popupCursor]
+				if problem.Acknowledged {
+					m.flash = "Already acknowledged"
+				} else {
+					m.flash = "Acknowledging..."
+					return m, icingaAcknowledge(m.api, problem.ObjectName, "Acknowledged from SwarmOps TUI")
+				}
+			}
+		case "t": // schedule downtime (30m)
+			if m.popupCursor < len(filtered) {
+				problem := filtered[m.popupCursor]
+				m.flash = "Scheduling 30m downtime..."
+				return m, icingaScheduleDowntime(m.api, problem.ObjectName, 30*time.Minute, "Downtime from SwarmOps TUI (30m)")
+			}
+		case "T": // schedule downtime (2h)
+			if m.popupCursor < len(filtered) {
+				problem := filtered[m.popupCursor]
+				m.flash = "Scheduling 2h downtime..."
+				return m, icingaScheduleDowntime(m.api, problem.ObjectName, 2*time.Hour, "Downtime from SwarmOps TUI (2h)")
+			}
+		case "g": // toggle group by host
+			m.icingaGroupByHost = !m.icingaGroupByHost
+			m.popupCursor = 0
 		}
 
 	case modePopupAction:
@@ -1122,6 +1206,8 @@ func handlePopupKeyShared(m *tuiModel, msg tea.KeyMsg, filteredLen int, sortLabe
 		m.popupErr = ""
 		m.popupFilter.SetValue("")
 		m.popupSortMode = 0
+		m.popupTriageMode = 0
+		m.icingaGroupByHost = false
 		return popupKeyResult{handled: true}
 	case "alt+a", "up":
 		if filteredLen > 0 && m.popupCursor > 0 {

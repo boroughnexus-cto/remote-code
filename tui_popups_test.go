@@ -21,8 +21,8 @@ func fakePlaneIssues() []planeIssue {
 
 func fakeIcingaProblems() []icingaProblem {
 	return []icingaProblem{
-		{Host: "backup-fire", Service: "restic-backup", State: 2, Output: "Backup failed: exit code 1"},
-		{Host: "unraid", Service: "disk-temp", State: 1, Output: "Disk 3 temperature 52C"},
+		{Host: "backup-fire", Service: "restic-backup", State: 2, Output: "Backup failed: exit code 1", FullOutput: "Backup failed: exit code 1", ObjectName: "backup-fire!restic-backup"},
+		{Host: "unraid", Service: "disk-temp", State: 1, Output: "Disk 3 temperature 52C", FullOutput: "Disk 3 temperature 52C", ObjectName: "unraid!disk-temp"},
 	}
 }
 
@@ -35,13 +35,11 @@ func TestView_PlaneIssues(t *testing.T) {
 	view := viewStripped(m)
 
 	assertContains(t, view, "Plane Issues")
-	assertContains(t, view, "Fix auth middleware")
-	assertContains(t, view, "Add API rate limiting")
-	assertContains(t, view, "Update documentation")
+	assertContains(t, view, "Fix auth mid")  // truncated in split pane at 80 cols
+	assertContains(t, view, "Add API rate")
 	assertContains(t, view, "Refactor models")
 	assertContains(t, view, "started")
 	assertContains(t, view, "backlog")
-	assertContains(t, view, "unstarted")
 	assertContains(t, view, "close")
 	assertGolden(t, "view_plane", view)
 }
@@ -87,10 +85,9 @@ func TestView_IcingaAlerts(t *testing.T) {
 	assertContains(t, view, "CRITICAL")
 	assertContains(t, view, "backup-fire")
 	assertContains(t, view, "restic-backup")
-	assertContains(t, view, "Backup failed")
+	assertContains(t, view, "Backup failed") // in detail pane
 	assertContains(t, view, "WARNING")
 	assertContains(t, view, "unraid")
-	assertContains(t, view, "disk-temp")
 	assertContains(t, view, "close")
 	assertGolden(t, "view_icinga", view)
 }
@@ -721,7 +718,7 @@ func TestView_PlaneSortLabel(t *testing.T) {
 	m.popupSortMode = 1
 	view := viewStripped(m)
 
-	assertContains(t, view, "sorted: priority")
+	assertContains(t, view, "[priority]")
 }
 
 func TestView_IcingaSortLabel(t *testing.T) {
@@ -731,7 +728,7 @@ func TestView_IcingaSortLabel(t *testing.T) {
 	m.popupSortMode = 1
 	view := viewStripped(m)
 
-	assertContains(t, view, "sorted: severity")
+	assertContains(t, view, "[severity]")
 }
 
 // ─── View shows filter input ────────────────────────────────────────────────
@@ -758,7 +755,7 @@ func TestView_PopupHelpBar(t *testing.T) {
 
 	assertContains(t, view, "/ filter")
 	assertContains(t, view, "s sort")
-	assertContains(t, view, "Enter act")
+	assertContains(t, view, "Enter dispatch")
 }
 
 // ─── Action picker tests ────────────────────────────────────────────────────
@@ -777,8 +774,8 @@ func TestAction_OpenFromPlane(t *testing.T) {
 	if m.mode != modePopupAction {
 		t.Errorf("enter should open action picker, got mode %d", m.mode)
 	}
-	if m.actionTarget != "Fix auth middleware" {
-		t.Errorf("actionTarget should be issue title, got %q", m.actionTarget)
+	if !strings.Contains(m.actionTarget, "Fix auth middleware") {
+		t.Errorf("actionTarget should contain issue title, got %q", m.actionTarget)
 	}
 	if !strings.Contains(m.actionPrompt, "Fix auth middleware") {
 		t.Errorf("actionPrompt should contain issue title, got %q", m.actionPrompt)
@@ -956,7 +953,7 @@ func TestPlaneIssuePrompt(t *testing.T) {
 }
 
 func TestIcingaProblemPrompt(t *testing.T) {
-	problem := icingaProblem{Host: "web-01", Service: "http-check", State: 2, Output: "Connection refused"}
+	problem := icingaProblem{Host: "web-01", Service: "http-check", State: 2, Output: "Connection refused", FullOutput: "Connection refused"}
 	prompt := icingaProblemPrompt(problem)
 
 	if !strings.Contains(prompt, "http-check") {

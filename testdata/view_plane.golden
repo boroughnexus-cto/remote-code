@@ -1,8 +1,9 @@
-Plane Issues — Backlog & In Progress
-
-  !! [started   ] Fix auth middleware
-  !  [backlog   ] Add API rate limiting
-  -  [unstarted ] Update documentation
-     [backlog   ] Refactor models
-
-  Alt+A/Alt+Z scroll | / filter | s sort | Enter act | r refresh | q/Esc close
+Plane Issues                              — Fix auth middleware               
+                                                                              
+ !! #101    [started ] Fix auth mid...    State:    started                   
+ !  #102    [backlog ] Add API rate...    Priority: urgent                    
+ -  #103    [unstarted] Update docum...   Assigned: (none)                    
+    #104    [backlog ] Refactor models                                        
+                                          (no description)                    
+                                                                              
+ ↑↓ nav │ / filter │ s sort │ 1-3 triage │ p progress │ d done │ Enter dispatch │ r refresh │ q close
