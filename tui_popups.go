@@ -329,6 +329,18 @@ func planeUpdateIssue(api *apiClient, issueID string, updates map[string]interfa
 	}
 }
 
+// planeStatesMsg carries async-fetched Plane state IDs.
+type planeStatesMsg struct {
+	states map[string]string
+}
+
+// fetchPlaneStates returns a tea.Cmd that fetches state IDs asynchronously.
+func fetchPlaneStates(api *apiClient) tea.Cmd {
+	return func() tea.Msg {
+		return planeStatesMsg{states: planeGetStates(api)}
+	}
+}
+
 // planeGetStates fetches the state IDs for a project to enable state transitions.
 func planeGetStates(api *apiClient) map[string]string {
 	cfg, err := getPlaneConfig(api)

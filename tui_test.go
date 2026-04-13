@@ -703,7 +703,7 @@ func TestItemsMsg_UpdatesList(t *testing.T) {
 	items := []sidebarItem{
 		fakeSessionItem("new-session", "running"),
 	}
-	updated, _ := m.Update(itemsMsg(items))
+	updated, _ := m.Update(itemsMsg{items: items})
 	m = updated.(tuiModel)
 
 	if len(m.items) != 1 {
@@ -724,7 +724,7 @@ func TestItemsMsg_CursorClamp(t *testing.T) {
 	m.cursor = 2
 
 	// Now reduce to 1 item
-	updated, _ := m.Update(itemsMsg([]sidebarItem{fakeSessionItem("a", "running")}))
+	updated, _ := m.Update(itemsMsg{items: []sidebarItem{fakeSessionItem("a", "running")}})
 	m = updated.(tuiModel)
 
 	if m.cursor != 0 {

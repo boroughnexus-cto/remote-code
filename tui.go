@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -100,7 +99,10 @@ type flashClearMsg struct{} // auto-clear flash message
 type sessionsMsg []Session
 type terminalMsg string
 type contextListMsg []contextItem
-type itemsMsg []sidebarItem
+type itemsMsg struct {
+	items    []sidebarItem
+	captures []sessionCapture
+}
 
 type contextItem struct {
 	ID   string `json:"id"`
@@ -265,7 +267,7 @@ func initialModel(api *apiClient) tuiModel {
 }
 
 func (m tuiModel) Init() tea.Cmd {
-	return tea.Batch(tickCmd(), dataTickCmd(), loadItemsCmd(m.api, m.activityStates))
+	return tea.Batch(tickCmd(), dataTickCmd(), loadItemsCmd(m.api))
 }
 
 func tickCmd() tea.Cmd {
@@ -286,9 +288,18 @@ func flashClearCmd() tea.Cmd {
 	})
 }
 
+// sessionCapture holds raw tmux capture for a session, captured in the command goroutine.
+// Classification happens in the Update loop where activityStates is safely accessed.
+type sessionCapture struct {
+	tmuxSession string
+	capture     string // raw tmux capture-pane output (empty if stopped/failed)
+	alive       bool   // whether tmux capture succeeded
+}
+
 // loadItemsCmd returns a tea.Cmd that builds the unified sidebar list.
-// In client mode it fetches via HTTP; in server mode it calls in-process.
-func loadItemsCmd(api *apiClient, states map[string]*activityState) tea.Cmd {
+// Captures raw tmux pane content but does NOT classify activity (that happens in Update
+// via applyActivityClassification to avoid sharing the activityStates map with goroutines).
+func loadItemsCmd(api *apiClient) tea.Cmd {
 	return func() tea.Msg {
 		var sessions []Session
 		if api != nil {
@@ -300,18 +311,21 @@ func loadItemsCmd(api *apiClient, states map[string]*activityState) tea.Cmd {
 		}
 
 		var items []sidebarItem
+		var captures []sessionCapture
 
 		for _, s := range sessions {
 			activity := "stopped"
 			indicator := statusStopped
 			if s.Status == "running" {
 				indicator = statusRunning
-				st, ok := states[s.TmuxSession]
-				if !ok {
-					st = &activityState{}
-					states[s.TmuxSession] = st
+				// Capture tmux content in the goroutine (safe — no shared state)
+				out, err := exec.Command("tmux", "capture-pane", "-p", "-S", "-50", "-t", s.TmuxSession).Output()
+				cap := sessionCapture{tmuxSession: s.TmuxSession, alive: err == nil}
+				if err == nil {
+					cap.capture = string(out)
 				}
-				activity = detectActivity(s.TmuxSession, st)
+				captures = append(captures, cap)
+				activity = "pending" // placeholder — classified in Update
 			}
 			mission := ""
 			if s.Mission != nil {
@@ -395,7 +409,7 @@ func loadItemsCmd(api *apiClient, states map[string]*activityState) tea.Cmd {
 			}
 		}
 
-		return itemsMsg(items)
+		return itemsMsg{items: items, captures: captures}
 	}
 }
 
@@ -424,114 +438,7 @@ func loadTerminal(tmuxName string) tea.Cmd {
 	}
 }
 
-const contextMCPURL = "https://mcp-tkn-context.gate-hexatonic.ts.net/mcp"
-
-func fetchContexts() tea.Cmd {
-	return func() tea.Msg {
-		result, err := mcpToolCall(contextMCPURL, "context_list", map[string]interface{}{"limit": 50})
-		if err != nil {
-			return contextListMsg(nil)
-		}
-		var items []contextItem
-		for _, block := range result {
-			var item contextItem
-			if json.Unmarshal([]byte(block), &item) == nil && item.Name != "" {
-				items = append(items, item)
-			}
-		}
-		return contextListMsg(items)
-	}
-}
-
-// fetchContextContent fetches rendered content for a context by name.
-type contextContentMsg struct {
-	name    string
-	content string
-	err     error
-}
-
-func fetchContextContent(name string) tea.Cmd {
-	return func() tea.Msg {
-		result, err := mcpToolCall(contextMCPURL, "context_render", map[string]interface{}{"name_or_id": name})
-		if err != nil {
-			return contextContentMsg{name: name, err: err}
-		}
-		if len(result) > 0 {
-			return contextContentMsg{name: name, content: result[0]}
-		}
-		return contextContentMsg{name: name, err: fmt.Errorf("empty response")}
-	}
-}
-
-// mcpToolCall makes a JSON-RPC tools/call to an MCP server via streamable-http.
-// Returns the text content blocks from the tool result.
-func mcpToolCall(serverURL, toolName string, args map[string]interface{}) ([]string, error) {
-	payload := map[string]interface{}{
-		"jsonrpc": "2.0",
-		"id":      1,
-		"method":  "tools/call",
-		"params": map[string]interface{}{
-			"name":      toolName,
-			"arguments": args,
-		},
-	}
-	body, _ := json.Marshal(payload)
-	req, err := http.NewRequest("POST", serverURL, bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json, text/event-stream")
-
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	respBody, _ := io.ReadAll(resp.Body)
-
-	// Parse SSE response: extract "data: " lines
-	var jsonData []byte
-	for _, line := range strings.Split(string(respBody), "\n") {
-		if strings.HasPrefix(line, "data: ") {
-			jsonData = []byte(strings.TrimPrefix(line, "data: "))
-			break
-		}
-	}
-	if jsonData == nil {
-		// Try as plain JSON
-		jsonData = respBody
-	}
-
-	var rpcResp struct {
-		Result struct {
-			Content []struct {
-				Type string `json:"type"`
-				Text string `json:"text"`
-			} `json:"content"`
-			IsError bool `json:"isError"`
-		} `json:"result"`
-		Error *struct {
-			Message string `json:"message"`
-		} `json:"error"`
-	}
-	if err := json.Unmarshal(jsonData, &rpcResp); err != nil {
-		return nil, fmt.Errorf("parse MCP response: %w", err)
-	}
-	if rpcResp.Error != nil {
-		return nil, fmt.Errorf("MCP error: %s", rpcResp.Error.Message)
-	}
-
-	var texts []string
-	for _, c := range rpcResp.Result.Content {
-		if c.Type == "text" {
-			texts = append(texts, c.Text)
-		}
-	}
-	return texts, nil
-}
+// Context fetching and MCP client helpers are in mcp_client.go
 
 // ─── Update ──────────────────────────────────────────────────────────────────
 
@@ -573,14 +480,36 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case dataTickMsg:
 		// Slow tick (2s): HTTP data refresh (sessions, pool status, activity detection)
-		return m, tea.Batch(dataTickCmd(), loadItemsCmd(m.api, m.activityStates))
+		return m, tea.Batch(dataTickCmd(), loadItemsCmd(m.api))
 
 	case flashClearMsg:
 		m.flash = ""
 		return m, nil
 
 	case itemsMsg:
-		m.items = msg
+		// Classify activity in the Update loop (single-threaded) using captures from the command
+		for i := range msg.items {
+			item := &msg.items[i]
+			if item.kind == itemSession && item.activity == "pending" {
+				// Find matching capture
+				for _, cap := range msg.captures {
+					if cap.tmuxSession == item.tmuxSession {
+						if !cap.alive {
+							item.activity = "stopped"
+						} else {
+							st, ok := m.activityStates[cap.tmuxSession]
+							if !ok {
+								st = &activityState{}
+								m.activityStates[cap.tmuxSession] = st
+							}
+							item.activity = classifyActivity(cap.capture, st)
+						}
+						break
+					}
+				}
+			}
+		}
+		m.items = msg.items
 		if m.cursor >= len(m.items) && len(m.items) > 0 {
 			m.cursor = len(m.items) - 1
 		}
@@ -636,6 +565,10 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.popupErr = msg.text
 		}
 
+	case planeStatesMsg:
+		m.planeStates = msg.states
+		return m, nil
+
 	case popupActionDoneMsg:
 		m.flash = msg.flash
 		// Refresh data after write action
@@ -666,7 +599,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.doSpawn(nil, nil)
 			m.mode = modePassthrough
 		}
-		return m, loadItemsCmd(m.api, m.activityStates)
+		return m, loadItemsCmd(m.api)
 
 	case contextContentMsg:
 		if msg.err != nil {
@@ -678,7 +611,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			enrichedPrompt := msg.content + "\n\n---\n\n" + m.actionPrompt
 			m.doDispatch(enrichedPrompt)
 		}
-		return m, loadItemsCmd(m.api, m.activityStates)
+		return m, loadItemsCmd(m.api)
 
 	case tea.MouseMsg:
 		if m.mode == modePassthrough && m.vpReady {
@@ -735,7 +668,7 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					deleteSession(context.Background(), item.sessionID)
 				}
 				m.flash = fmt.Sprintf("✓ Deleted %s", item.label)
-				return m, tea.Batch(loadItemsCmd(m.api, m.activityStates), flashClearCmd())
+				return m, tea.Batch(loadItemsCmd(m.api), flashClearCmd())
 			}
 			return m, nil
 		case "alt+s":
@@ -805,7 +738,11 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.popupCursor = 0
 			m.flash = ""
 			m.planeReqID++
-			return m, fetchPlaneIssues(m.planeReqID, m.api)
+			cmds := []tea.Cmd{fetchPlaneIssues(m.planeReqID, m.api)}
+			if m.planeStates == nil {
+				cmds = append(cmds, fetchPlaneStates(m.api))
+			}
+			return m, tea.Batch(cmds...)
 		case "alt+i":
 			m.mode = modeIcingaAlerts
 			m.icingaProblems = nil
@@ -937,7 +874,7 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.flash = fmt.Sprintf("Renamed to %s", newName)
 			}
 			m.mode = modePassthrough
-			return m, loadItemsCmd(m.api, m.activityStates)
+			return m, loadItemsCmd(m.api)
 		case "esc":
 			m.mode = modePassthrough
 			m.flash = ""
@@ -968,7 +905,7 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 			}
 			m.mode = modePassthrough
-			return m, tea.Batch(loadItemsCmd(m.api, m.activityStates), flashClearCmd())
+			return m, tea.Batch(loadItemsCmd(m.api), flashClearCmd())
 		case "esc":
 			m.mode = modePassthrough
 			m.flash = ""
@@ -1034,7 +971,7 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			m.mode = modePassthrough
 			m.flash = ""
-			return m, loadItemsCmd(m.api, m.activityStates)
+			return m, loadItemsCmd(m.api)
 		case "esc":
 			m.mode = modePassthrough
 			m.flash = ""
@@ -1060,10 +997,11 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch key {
 		case "p": // set In Progress
 			if m.popupCursor < len(filtered) {
-				issue := filtered[m.popupCursor]
 				if m.planeStates == nil {
-					m.planeStates = planeGetStates(m.api)
+					m.flash = "Loading states..."
+					return m, fetchPlaneStates(m.api)
 				}
+				issue := filtered[m.popupCursor]
 				if stateID, ok := m.planeStates["started"]; ok {
 					m.flash = "Setting In Progress..."
 					return m, planeUpdateIssue(m.api, issue.ID, map[string]interface{}{"state": stateID})
@@ -1072,10 +1010,11 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		case "d": // set Done
 			if m.popupCursor < len(filtered) {
-				issue := filtered[m.popupCursor]
 				if m.planeStates == nil {
-					m.planeStates = planeGetStates(m.api)
+					m.flash = "Loading states..."
+					return m, fetchPlaneStates(m.api)
 				}
+				issue := filtered[m.popupCursor]
 				if stateID, ok := m.planeStates["completed"]; ok {
 					m.flash = "Setting Done..."
 					return m, planeUpdateIssue(m.api, issue.ID, map[string]interface{}{"state": stateID})
@@ -1940,14 +1879,6 @@ func classifyActivity(capture string, state *activityState) string {
 	return "working"
 }
 
-// detectActivity captures tmux pane and classifies activity using the state machine.
-func detectActivity(tmuxSession string, state *activityState) string {
-	out, err := exec.Command("tmux", "capture-pane", "-p", "-S", "-50", "-t", tmuxSession).Output()
-	if err != nil {
-		return "stopped"
-	}
-	return classifyActivity(string(out), state)
-}
 
 // fnvHash computes a quick FNV-1a hash for change detection.
 func fnvHash(s string) uint64 {
