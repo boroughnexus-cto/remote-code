@@ -487,8 +487,8 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if contentWidth < 20 {
 			contentWidth = 20
 		}
-		// Match sidebar: status line (1) + sidebar padding (2) + content header (2)
-		contentHeight := m.h - headerHeight - 1 - 2 - 2
+		// Match sidebar: status line (2) + sidebar padding (2) + content header (2)
+		contentHeight := m.h - headerHeight - 2 - 2 - 2
 		if contentHeight < 5 {
 			contentHeight = 5
 		}
@@ -590,7 +590,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if contentWidth < 20 {
 				contentWidth = 20
 			}
-			contentHeight := m.h - headerHeight - 1 - 2 - 2
+			contentHeight := m.h - headerHeight - 2 - 2 - 2
 			if contentHeight < 5 {
 				contentHeight = 5
 			}
@@ -1689,12 +1689,12 @@ func (m tuiModel) renderSidebar() string {
 		lines = append(lines, dimStyle.Render(" (no sessions)"))
 	}
 
-	for len(lines) < m.h-2 {
+	for len(lines) < m.h-3 {
 		lines = append(lines, "")
 	}
 
-	// Height accounts for: top bar (headerHeight), status line (1), sidebar vertical padding (2)
-	sideHeight := m.h - headerHeight - 1 - 2
+	// Height accounts for: top bar (headerHeight), status line (2), sidebar vertical padding (2)
+	sideHeight := m.h - headerHeight - 2 - 2
 	if sideHeight < 3 {
 		sideHeight = 3
 	}
