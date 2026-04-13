@@ -80,7 +80,7 @@ type sidebarItem struct {
 	sessionID   string
 	tmuxSession string
 	status      string
-	activity    string // "stopped", "working", "awaiting"
+	activity    string // "stopped", "working", "awaiting_input", "idle"
 	mission     string // optional mission statement
 	directory   string // working directory for session restart
 	// Pool slot fields
@@ -94,14 +94,18 @@ type sidebarItem struct {
 
 // ─── Messages ────────────────────────────────────────────────────────────────
 
-type tickMsg time.Time     // fast animation tick (150ms)
-type dataTickMsg time.Time // slow data refresh tick (2s)
-type flashClearMsg struct{} // auto-clear flash message
+type tickMsg time.Time         // fast animation tick (150ms)
+type dataTickMsg time.Time     // slow data refresh tick (2s)
+type activityTickMsg time.Time // activity detection tick (1s)
+type flashClearMsg struct{}    // auto-clear flash message
 type sessionsMsg []Session
 type terminalMsg string
 type contextListMsg []contextItem
 type itemsMsg struct {
 	items    []sidebarItem
+	captures []sessionCapture
+}
+type activityCaptureMsg struct {
 	captures []sessionCapture
 }
 
@@ -158,8 +162,9 @@ type tuiModel struct {
 	contexts        []contextItem
 	ctxCursor       int
 
-	// Per-session activity state for hysteresis/diff detection
-	activityStates map[string]*activityState
+	// Per-session activity state for diff detection and 1-tick damper
+	activityStates    map[string]*activityState
+	activityInflight  bool // true while a captureActivityCmd is running
 
 	// Terminal content cache
 	termContent string
@@ -268,7 +273,7 @@ func initialModel(api *apiClient) tuiModel {
 }
 
 func (m tuiModel) Init() tea.Cmd {
-	return tea.Batch(tickCmd(), dataTickCmd(), loadItemsCmd(m.api))
+	return tea.Batch(tickCmd(), dataTickCmd(), activityTickCmd(), loadItemsCmd(m.api))
 }
 
 func tickCmd() tea.Cmd {
@@ -281,6 +286,32 @@ func dataTickCmd() tea.Cmd {
 	return tea.Tick(2*time.Second, func(t time.Time) tea.Msg {
 		return dataTickMsg(t)
 	})
+}
+
+func activityTickCmd() tea.Cmd {
+	return tea.Tick(1*time.Second, func(t time.Time) tea.Msg {
+		return activityTickMsg(t)
+	})
+}
+
+// captureActivityCmd captures tmux panes for all running sessions without reloading from DB.
+func captureActivityCmd(items []sidebarItem) tea.Cmd {
+	return func() tea.Msg {
+		var captures []sessionCapture
+		for _, item := range items {
+			if item.kind == itemSession && item.status == "running" {
+				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+				out, err := exec.CommandContext(ctx, "tmux", "capture-pane", "-p", "-S", "-100", "-t", item.tmuxSession).Output()
+				cancel()
+				cap := sessionCapture{tmuxSession: item.tmuxSession, alive: err == nil}
+				if err == nil {
+					cap.capture = string(out)
+				}
+				captures = append(captures, cap)
+			}
+		}
+		return activityCaptureMsg{captures: captures}
+	}
 }
 
 func flashClearCmd() tea.Cmd {
@@ -320,7 +351,7 @@ func loadItemsCmd(api *apiClient) tea.Cmd {
 			if s.Status == "running" {
 				indicator = statusRunning
 				// Capture tmux content in the goroutine (safe — no shared state)
-				out, err := exec.Command("tmux", "capture-pane", "-p", "-S", "-50", "-t", s.TmuxSession).Output()
+				out, err := exec.Command("tmux", "capture-pane", "-p", "-S", "-100", "-t", s.TmuxSession).Output()
 				cap := sessionCapture{tmuxSession: s.TmuxSession, alive: err == nil}
 				if err == nil {
 					cap.capture = string(out)
@@ -480,8 +511,43 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Batch(cmds...)
 
+	case activityTickMsg:
+		// 1s tick: capture tmux panes for activity classification only (no DB reload)
+		// Skip if a previous capture is still in flight to prevent overlap/stale results
+		if m.activityInflight {
+			return m, activityTickCmd()
+		}
+		m.activityInflight = true
+		return m, tea.Batch(activityTickCmd(), captureActivityCmd(m.items))
+
+	case activityCaptureMsg:
+		m.activityInflight = false
+		// Classify activity from the 1s capture tick
+		for i := range m.items {
+			item := &m.items[i]
+			if item.kind != itemSession || item.status != "running" {
+				continue
+			}
+			for _, cap := range msg.captures {
+				if cap.tmuxSession == item.tmuxSession {
+					if !cap.alive {
+						item.activity = "stopped"
+					} else {
+						st, ok := m.activityStates[cap.tmuxSession]
+						if !ok {
+							st = &activityState{}
+							m.activityStates[cap.tmuxSession] = st
+						}
+						item.activity = classifyActivity(cap.capture, st)
+					}
+					break
+				}
+			}
+		}
+		return m, nil
+
 	case dataTickMsg:
-		// Slow tick (2s): HTTP data refresh (sessions, pool status, activity detection)
+		// Slow tick (2s): HTTP data refresh (sessions, pool status)
 		return m, tea.Batch(dataTickCmd(), loadItemsCmd(m.api))
 
 	case flashClearMsg:
@@ -1742,26 +1808,22 @@ func (m tuiModel) renderContextPicker() string {
 // stripANSI removes ANSI escape sequences from a string.
 var ansiRe = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
 
-// ─── Activity detector — state machine with prioritized rules ───────────────
+// ─── Activity detector — prioritized classifier ─────────────────────────────
 //
-// States: "stopped" | "blocked" | "working" | "idle"
-// Priority: stopped > blocked > working > idle
+// States: "stopped" | "awaiting_input" | "working" | "idle"
+// Priority order (highest wins):
+//   1. Permission/menu/question prompts → awaiting_input
+//   2. Prompt with user-typed text      → awaiting_input
+//   3. Spinner / tool running / content changed → working
+//   4. Bare prompt, stable              → idle
 //
-// Signals:
-//   - Spinner lines (✶ Percolating…) → strong working
-//   - Tool "Running…" lines → strong working
-//   - Content changed since last poll → working
-//   - Permission prompts → blocked
-//   - Bare prompt + stable content → idle
-//
-// Hysteresis: working signals stay sticky for 4s (2 data ticks).
-// Idle requires 2+ consecutive stable polls.
+// Polled every 1s via activityTickCmd. Single-tick damper: if previous state
+// was "working" and current tick is ambiguous, holds "working" for one more tick.
 
 // activityState tracks per-session state for the activity detector.
 type activityState struct {
-	prevHash     uint64    // hash of previous capture for diff detection
-	lastWorking  time.Time // when last strong working signal was seen
-	stablePolls  int       // consecutive polls with no change and no working signal
+	prevHash     uint64 // hash of previous capture for diff detection
+	prevActivity string // previous classification for 1-tick hold
 }
 
 // Patterns for activity detection — compiled once.
@@ -1773,38 +1835,30 @@ var (
 	// Tool running: "⎿  Running…" or "⎿  Running..."
 	toolRunningRe = regexp.MustCompile(`^\s*⎿\s+Running[…\.]{1,3}`)
 
-	// Tool header: "● ToolName(" — indicates tool invocation
-	toolHeaderRe = regexp.MustCompile(`^●\s+\w+\(`)
+	// Permission/approval/menu prompts (blocking — highest priority)
+	permissionRe = regexp.MustCompile(`(?i)(do you want to proceed|esc to cancel|allow|deny|yes/no|approve|pick a number|\(y/n\)|proceed\?)`)
 
-	// Permission/approval prompts
-	permissionRe = regexp.MustCompile(`(?i)(do you want to proceed|esc to cancel|allow|deny|yes/no|approve)`)
+	// Prompt line: ❯ at start (with or without trailing user text)
+	promptRe = regexp.MustCompile(`^❯`)
 
-	// Bare prompt at bottom
-	promptRe = regexp.MustCompile(`^❯\s{0,2}$|^>\s*$|\$\s*$|#\s*$`)
+	// Bare prompt: ❯ with no user-typed text after it
+	barePromptRe = regexp.MustCompile(`^❯\s*$`)
+
+	// Shell prompt (session fell through to shell) — all alternations start-anchored
+	shellPromptRe = regexp.MustCompile(`^(>\s*|\$\s*|#\s*)$`)
 
 	// Chrome lines to skip (status bar, separators, model info)
 	chromeRe = regexp.MustCompile(`^──|^\[.*\]\s+\S+.*\|.*ctx|bypass permissions|^Claude\s+(MAX|Pro|Free)|^\[.*\]\s+nuc|⏵⏵`)
 )
 
-const (
-	workingTTL    = 4 * time.Second // keep working sticky after last strong signal
-	idleThreshold = 2               // consecutive stable polls before declaring idle
-)
-
 // classifyActivity analyses captured tmux lines and session state to determine activity.
 // Exported for testing. Does not call tmux — operates on pre-captured text.
 func classifyActivity(capture string, state *activityState) string {
-	now := time.Now()
 	lines := strings.Split(strings.TrimRight(capture, "\n"), "\n")
 
-	// --- Hash for diff detection ---
-	hash := fnvHash(capture)
-	contentChanged := state.prevHash != 0 && hash != state.prevHash
-	state.prevHash = hash
-
-	// --- Scan bottom-up, collect meaningful lines (up to 50) ---
+	// --- Scan bottom-up, collect meaningful lines (up to 100) ---
 	var meaningful []string
-	for i := len(lines) - 1; i >= 0 && len(meaningful) < 50; i-- {
+	for i := len(lines) - 1; i >= 0 && len(meaningful) < 100; i-- {
 		line := strings.TrimSpace(ansiRe.ReplaceAllString(lines[i], ""))
 		if line == "" {
 			continue
@@ -1815,85 +1869,83 @@ func classifyActivity(capture string, state *activityState) string {
 		meaningful = append(meaningful, line)
 	}
 
-	// --- Priority 1: Blocked (permission prompts) ---
+	// --- Hash meaningful content (not raw capture) for diff detection ---
+	// This avoids false "working" from ANSI/chrome noise changes.
+	// Skip hash update on empty meaningful content to prevent false diffs after capture glitches.
+	contentChanged := false
+	if len(meaningful) > 0 {
+		hash := fnvHash(strings.Join(meaningful, "\n"))
+		contentChanged = state.prevHash != 0 && hash != state.prevHash
+		state.prevHash = hash
+	}
+
+	// --- Priority 1: Permission/menu prompts → awaiting_input ---
 	for _, line := range meaningful {
 		if permissionRe.MatchString(line) {
-			state.lastWorking = now
-			state.stablePolls = 0
-			return "blocked"
+			state.prevActivity = "awaiting_input"
+			return "awaiting_input"
 		}
 	}
 
-	// --- Priority 2: Working (strong signals) ---
-	strongWorking := false
+	// --- Priority 2: Prompt with user-typed text → awaiting_input ---
+	// User is typing at the prompt — hash changes from typing should NOT be "working"
+	if len(meaningful) > 0 && promptRe.MatchString(meaningful[0]) && !barePromptRe.MatchString(meaningful[0]) {
+		state.prevActivity = "awaiting_input"
+		return "awaiting_input"
+	}
 
-	// Spinner detection (near bottom — check first 10 meaningful lines)
-	limit := 10
+	// --- Priority 3: Question from Claude → awaiting_input ---
+	// Search for the most recent assistant-like line (skip prompts, spinners, tool markers).
+	// meaningful is newest-first, so we scan forward to find the first assistant output line.
+	if len(meaningful) > 0 {
+		for _, line := range meaningful {
+			// Skip prompt lines
+			if promptRe.MatchString(line) || shellPromptRe.MatchString(line) {
+				continue
+			}
+			// Skip spinner/tool lines (these are working signals, not assistant text)
+			if spinnerRe.MatchString(line) || toolRunningRe.MatchString(line) {
+				break // spinner found — this is a working session, skip question check
+			}
+			// First non-prompt, non-spinner line is the most recent assistant output
+			if strings.HasSuffix(strings.TrimSpace(line), "?") {
+				state.prevActivity = "awaiting_input"
+				return "awaiting_input"
+			}
+			break // only check the first assistant-like line
+		}
+	}
+
+	// --- Priority 4: Working signals ---
+	limit := 15
 	if len(meaningful) < limit {
 		limit = len(meaningful)
 	}
+
+	// Spinner or tool-running detection (near bottom)
 	for _, line := range meaningful[:limit] {
-		if spinnerRe.MatchString(line) {
-			strongWorking = true
-			break
+		if spinnerRe.MatchString(line) || toolRunningRe.MatchString(line) {
+			state.prevActivity = "working"
+			return "working"
 		}
 	}
 
-	// Tool "Running…" detection
-	if !strongWorking {
-		for _, line := range meaningful[:limit] {
-			if toolRunningRe.MatchString(line) {
-				strongWorking = true
-				break
-			}
-		}
-	}
-
-	// Tool header near bottom (weaker but still indicative if recent)
-	if !strongWorking && len(meaningful) > 0 {
-		for _, line := range meaningful[:limit] {
-			if toolHeaderRe.MatchString(line) {
-				// Only count as working if content also changed
-				if contentChanged {
-					strongWorking = true
-				}
-				break
-			}
-		}
-	}
-
-	// Content changed = working (catches plain text streaming without spinners)
+	// Content changed (and not typing — that's caught above in Priority 2)
 	if contentChanged {
-		strongWorking = true
-	}
-
-	if strongWorking {
-		state.lastWorking = now
-		state.stablePolls = 0
+		state.prevActivity = "working"
 		return "working"
 	}
 
-	// --- Working TTL: stay working if recent strong signal ---
-	if now.Sub(state.lastWorking) < workingTTL {
+	// --- 1-tick hold: if previous was "working", hold for one more tick ---
+	// Prevents flicker when Claude pauses briefly between tool calls
+	if state.prevActivity == "working" {
+		state.prevActivity = "idle" // next tick will be idle if still no signal
 		return "working"
 	}
 
-	// --- Priority 3: Idle (prompt visible + stable) ---
-	state.stablePolls++
-
-	if len(meaningful) > 0 && promptRe.MatchString(meaningful[0]) {
-		if state.stablePolls >= idleThreshold {
-			return "idle"
-		}
-		return "working" // not stable enough yet
-	}
-
-	// No meaningful content and no working signals — treat as idle if stable
-	if len(meaningful) == 0 && state.stablePolls >= idleThreshold {
-		return "idle"
-	}
-
-	return "working"
+	// --- Priority 5: Idle ---
+	state.prevActivity = "idle"
+	return "idle"
 }
 
 
@@ -1919,8 +1971,8 @@ func animatedIndicator(activity string, frame int) string {
 	case "working":
 		f := spinnerFrames[frame%len(spinnerFrames)]
 		return lipgloss.NewStyle().Foreground(lipgloss.Color("#00ff00")).Render(f)
-	case "blocked":
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("#ffaa00")).Render("⊘")
+	case "awaiting_input":
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("#ffaa00")).Render("?")
 	default:
 		return statusStopped
 	}

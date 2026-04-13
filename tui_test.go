@@ -1042,18 +1042,14 @@ func TestClassifyActivity_IdlePrompt(t *testing.T) {
   ⏵⏵ bypass permissions on (shift+tab to cycle)
 `
 	state := &activityState{}
-	// First call: prevHash is 0, so contentChanged is false but stablePolls starts at 0
-	classifyActivity(capture, state)
-	// Second call: same content, stablePolls=1
-	classifyActivity(capture, state)
-	// Third call: same content, stablePolls=2 → should be idle
+	// First call: bare prompt, no prior activity → idle immediately
 	result := classifyActivity(capture, state)
 	if result != "idle" {
-		t.Errorf("stable prompt should be idle after 3 polls, got %q", result)
+		t.Errorf("bare prompt should be idle on first poll, got %q", result)
 	}
 }
 
-func TestClassifyActivity_PermissionBlocked(t *testing.T) {
+func TestClassifyActivity_PermissionAwaitingInput(t *testing.T) {
 	capture := `● Edit(/home/sbarker/swarmops/main.go)
   Do you want to proceed? (y/n)
 
@@ -1064,34 +1060,89 @@ func TestClassifyActivity_PermissionBlocked(t *testing.T) {
 `
 	state := &activityState{}
 	result := classifyActivity(capture, state)
-	if result != "blocked" {
-		t.Errorf("permission prompt should be blocked, got %q", result)
+	if result != "awaiting_input" {
+		t.Errorf("permission prompt should be awaiting_input, got %q", result)
+	}
+}
+
+func TestClassifyActivity_UserTyping(t *testing.T) {
+	// User has typed text at the prompt — should be awaiting_input, not working
+	capture := `  some previous output
+
+──────────────────────────────────────────────────────────────────────
+❯ didnt seem to
+──────────────────────────────────────────────────────────────────────
+  [Opus 4.6] nuc | ctx 19% 187k
+`
+	state := &activityState{}
+	result := classifyActivity(capture, state)
+	if result != "awaiting_input" {
+		t.Errorf("prompt with user text should be awaiting_input, got %q", result)
+	}
+}
+
+func TestClassifyActivity_UserTypingHashChange(t *testing.T) {
+	// User typing causes hash changes — should still be awaiting_input, not working
+	state := &activityState{}
+	capture1 := `some output
+──────────────────────────────────────────────────────────────────────
+❯ hel
+──────────────────────────────────────────────────────────────────────
+  [Opus 4.6] nuc | ctx 5% 50k
+`
+	classifyActivity(capture1, state)
+
+	capture2 := `some output
+──────────────────────────────────────────────────────────────────────
+❯ hello wor
+──────────────────────────────────────────────────────────────────────
+  [Opus 4.6] nuc | ctx 5% 50k
+`
+	result := classifyActivity(capture2, state)
+	if result != "awaiting_input" {
+		t.Errorf("typing at prompt with hash change should be awaiting_input, got %q", result)
+	}
+}
+
+func TestClassifyActivity_QuestionFromClaude(t *testing.T) {
+	// Claude asked a question — should be awaiting_input
+	capture := `  I've made the changes. Want to try speaking in the Discord voice channel to verify?
+
+──────────────────────────────────────────────────────────────────────
+❯
+──────────────────────────────────────────────────────────────────────
+  [Opus 4.6] nuc | ctx 19% 187k
+`
+	state := &activityState{}
+	result := classifyActivity(capture, state)
+	if result != "awaiting_input" {
+		t.Errorf("question from Claude should be awaiting_input, got %q", result)
 	}
 }
 
 func TestClassifyActivity_ContentChanged(t *testing.T) {
 	state := &activityState{}
-	// First poll
+	// First poll — bare prompt, idle
 	capture1 := `some output line 1
 ❯
 `
 	classifyActivity(capture1, state)
 
-	// Second poll: different content
+	// Second poll: different content (new output streaming)
 	capture2 := `some output line 1
 some output line 2
-❯
+some output line 3
 `
 	result := classifyActivity(capture2, state)
 	if result != "working" {
-		t.Errorf("content change should be working, got %q", result)
+		t.Errorf("content change without prompt should be working, got %q", result)
 	}
 }
 
-func TestClassifyActivity_WorkingTTL(t *testing.T) {
+func TestClassifyActivity_OneTickHold(t *testing.T) {
 	state := &activityState{}
 
-	// Trigger a working signal
+	// Trigger a working signal via spinner
 	capture1 := `✶ Thinking… (5s)
 ❯
 `
@@ -1100,13 +1151,25 @@ func TestClassifyActivity_WorkingTTL(t *testing.T) {
 		t.Errorf("spinner should be working, got %q", result)
 	}
 
-	// Same content (spinner gone, just prompt) — should still be working due to TTL
+	// Next tick: spinner gone, just prompt, content changed → working (content change)
 	capture2 := `some old output
 ❯
 `
 	result = classifyActivity(capture2, state)
 	if result != "working" {
-		t.Errorf("should be working due to TTL, got %q", result)
+		t.Errorf("content changed should be working, got %q", result)
+	}
+
+	// Third tick: same content, no spinner — should hold working for 1 tick (damper)
+	result = classifyActivity(capture2, state)
+	if result != "working" {
+		t.Errorf("should hold working for 1 tick (damper), got %q", result)
+	}
+
+	// Fourth tick: still same content — hold expired, now idle
+	result = classifyActivity(capture2, state)
+	if result != "idle" {
+		t.Errorf("should be idle after hold expired, got %q", result)
 	}
 }
 
@@ -1118,15 +1181,10 @@ func TestClassifyActivity_EmptyCapture(t *testing.T) {
   Claude MAX
   ⏵⏵ bypass permissions on
 `
-	// Call 1: stablePolls=1 (not enough), returns working
+	// No meaningful lines, no prior working state → idle
 	result := classifyActivity(capture, state)
-	if result != "working" {
-		t.Errorf("first poll should be working (not stable yet), got %q", result)
-	}
-	// Call 2: stablePolls=2 >= threshold, returns idle
-	result = classifyActivity(capture, state)
 	if result != "idle" {
-		t.Errorf("second poll should be idle (stable), got %q", result)
+		t.Errorf("empty capture should be idle, got %q", result)
 	}
 }
 
@@ -1142,11 +1200,11 @@ func TestClassifyActivity_FnvHashDiffers(t *testing.T) {
 	}
 }
 
-func TestAnimatedIndicator_Blocked(t *testing.T) {
-	ind := animatedIndicator("blocked", 0)
+func TestAnimatedIndicator_AwaitingInput(t *testing.T) {
+	ind := animatedIndicator("awaiting_input", 0)
 	stripped := xansi.Strip(ind)
-	if stripped != "⊘" {
-		t.Errorf("blocked indicator should be ⊘, got %q", stripped)
+	if stripped != "?" {
+		t.Errorf("awaiting_input indicator should be ?, got %q", stripped)
 	}
 }
 
@@ -1157,7 +1215,7 @@ func TestAnimatedIndicator_AllStates(t *testing.T) {
 	}{
 		{"idle", "●"},
 		{"working", "⠋"},
-		{"blocked", "⊘"},
+		{"awaiting_input", "?"},
 		{"stopped", "○"},
 	}
 	for _, tt := range tests {
