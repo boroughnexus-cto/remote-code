@@ -481,7 +481,7 @@ func (m *tuiModel) doSpawn(contextID, contextName *string) {
 	if dir == "" {
 		dir = os.Getenv("HOME")
 	}
-	s, err := spawnSession(context.Background(), name, dir, contextID, contextName)
+	s, err := spawnSession(context.Background(), name, dir, contextID, contextName, "")
 	if err != nil {
 		m.flash = "Spawn error: " + err.Error()
 	} else {
