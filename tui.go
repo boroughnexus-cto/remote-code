@@ -201,7 +201,8 @@ type tuiModel struct {
 	// Feedback submission
 	feedbackInput    textinput.Model
 	feedbackType     int // 0=bug, 1=feature
-	feedbackSnapshot string // TUI state captured at Alt+F press
+	feedbackSnapshot string  // TUI state captured at Alt+F press
+	feedbackPrevMode tuiMode // mode to return to after feedback cancel
 
 	// Dependency injection for testing
 	spawner Spawner
@@ -662,6 +663,7 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "alt+f":
 			// Capture TUI state before switching to feedback mode
 			m.feedbackSnapshot = m.View()
+			m.feedbackPrevMode = modePassthrough
 			m.mode = modeFeedbackType
 			m.feedbackType = 0
 			m.flash = "Feedback: ←/→ Bug or Feature, Enter to continue, Esc to cancel"
@@ -858,7 +860,7 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.flash = fmt.Sprintf("Describe the %s (Enter to submit, Esc to cancel)", kinds[m.feedbackType])
 			return m, textinput.Blink
 		case "esc":
-			m.mode = modePassthrough
+			m.mode = m.feedbackPrevMode
 			m.flash = ""
 		}
 
@@ -870,13 +872,13 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				kinds := []string{"bug", "feature"}
 				go submitFeedback(kinds[m.feedbackType], summary, m.api, m.feedbackSnapshot)
 				m.flash = fmt.Sprintf("✓ Submitted %s: %s", kinds[m.feedbackType], summary)
-				m.mode = modePassthrough
+				m.mode = m.feedbackPrevMode
 				return m, flashClearCmd()
 			}
-			m.mode = modePassthrough
+			m.mode = m.feedbackPrevMode
 			return m, nil
 		case "esc":
-			m.mode = modePassthrough
+			m.mode = m.feedbackPrevMode
 			m.flash = ""
 		default:
 			var cmd tea.Cmd
@@ -1171,6 +1173,21 @@ func handlePopupKeyShared(m *tuiModel, msg tea.KeyMsg, filteredLen int, sortLabe
 		m.popupErr = ""
 		m.popupCursor = 0
 		return popupKeyResult{handled: true, action: "refresh"}
+	case "alt+f":
+		// Capture current popup view before switching to feedback
+		switch m.mode {
+		case modePlaneIssues:
+			m.feedbackSnapshot = renderPlanePopup(*m)
+		case modeIcingaAlerts:
+			m.feedbackSnapshot = renderIcingaPopup(*m)
+		default:
+			m.feedbackSnapshot = ""
+		}
+		m.feedbackPrevMode = m.mode
+		m.mode = modeFeedbackType
+		m.feedbackType = 0
+		m.flash = "Feedback: ←/→ Bug or Feature, Enter to continue, Esc to cancel"
+		return popupKeyResult{handled: true}
 	}
 	return popupKeyResult{}
 }
