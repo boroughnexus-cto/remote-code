@@ -82,6 +82,7 @@ type sidebarItem struct {
 	status      string
 	activity    string // "stopped", "working", "awaiting"
 	mission     string // optional mission statement
+	directory   string // working directory for session restart
 	// Pool slot fields
 	slotID   string
 	model    string
@@ -340,6 +341,7 @@ func loadItemsCmd(api *apiClient) tea.Cmd {
 				status:      s.Status,
 				activity:    activity,
 				mission:     mission,
+				directory:   s.Directory,
 			})
 		}
 
@@ -680,9 +682,24 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 						exec.Command("tmux", "send-keys", "-t", item.tmuxSession, "C-c").Run()
 						m.flash = fmt.Sprintf("Sent interrupt to %s (Alt+Shift+S to kill & restart)", item.label)
 					} else {
-						// Stopped: restart claude in the existing tmux session
-						exec.Command("tmux", "send-keys", "-t", item.tmuxSession, "claude --dangerously-skip-permissions", "Enter").Run()
-						m.flash = fmt.Sprintf("Restarting Claude in %s", item.label)
+						// Stopped: restart claude — recreate tmux session if needed
+						if !isTmuxAlive(item.tmuxSession) {
+							dir := item.directory
+							if dir == "" {
+								if h, err := os.UserHomeDir(); err == nil {
+									dir = h
+								}
+							}
+							if out, err := exec.Command("tmux", "new-session", "-d", "-s", item.tmuxSession, "-c", dir, "-x", "200", "-y", "50").CombinedOutput(); err != nil {
+								m.flash = fmt.Sprintf("Failed to recreate tmux session: %s", strings.TrimSpace(string(out)))
+								return m, flashClearCmd()
+							}
+						}
+						if err := exec.Command("tmux", "send-keys", "-t", item.tmuxSession, "claude --dangerously-skip-permissions", "Enter").Run(); err != nil {
+							m.flash = fmt.Sprintf("Failed to start Claude in %s", item.label)
+						} else {
+							m.flash = fmt.Sprintf("Restarting Claude in %s", item.label)
+						}
 					}
 				}
 				return m, flashClearCmd()
@@ -1460,7 +1477,7 @@ func (m tuiModel) View() string {
 		if m.flash != "" {
 			statusLine = dimStyle.Render(m.flash)
 		} else {
-			statusLine = dimStyle.Render("Alt+A/Z nav │ Alt+N new │ Alt+S stop │ Alt+R rename │ Alt+M mission │ Alt+D delete") + "\n" +
+			statusLine = dimStyle.Render("Alt+A/Z nav │ Alt+N new │ Alt+S start/stop │ Alt+R rename │ Alt+M mission │ Alt+D delete") + "\n" +
 				dimStyle.Render("Alt+P plane │ Alt+I icinga │ Alt+F feedback │ Alt+Q quit")
 		}
 	}

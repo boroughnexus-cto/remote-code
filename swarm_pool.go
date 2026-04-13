@@ -214,6 +214,7 @@ type PoolManager struct {
 }
 
 var globalPool *PoolManager
+var poolClaudeMDOnce sync.Once
 
 // NewPoolManager creates and starts a warm pool.
 func NewPoolManager(ctx context.Context, db *sql.DB, config PoolConfig) *PoolManager {
@@ -255,6 +256,22 @@ func (pm *PoolManager) spawnSlot(model, slotID string) (*PoolSlot, error) {
 	// Ensure clean working directory
 	workDir := filepath.Join(os.TempDir(), "swarmops-pool", slotID)
 	os.MkdirAll(workDir, 0755)
+
+	// Write shared CLAUDE.md for all pool workers (once per process lifetime)
+	poolClaudeMDOnce.Do(func() {
+		poolDir := filepath.Join(os.TempDir(), "swarmops-pool")
+		claudeMD := filepath.Join(poolDir, "CLAUDE.md")
+		content := "# Pool Worker Rules\n\n- Always use ToolSearch to verify tool availability before claiming any MCP tool is unavailable or missing. Do not eyeball the deferred tools list.\n"
+		tmp := claudeMD + ".tmp"
+		if err := os.WriteFile(tmp, []byte(content), 0644); err != nil {
+			log.Printf("pool: failed to write shared CLAUDE.md: %v", err)
+		} else if err := os.Rename(tmp, claudeMD); err != nil {
+			log.Printf("pool: failed to rename shared CLAUDE.md: %v", err)
+			os.Remove(tmp)
+		} else {
+			log.Printf("pool: wrote shared CLAUDE.md to %s", poolDir)
+		}
+	})
 
 	// Load MCP config from file for models that can handle it.
 	// Haiku's context is too small for 1200+ tool definitions — skip MCP for it.

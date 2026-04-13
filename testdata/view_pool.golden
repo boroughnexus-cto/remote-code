@@ -1,26 +1,26 @@
-                        │dev-session  running                                     
- SwarmOps      00:00:00 │──────────────────────────────────────────────────────   
- 1 sess · 2/2 pool      │                                                         
- ────────────────────   │                                                         
-                        │                                                         
- ▸ ○ dev-session        │                                                         
-                        │                                                         
- ─── Pool ───           │                                                         
-   ◆ [api] haiku idle   │                                                         
-   ◆ [api] sonnet busy  │                                                         
-                        │                                                         
-                        │                                                         
-                        │                                                         
-                        │                                                         
-                        │                                                         
-                        │                                                         
-                        │                                                         
-                        │                                                         
-                        │                                                         
-                        │                                                         
-                        │                                                         
-                        │                                                         
-                        │                                                         
-                        │                                                         
-Alt+A/Z nav │ Alt+N new │ Alt+S stop │ Alt+R rename │ Alt+M mission │ Alt+D delete
-Alt+P plane │ Alt+I icinga │ Alt+F feedback │ Alt+Q quit                          
+                        │dev-session  running                                           
+ SwarmOps      00:00:00 │──────────────────────────────────────────────────────         
+ 1 sess · 2/2 pool      │                                                               
+ ────────────────────   │                                                               
+                        │                                                               
+ ▸ ○ dev-session        │                                                               
+                        │                                                               
+ ─── Pool ───           │                                                               
+   ◆ [api] haiku idle   │                                                               
+   ◆ [api] sonnet busy  │                                                               
+                        │                                                               
+                        │                                                               
+                        │                                                               
+                        │                                                               
+                        │                                                               
+                        │                                                               
+                        │                                                               
+                        │                                                               
+                        │                                                               
+                        │                                                               
+                        │                                                               
+                        │                                                               
+                        │                                                               
+                        │                                                               
+Alt+A/Z nav │ Alt+N new │ Alt+S start/stop │ Alt+R rename │ Alt+M mission │ Alt+D delete
+Alt+P plane │ Alt+I icinga │ Alt+F feedback │ Alt+Q quit                                
