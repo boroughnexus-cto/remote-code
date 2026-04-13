@@ -1268,7 +1268,8 @@ func (m tuiModel) View() string {
 		if m.flash != "" {
 			statusLine = dimStyle.Render(m.flash)
 		} else {
-			statusLine = dimStyle.Render("Alt+A/Z nav │ Alt+N new │ Alt+S stop │ Alt+R rename │ Alt+M mission │ Alt+D delete │ Alt+P plane │ Alt+I icinga │ Alt+F feedback │ Alt+Q quit")
+			statusLine = dimStyle.Render("Alt+A/Z nav │ Alt+N new │ Alt+S stop │ Alt+R rename │ Alt+M mission │ Alt+D delete") + "\n" +
+				dimStyle.Render("Alt+P plane │ Alt+I icinga │ Alt+F feedback │ Alt+Q quit")
 		}
 	}
 
