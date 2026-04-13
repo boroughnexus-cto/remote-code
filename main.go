@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -76,14 +77,19 @@ func main() {
 	// Start HTTP server BEFORE pool so health checks pass during pool startup
 	server := newHTTPServer()
 
+
+	// Bind the port first so we fail fast if it is already taken
+	ln, err := net.Listen("tcp", server.Addr)
+	if err != nil {
+		log.Fatalf("Cannot bind %s: %v", server.Addr, err)
+	}
 	serverErr := make(chan error, 1)
 	go func() {
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := server.Serve(ln); err != nil && err != http.ErrServerClosed {
 			serverErr <- err
 		}
 	}()
-
-	log.Printf("SwarmOps server starting on %s", server.Addr)
+	log.Printf("SwarmOps server listening on %s", server.Addr)
 
 	// Pool init is slow (spawns 6 Claude CLI sessions) — runs after HTTP is up
 	initPool(ctx)
@@ -152,6 +158,10 @@ func runRedeploy() {
 	}
 
 	for _, step := range steps {
+		// Before restarting the service, stop whatever holds port 8080
+		if step.name == "Restarting service" {
+			stopPortHolder()
+		}
 		fmt.Printf("  %s...", step.name)
 		cmd := exec.Command(step.cmd, step.args...)
 		cmd.Dir = srcDir
@@ -199,6 +209,36 @@ func runRedeploy() {
 	}
 	fmt.Printf("  Launching TUI from %s\n", exe)
 	syscall.Exec(exe, []string{exe, "tui"}, os.Environ())
+}
+
+// stopPortHolder gracefully terminates processes listening on the SwarmOps port.
+func stopPortHolder() {
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+	out, err := exec.Command("fuser", port+"/tcp").Output()
+	if err != nil || len(strings.TrimSpace(string(out))) == 0 {
+		return
+	}
+	pids := strings.Fields(strings.TrimSpace(string(out)))
+	fmt.Printf("  Port %s held by PIDs %v — stopping...", port, pids)
+	for _, pid := range pids {
+		exec.Command("kill", pid).Run()
+	}
+	for i := 0; i < 12; i++ {
+		time.Sleep(500 * time.Millisecond)
+		if exec.Command("fuser", port+"/tcp").Run() != nil {
+			fmt.Printf(" free\n")
+			return
+		}
+	}
+	fmt.Printf(" forcing...")
+	for _, pid := range pids {
+		exec.Command("kill", "-9", pid).Run()
+	}
+	time.Sleep(time.Second)
+	fmt.Printf(" done\n")
 }
 
 // runTUIClient starts the TUI as an HTTP client against the backend.
