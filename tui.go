@@ -122,6 +122,7 @@ const (
 	modePopupAction
 	modeRename
 	modeEditMission
+	modeActionContext // context picker within action/dispatch flow
 	modeFeedbackType
 	modeFeedbackText
 )
@@ -191,6 +192,8 @@ type tuiModel struct {
 	actionPrevMode  tuiMode       // mode to return to on Esc
 	actionSessions  []sidebarItem // running sessions to choose from
 	actionCursor    int           // cursor in action picker (sessions + "new" option)
+	actionChosenIdx int           // which session was chosen (-1 = not yet, len(actionSessions) = new)
+	actionCtxCursor int           // cursor in context picker during dispatch
 
 	// Scroll state
 	userScrolled bool
@@ -421,21 +424,113 @@ func loadTerminal(tmuxName string) tea.Cmd {
 	}
 }
 
+const contextMCPURL = "https://mcp-tkn-context.gate-hexatonic.ts.net/mcp"
+
 func fetchContexts() tea.Cmd {
 	return func() tea.Msg {
-		url := "https://mcp-context.gate-hexatonic.ts.net/contexts?limit=50"
-		client := &http.Client{Timeout: 5 * time.Second}
-		resp, err := client.Get(url)
+		result, err := mcpToolCall(contextMCPURL, "context_list", map[string]interface{}{"limit": 50})
 		if err != nil {
 			return contextListMsg(nil)
 		}
-		defer resp.Body.Close()
-		body, _ := io.ReadAll(resp.Body)
-
 		var items []contextItem
-		json.Unmarshal(body, &items)
+		for _, block := range result {
+			var item contextItem
+			if json.Unmarshal([]byte(block), &item) == nil && item.Name != "" {
+				items = append(items, item)
+			}
+		}
 		return contextListMsg(items)
 	}
+}
+
+// fetchContextContent fetches rendered content for a context by name.
+type contextContentMsg struct {
+	name    string
+	content string
+	err     error
+}
+
+func fetchContextContent(name string) tea.Cmd {
+	return func() tea.Msg {
+		result, err := mcpToolCall(contextMCPURL, "context_render", map[string]interface{}{"name_or_id": name})
+		if err != nil {
+			return contextContentMsg{name: name, err: err}
+		}
+		if len(result) > 0 {
+			return contextContentMsg{name: name, content: result[0]}
+		}
+		return contextContentMsg{name: name, err: fmt.Errorf("empty response")}
+	}
+}
+
+// mcpToolCall makes a JSON-RPC tools/call to an MCP server via streamable-http.
+// Returns the text content blocks from the tool result.
+func mcpToolCall(serverURL, toolName string, args map[string]interface{}) ([]string, error) {
+	payload := map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "tools/call",
+		"params": map[string]interface{}{
+			"name":      toolName,
+			"arguments": args,
+		},
+	}
+	body, _ := json.Marshal(payload)
+	req, err := http.NewRequest("POST", serverURL, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+
+	// Parse SSE response: extract "data: " lines
+	var jsonData []byte
+	for _, line := range strings.Split(string(respBody), "\n") {
+		if strings.HasPrefix(line, "data: ") {
+			jsonData = []byte(strings.TrimPrefix(line, "data: "))
+			break
+		}
+	}
+	if jsonData == nil {
+		// Try as plain JSON
+		jsonData = respBody
+	}
+
+	var rpcResp struct {
+		Result struct {
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+			IsError bool `json:"isError"`
+		} `json:"result"`
+		Error *struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(jsonData, &rpcResp); err != nil {
+		return nil, fmt.Errorf("parse MCP response: %w", err)
+	}
+	if rpcResp.Error != nil {
+		return nil, fmt.Errorf("MCP error: %s", rpcResp.Error.Message)
+	}
+
+	var texts []string
+	for _, c := range rpcResp.Result.Content {
+		if c.Type == "text" {
+			texts = append(texts, c.Text)
+		}
+	}
+	return texts, nil
 }
 
 // ─── Update ──────────────────────────────────────────────────────────────────
@@ -558,12 +653,30 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case contextListMsg:
 		m.contexts = msg
+		if m.mode == modeActionContext {
+			// Context list arrived for dispatch flow — stay in picker
+			m.actionCtxCursor = 0
+			return m, nil
+		}
+		// Spawn flow
 		if len(m.contexts) > 0 {
 			m.mode = modeContextPick
 			m.ctxCursor = 0
 		} else {
 			m.doSpawn(nil, nil)
 			m.mode = modePassthrough
+		}
+		return m, loadItemsCmd(m.api, m.activityStates)
+
+	case contextContentMsg:
+		if msg.err != nil {
+			m.flash = "Context error: " + msg.err.Error()
+			// Dispatch without context on error
+			m.doDispatch(m.actionPrompt)
+		} else {
+			// Prepend context content to prompt
+			enrichedPrompt := msg.content + "\n\n---\n\n" + m.actionPrompt
+			m.doDispatch(enrichedPrompt)
 		}
 		return m, loadItemsCmd(m.api, m.activityStates)
 
@@ -1043,30 +1156,38 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.actionCursor++
 			}
 		case "enter":
-			if m.actionCursor < len(m.actionSessions) {
-				// Inject into existing session
-				sess := m.actionSessions[m.actionCursor]
-				if sess.status == "running" {
-					injectToSession(sess.tmuxSession, m.actionPrompt)
-					m.mode = modePassthrough
-					m.flash = fmt.Sprintf("Sent to %s", sess.label)
-				}
+			// Remember which session was chosen, then show context picker
+			m.actionChosenIdx = m.actionCursor
+			m.actionCtxCursor = 0
+			m.mode = modeActionContext
+			m.flash = "Add context? (↑↓ to pick, Enter to confirm, Esc to skip)"
+			if m.contexts == nil {
+				return m, fetchContexts()
+			}
+		}
+
+	case modeActionContext:
+		switch key {
+		case "alt+a", "up":
+			if m.actionCtxCursor > 0 {
+				m.actionCtxCursor--
+			}
+		case "alt+z", "down":
+			if m.actionCtxCursor < len(m.contexts) {
+				m.actionCtxCursor++
+			}
+		case "esc":
+			// Skip context — dispatch with raw prompt
+			m.doDispatch(m.actionPrompt)
+		case "enter":
+			if m.actionCtxCursor == 0 {
+				// "(none)" selected — dispatch without context
+				m.doDispatch(m.actionPrompt)
 			} else {
-				// Spawn new session
-				name := sanitizeSessionName(m.actionTarget)
-				s, err := m.spawner.Spawn(context.Background(), name, os.Getenv("HOME"), nil, nil, nil)
-				if err != nil {
-					m.flash = "Spawn error: " + err.Error()
-				} else {
-					// Inject the prompt after a brief pause for claude to start
-					go func() {
-						time.Sleep(2 * time.Second)
-						injectToSession(s.TmuxSession, m.actionPrompt)
-					}()
-					m.flash = fmt.Sprintf("Spawned %s — injecting task", s.Name)
-				}
-				m.mode = modePassthrough
-				return m, loadItemsCmd(m.api, m.activityStates)
+				// Fetch context content, then dispatch
+				ctx := m.contexts[m.actionCtxCursor-1]
+				m.flash = fmt.Sprintf("Loading %s context...", ctx.Name)
+				return m, fetchContextContent(ctx.Name)
 			}
 		}
 	}
@@ -1165,6 +1286,33 @@ func (m *tuiModel) doSpawn(contextID, contextName *string) {
 	} else {
 		m.flash = fmt.Sprintf("Spawned %s", s.Name)
 	}
+}
+
+// doDispatch executes the dispatch action: sends prompt to a session or spawns a new one.
+// Called after the context picker step. Uses m.actionChosenIdx to determine target.
+func (m *tuiModel) doDispatch(prompt string) {
+	if m.actionChosenIdx < len(m.actionSessions) {
+		// Inject into existing session
+		sess := m.actionSessions[m.actionChosenIdx]
+		if sess.status == "running" {
+			injectToSession(sess.tmuxSession, prompt)
+			m.flash = fmt.Sprintf("Sent to %s", sess.label)
+		}
+	} else {
+		// Spawn new session
+		name := sanitizeSessionName(m.actionTarget)
+		s, err := m.spawner.Spawn(context.Background(), name, os.Getenv("HOME"), nil, nil, nil)
+		if err != nil {
+			m.flash = "Spawn error: " + err.Error()
+		} else {
+			go func() {
+				time.Sleep(2 * time.Second)
+				injectToSession(s.TmuxSession, prompt)
+			}()
+			m.flash = fmt.Sprintf("Spawned %s — injecting task", s.Name)
+		}
+	}
+	m.mode = modePassthrough
 }
 
 // popupKeyResult holds the result of shared popup key handling.
@@ -1333,6 +1481,8 @@ func (m tuiModel) View() string {
 		return renderIcingaPopup(m)
 	case modePopupAction:
 		return renderActionPicker(m)
+	case modeActionContext:
+		return renderDispatchContextPicker(m)
 	}
 
 	sidebar := m.renderSidebar()

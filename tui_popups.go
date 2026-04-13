@@ -1010,6 +1010,47 @@ func renderActionPicker(m tuiModel) string {
 	return sb.String()
 }
 
+// renderDispatchContextPicker renders the context picker for the dispatch flow.
+func renderDispatchContextPicker(m tuiModel) string {
+	var sb strings.Builder
+
+	target := m.actionTarget
+	if len(target) > 60 {
+		target = target[:57] + "..."
+	}
+	sb.WriteString(popupTitleStyle.Render("Dispatch: "+target))
+	sb.WriteString("\n\n")
+	sb.WriteString("  Add session context (reference material for Claude):\n\n")
+
+	// "(none)" option
+	label := "(none — dispatch without context)"
+	if m.actionCtxCursor == 0 {
+		label = selectedStyle.Render("  > " + label)
+	} else {
+		label = "    " + label
+	}
+	sb.WriteString(label + "\n")
+
+	if m.contexts == nil {
+		sb.WriteString(dimStyle.Render("    Loading contexts...") + "\n")
+	} else {
+		for i, c := range m.contexts {
+			name := c.Name
+			if len(name) > 40 {
+				name = name[:37] + "..."
+			}
+			if i+1 == m.actionCtxCursor {
+				sb.WriteString(selectedStyle.Render("  > "+name) + "\n")
+			} else {
+				sb.WriteString("    " + name + "\n")
+			}
+		}
+	}
+
+	sb.WriteString("\n" + dimStyle.Render("  ↑↓ select | Enter confirm | Esc skip (no context)"))
+	return sb.String()
+}
+
 // submitFeedback creates a Plane issue in the SwarmOps feedback project.
 func submitFeedback(kind, summary string, api *apiClient, tuiSnapshot string) {
 	cfg, err := getPlaneConfig(api)
