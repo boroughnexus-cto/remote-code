@@ -99,14 +99,30 @@ func main() {
 		globalServices.pool = globalPool
 	}
 
-	// Periodic session status sync
+	// Session persistence: prune orphaned snapshots, then restore sessions async
+	pruneOrphanedSnapshots(ctx)
+	go restoreSessions(ctx)
+
+	// Periodic session status sync + scrollback saves
 	go func() {
-		ticker := time.NewTicker(10 * time.Second)
-		defer ticker.Stop()
+		syncTicker := time.NewTicker(10 * time.Second)
+		saveTicker := time.NewTicker(60 * time.Second)
+		defer syncTicker.Stop()
+		defer saveTicker.Stop()
+
+		// Wait for restore to complete before starting saves
+		select {
+		case <-restoreComplete:
+		case <-ctx.Done():
+			return
+		}
+
 		for {
 			select {
-			case <-ticker.C:
+			case <-syncTicker.C:
 				syncTmuxSessions()
+			case <-saveTicker.C:
+				saveAllScrollbacks(ctx)
 			case <-ctx.Done():
 				return
 			}
@@ -124,6 +140,14 @@ func main() {
 	}
 
 	cancel()
+
+	// Final scrollback save before shutdown
+	log.Printf("Saving session scrollbacks before shutdown...")
+	<-restoreComplete // ensure restore finished before saving
+	shutdownSaveCtx, shutdownSaveCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer shutdownSaveCancel()
+	saveAllScrollbacks(shutdownSaveCtx)
+
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer shutdownCancel()
 	if err := server.Shutdown(shutdownCtx); err != nil {

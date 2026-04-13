@@ -15,17 +15,18 @@ import (
 
 // Session represents a managed Claude Code tmux session.
 type Session struct {
-	ID          string  `json:"id"`
-	Name        string  `json:"name"`
-	TmuxSession string  `json:"tmux_session"`
-	Directory   string  `json:"directory"`
-	ContextID   *string `json:"context_id,omitempty"`
-	ContextName *string `json:"context_name,omitempty"`
-	Mission     *string `json:"mission,omitempty"`
-	Hidden      bool    `json:"hidden"`
-	Status      string  `json:"status"`
-	CreatedAt   int64   `json:"created_at"`
-	UpdatedAt   int64   `json:"updated_at"`
+	ID               string  `json:"id"`
+	Name             string  `json:"name"`
+	TmuxSession      string  `json:"tmux_session"`
+	Directory        string  `json:"directory"`
+	ContextID        *string `json:"context_id,omitempty"`
+	ContextName      *string `json:"context_name,omitempty"`
+	Mission          *string `json:"mission,omitempty"`
+	ClaudeSessionID  *string `json:"claude_session_id,omitempty"`
+	Hidden           bool    `json:"hidden"`
+	Status           string  `json:"status"`
+	CreatedAt        int64   `json:"created_at"`
+	UpdatedAt        int64   `json:"updated_at"`
 }
 
 func generateID() string {
@@ -65,7 +66,7 @@ func createSession(ctx context.Context, name, directory string, contextID, conte
 
 func listSessions(ctx context.Context) ([]Session, error) {
 	rows, err := database.QueryContext(ctx,
-		`SELECT id, name, tmux_session, directory, context_id, context_name, mission, hidden, status, created_at, updated_at
+		`SELECT id, name, tmux_session, directory, context_id, context_name, mission, claude_session_id, hidden, status, created_at, updated_at
 		 FROM managed_sessions ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
@@ -75,9 +76,9 @@ func listSessions(ctx context.Context) ([]Session, error) {
 	var sessions []Session
 	for rows.Next() {
 		var s Session
-		var ctxID, ctxName, mission sql.NullString
+		var ctxID, ctxName, mission, claudeID sql.NullString
 		var hiddenInt int
-		if err := rows.Scan(&s.ID, &s.Name, &s.TmuxSession, &s.Directory, &ctxID, &ctxName, &mission, &hiddenInt, &s.Status, &s.CreatedAt, &s.UpdatedAt); err != nil {
+		if err := rows.Scan(&s.ID, &s.Name, &s.TmuxSession, &s.Directory, &ctxID, &ctxName, &mission, &claudeID, &hiddenInt, &s.Status, &s.CreatedAt, &s.UpdatedAt); err != nil {
 			return nil, err
 		}
 		if ctxID.Valid {
@@ -89,6 +90,9 @@ func listSessions(ctx context.Context) ([]Session, error) {
 		if mission.Valid {
 			s.Mission = &mission.String
 		}
+		if claudeID.Valid {
+			s.ClaudeSessionID = &claudeID.String
+		}
 		s.Hidden = hiddenInt != 0
 		sessions = append(sessions, s)
 	}
@@ -97,12 +101,12 @@ func listSessions(ctx context.Context) ([]Session, error) {
 
 func getSession(ctx context.Context, id string) (*Session, error) {
 	var s Session
-	var ctxID, ctxName, mission sql.NullString
+	var ctxID, ctxName, mission, claudeID sql.NullString
 	var hiddenInt int
 	err := database.QueryRowContext(ctx,
-		`SELECT id, name, tmux_session, directory, context_id, context_name, mission, hidden, status, created_at, updated_at
+		`SELECT id, name, tmux_session, directory, context_id, context_name, mission, claude_session_id, hidden, status, created_at, updated_at
 		 FROM managed_sessions WHERE id = ?`, id,
-	).Scan(&s.ID, &s.Name, &s.TmuxSession, &s.Directory, &ctxID, &ctxName, &mission, &hiddenInt, &s.Status, &s.CreatedAt, &s.UpdatedAt)
+	).Scan(&s.ID, &s.Name, &s.TmuxSession, &s.Directory, &ctxID, &ctxName, &mission, &claudeID, &hiddenInt, &s.Status, &s.CreatedAt, &s.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -114,6 +118,9 @@ func getSession(ctx context.Context, id string) (*Session, error) {
 	}
 	if mission.Valid {
 		s.Mission = &mission.String
+	}
+	if claudeID.Valid {
+		s.ClaudeSessionID = &claudeID.String
 	}
 	s.Hidden = hiddenInt != 0
 	return &s, nil
@@ -129,6 +136,8 @@ func deleteSession(ctx context.Context, id string) error {
 	}
 	// Kill the tmux session if it exists
 	exec.Command("tmux", "kill-session", "-t", s.TmuxSession).Run()
+	// Delete the scrollback snapshot
+	deleteSessionSnapshot(s.ID)
 	_, err = database.ExecContext(ctx, "DELETE FROM managed_sessions WHERE id = ?", id)
 	return err
 }
@@ -148,6 +157,17 @@ func updateSessionMission(ctx context.Context, id, mission string) error {
 	_, err := database.ExecContext(ctx,
 		"UPDATE managed_sessions SET mission = ?, updated_at = ? WHERE id = ?",
 		mission, time.Now().Unix(), id,
+	)
+	return err
+}
+
+func updateClaudeSessionID(ctx context.Context, id, claudeSessionID string) error {
+	if database == nil {
+		return nil
+	}
+	_, err := database.ExecContext(ctx,
+		"UPDATE managed_sessions SET claude_session_id = ?, updated_at = ? WHERE id = ?",
+		claudeSessionID, time.Now().Unix(), id,
 	)
 	return err
 }

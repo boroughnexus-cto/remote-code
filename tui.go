@@ -82,7 +82,8 @@ type sidebarItem struct {
 	status      string
 	activity    string // "stopped", "working", "awaiting_input", "idle"
 	mission     string // optional mission statement
-	directory   string // working directory for session restart
+	directory        string // working directory for session restart
+	claudeSessionID string // Claude session ID for resume
 	// Pool slot fields
 	slotID   string
 	model    string
@@ -372,7 +373,8 @@ func loadItemsCmd(api *apiClient) tea.Cmd {
 				status:      s.Status,
 				activity:    activity,
 				mission:     mission,
-				directory:   s.Directory,
+				directory:        s.Directory,
+				claudeSessionID: func() string { if s.ClaudeSessionID != nil { return *s.ClaudeSessionID }; return "" }(),
 			})
 		}
 
@@ -756,16 +758,14 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 									dir = h
 								}
 							}
-							if out, err := exec.Command("tmux", "new-session", "-d", "-s", item.tmuxSession, "-c", dir, "-x", "200", "-y", "50").CombinedOutput(); err != nil {
+							cArgs := resumeClaudeCmd(item.claudeSessionID)
+							args := append([]string{"new-session", "-d", "-s", item.tmuxSession, "-c", dir, "-x", "200", "-y", "50", "--"}, cArgs...)
+							if out, err := exec.Command("tmux", args...).CombinedOutput(); err != nil {
 								m.flash = fmt.Sprintf("Failed to recreate tmux session: %s", strings.TrimSpace(string(out)))
 								return m, flashClearCmd()
 							}
 						}
-						if err := exec.Command("tmux", "send-keys", "-t", item.tmuxSession, "claude --dangerously-skip-permissions", "Enter").Run(); err != nil {
-							m.flash = fmt.Sprintf("Failed to start Claude in %s", item.label)
-						} else {
-							m.flash = fmt.Sprintf("Restarting Claude in %s", item.label)
-						}
+						m.flash = fmt.Sprintf("Resuming Claude in %s", item.label)
 					}
 				}
 				return m, flashClearCmd()
@@ -782,7 +782,7 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					time.Sleep(200 * time.Millisecond)
 					exec.Command("tmux", "send-keys", "-t", item.tmuxSession, "exit", "Enter").Run()
 					time.Sleep(500 * time.Millisecond)
-					exec.Command("tmux", "send-keys", "-t", item.tmuxSession, "claude --dangerously-skip-permissions", "Enter").Run()
+					exec.Command("tmux", "send-keys", "-t", item.tmuxSession, "claude --dangerously-skip-permissions", "Enter").Run() // Alt+Shift+S: fresh start
 					m.flash = fmt.Sprintf("Restarted Claude in %s", item.label)
 				}
 				return m, nil
@@ -1981,4 +1981,13 @@ func runTUI(api *apiClient) error {
 	p := tea.NewProgram(initialModel(api), tea.WithAltScreen(), tea.WithMouseCellMotion())
 	_, err := p.Run()
 	return err
+}
+
+// resumeClaudeCmd returns the claude command args for restarting a session.
+// If a claude session ID is available, uses --resume; otherwise starts fresh.
+func resumeClaudeCmd(claudeID string) []string {
+	if claudeID == "" || !isValidUUID(claudeID) {
+		return []string{"claude", "--dangerously-skip-permissions"}
+	}
+	return []string{"claude", "--resume", claudeID, "--dangerously-skip-permissions"}
 }
