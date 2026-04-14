@@ -49,6 +49,9 @@ func createSession(ctx context.Context, name, directory string, contextID, conte
 		return nil, fmt.Errorf("insert session: %w", err)
 	}
 
+	fireWebhook("session_created", map[string]interface{}{
+		"id": id, "name": name, "directory": directory,
+	})
 	return &Session{
 		ID:          id,
 		Name:        name,
@@ -138,6 +141,7 @@ func deleteSession(ctx context.Context, id string) error {
 	exec.Command("tmux", "kill-session", "-t", s.TmuxSession).Run()
 	// Delete the scrollback snapshot
 	deleteSessionSnapshot(s.ID)
+	fireWebhook("session_deleted", map[string]interface{}{"id": id, "name": s.Name})
 	_, err = database.ExecContext(ctx, "DELETE FROM managed_sessions WHERE id = ?", id)
 	return err
 }
@@ -147,6 +151,9 @@ func updateSessionStatus(ctx context.Context, id, status string) error {
 		"UPDATE managed_sessions SET status = ?, updated_at = ? WHERE id = ?",
 		status, time.Now().Unix(), id,
 	)
+	if err == nil {
+		fireWebhook("session_status_changed", map[string]interface{}{"id": id, "status": status})
+	}
 	return err
 }
 

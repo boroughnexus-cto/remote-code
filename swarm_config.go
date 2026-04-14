@@ -121,6 +121,10 @@ var configRegistry = map[string]configMeta{
 	"plane.project_id": {Default: "", EnvVar: "PLANE_PROJECT_ID", DangerLevel: 0, Description: "Plane project UUID for TUI popup"},
 	"feedback.project_id": {Default: "", EnvVar: "FEEDBACK_PROJECT_ID", DangerLevel: 0, Description: "Plane project UUID for feedback issues (SwarmOps)"},
 
+	// n8n integration
+	"n8n.webhook_url":  {Default: "", EnvVar: "SWARMOPS_N8N_WEBHOOK_URL", DangerLevel: 0, Description: "n8n webhook URL for outbound lifecycle events (empty = disabled)"},
+	"n8n.events_token": {Default: "", EnvVar: "SWARMOPS_EXTERNAL_EVENTS_TOKEN", DangerLevel: 2, Description: "Bearer token for POST /api/swarm/sessions/:id/external-events"},
+
 	// Icinga integration (TUI popup)
 	"icinga.api_url":  {Default: "", EnvVar: "ICINGA_API_URL", DangerLevel: 0, Description: "Icinga API base URL (e.g. https://icinga.example.com:5665)"},
 	"icinga.api_user": {Default: "", EnvVar: "ICINGA_API_USER", DangerLevel: 0, Description: "Icinga API username"},

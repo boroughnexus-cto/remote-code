@@ -268,13 +268,10 @@ func handlePoolChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if globalPool == nil {
-		writeOAIError(w, http.StatusServiceUnavailable, "pool_disabled", "Pool is not enabled")
-		return
-	}
+	// globalPool nil check is deferred — streaming requests bypass the pool entirely
 
 	// Auth check
-	if globalPool.config.APIKey != "" {
+	if globalPool != nil && globalPool.config.APIKey != "" {
 		auth := r.Header.Get("Authorization")
 		if auth != "Bearer "+globalPool.config.APIKey {
 			writeOAIError(w, http.StatusUnauthorized, "invalid_api_key", "Invalid API key")
@@ -310,7 +307,19 @@ func handlePoolChatCompletions(w http.ResponseWriter, r *http.Request) {
 		queryContent = prompt
 	}
 
-	// Acquire a slot
+	start := time.Now()
+
+	// Streaming bypasses the warm pool entirely — call Anthropic API directly
+	if req.Stream {
+		handleDirectStreamingResponse(w, r, req, reqID, model, prompt, start)
+		return
+	}
+
+	// Acquire a slot (non-streaming only)
+	if globalPool == nil {
+		writeOAIError(w, http.StatusServiceUnavailable, "pool_disabled", "Pool is not enabled")
+		return
+	}
 	slot, err := globalPool.Acquire(r.Context(), model)
 	if err != nil {
 		globalPool.logRequest(reqID, model, "", truncateStr(prompt, 200), "error", 0, 0, 0, 0, 0, "pool_exhausted", err.Error())
@@ -318,8 +327,6 @@ func handlePoolChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer globalPool.Release(slot)
-
-	start := time.Now()
 
 	// Send query
 	if err := slot.sendQuery(queryContent); err != nil {
@@ -331,11 +338,7 @@ func handlePoolChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.Stream {
-		handleStreamingResponse(w, r, slot, reqID, model, prompt, start)
-	} else {
-		handleNonStreamingResponse(w, r, slot, reqID, model, prompt, start)
-	}
+	handleNonStreamingResponse(w, r, slot, reqID, model, prompt, start)
 }
 
 // handleNonStreamingResponse collects the full response and returns a single JSON object.

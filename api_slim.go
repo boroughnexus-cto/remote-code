@@ -375,9 +375,61 @@ func handleSwarmSessionsAPI(w http.ResponseWriter, r *http.Request, ctx context.
 	case "input":
 		handleSessionInput(w, r, ctx, sessionID)
 
+	case "external-events":
+		handleExternalEvents(w, r, ctx, sessionID)
+
 	default:
 		http.Error(w, `{"error":"unknown session endpoint"}`, http.StatusNotFound)
 	}
+}
+
+
+// handleExternalEvents handles POST /api/swarm/sessions/:id/external-events.
+// Injects content into the session terminal. Requires Bearer token auth when
+// n8n.events_token is configured.
+func handleExternalEvents(w http.ResponseWriter, r *http.Request, ctx context.Context, sessionID string) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Bearer token auth (only enforced when token is configured)
+	if globalConfigService != nil {
+		token := globalConfigService.GetString("n8n.events_token", "")
+		if token != "" {
+			if r.Header.Get("Authorization") != "Bearer "+token {
+				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+				return
+			}
+		}
+	}
+
+	s, err := getSession(ctx, sessionID)
+	if err != nil {
+		http.Error(w, `{"error":"session not found"}`, http.StatusNotFound)
+		return
+	}
+
+	var req struct {
+		Event   string `json:"event"`
+		Content string `json:"content"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, `{"error":"invalid JSON"}`, http.StatusBadRequest)
+		return
+	}
+	if req.Content == "" {
+		http.Error(w, `{"error":"content required"}`, http.StatusBadRequest)
+		return
+	}
+
+	if err := injectToSession(s.TmuxSession, req.Content); err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusAccepted)
+	json.NewEncoder(w).Encode(map[string]string{"status": "accepted"})
 }
 
 func handleSwarmDashboardAPI(w http.ResponseWriter, r *http.Request, ctx context.Context) {
