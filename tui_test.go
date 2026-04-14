@@ -34,7 +34,7 @@ type spawnCall struct {
 	mission                *string
 }
 
-func (m *mockSpawner) Spawn(_ context.Context, name, dir string, contextID, contextName, mission *string) (*Session, error) {
+func (m *mockSpawner) Spawn(_ context.Context, name, dir string, contextID, contextName, mission *string, model string) (*Session, error) {
 	m.calls = append(m.calls, spawnCall{name, dir, contextID, contextName, mission})
 	if m.err != nil {
 		return nil, m.err
