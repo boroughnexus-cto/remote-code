@@ -259,6 +259,8 @@ func handleSwarmSubAPI(w http.ResponseWriter, r *http.Request, ctx context.Conte
 		handleSwarmSessionsAPI(w, r, ctx, pathParts[1:])
 	case "dashboard":
 		handleSwarmDashboardAPI(w, r, ctx)
+	case "tasks":
+		handleGlobalTasksAPI(w, r, ctx)
 	default:
 		http.Error(w, `{"error":"unknown swarm endpoint"}`, http.StatusNotFound)
 	}
@@ -377,6 +379,9 @@ func handleSwarmSessionsAPI(w http.ResponseWriter, r *http.Request, ctx context.
 
 	case "external-events":
 		handleExternalEvents(w, r, ctx, sessionID)
+
+	case "tasks":
+		handleSessionTasksAPI(w, r, ctx, sessionID, subPath[1:])
 
 	default:
 		http.Error(w, `{"error":"unknown session endpoint"}`, http.StatusNotFound)

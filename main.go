@@ -103,6 +103,9 @@ func main() {
 	pruneOrphanedSnapshots(ctx)
 	go restoreSessions(ctx)
 
+	// Task bus: TTL expiry + deferred task re-queue
+	startTTLSweeper(ctx)
+
 	// Periodic session status sync + scrollback saves
 	go func() {
 		syncTicker := time.NewTicker(10 * time.Second)
