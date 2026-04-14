@@ -73,10 +73,11 @@ type oaiModelList struct {
 }
 
 type oaiModel struct {
-	ID      string `json:"id"`
-	Object  string `json:"object"`
-	Created int64  `json:"created"`
-	OwnedBy string `json:"owned_by"`
+	ID            string `json:"id"`
+	Object        string `json:"object"`
+	Created       int64  `json:"created"`
+	OwnedBy       string `json:"owned_by"`
+	ContextLength int    `json:"context_length,omitempty"`
 }
 
 type oaiError struct {
@@ -90,6 +91,12 @@ type oaiErrorDetail struct {
 }
 
 // ─── Model resolution ────────────────────────────────────────────────────────
+
+var modelContextLengths = map[string]int{
+	"claude-haiku-4-5":  200000,
+	"claude-sonnet-4-6": 1000000,
+	"claude-opus-4-6":   1000000,
+}
 
 var modelAliases = map[string]string{
 	// Short names
@@ -625,15 +632,25 @@ func handlePoolListModels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	now := time.Now().Unix()
 	models := make([]oaiModel, 0)
 	if globalPool != nil {
 		for _, model := range globalPool.config.Models {
-			models = append(models, oaiModel{
+			m := oaiModel{
 				ID:      model,
 				Object:  "model",
-				Created: time.Now().Unix(),
+				Created: now,
 				OwnedBy: "anthropic",
-			})
+			}
+			// Resolve aliases for context length lookup
+			canonical := model
+			if resolved, ok := modelAliases[strings.ToLower(model)]; ok {
+				canonical = resolved
+			}
+			if ctx, ok := modelContextLengths[canonical]; ok {
+				m.ContextLength = ctx
+			}
+			models = append(models, m)
 		}
 	}
 

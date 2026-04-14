@@ -31,7 +31,8 @@ func isValidUUID(s string) bool {
 // The session is registered in the database and the tmux session is created
 // with the given working directory. Claude Code is started inside the session
 // with a controlled --session-id so it can be resumed after restarts.
-func spawnSession(ctx context.Context, name, directory string, contextID, contextName, mission *string) (*Session, error) {
+// An optional model string selects a specific Claude model (e.g. "claude-sonnet-4-6").
+func spawnSession(ctx context.Context, name, directory string, contextID, contextName, mission *string, model string) (*Session, error) {
 	s, err := createSession(ctx, name, directory, contextID, contextName, mission, false)
 	if err != nil {
 		return nil, fmt.Errorf("create session: %w", err)
@@ -42,13 +43,17 @@ func spawnSession(ctx context.Context, name, directory string, contextID, contex
 
 	// Create tmux session with claude as the session command (no send-keys needed).
 	// Using "--" ensures claude flags aren't interpreted as tmux flags.
-	cmd := exec.Command("tmux", "new-session", "-d",
+	claudeArgs := []string{"claude", "--session-id", claudeUUID, "--dangerously-skip-permissions"}
+	if model != "" {
+		claudeArgs = append(claudeArgs, "--model", model)
+	}
+	tmuxArgs := append([]string{"new-session", "-d",
 		"-s", s.TmuxSession,
 		"-c", directory,
 		"-x", "200", "-y", "50",
 		"--",
-		"claude", "--session-id", claudeUUID, "--dangerously-skip-permissions",
-	)
+	}, claudeArgs...)
+	cmd := exec.Command("tmux", tmuxArgs...)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		// Clean up DB entry on failure
 		deleteSession(ctx, s.ID)
@@ -61,6 +66,6 @@ func spawnSession(ctx context.Context, name, directory string, contextID, contex
 	}
 	s.ClaudeSessionID = &claudeUUID
 
-	log.Printf("spawn: created session %q (tmux=%s, dir=%s, claude=%s)", name, s.TmuxSession, directory, claudeUUID)
+	log.Printf("spawn: created session %q (tmux=%s, dir=%s, claude=%s, model=%s)", name, s.TmuxSession, directory, claudeUUID, model)
 	return s, nil
 }

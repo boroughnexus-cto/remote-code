@@ -93,7 +93,7 @@ func (s *Services) RunTask(ctx context.Context, name, directory string, mission 
 	if directory == "" {
 		directory = "."
 	}
-	return spawnSession(ctx, name, directory, nil, nil, mission)
+	return spawnSession(ctx, name, directory, nil, nil, mission, "")
 }
 
 func (s *Services) UpdateSessionMission(ctx context.Context, id, mission string) error {

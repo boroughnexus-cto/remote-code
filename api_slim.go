@@ -110,6 +110,7 @@ func handleTaskExecutionsAPI(w http.ResponseWriter, r *http.Request, ctx context
 		var req struct {
 			Name      string `json:"name"`
 			Directory string `json:"directory"`
+			Model     string `json:"model"`
 		}
 		json.NewDecoder(r.Body).Decode(&req)
 		if req.Name == "" {
@@ -118,7 +119,7 @@ func handleTaskExecutionsAPI(w http.ResponseWriter, r *http.Request, ctx context
 		if req.Directory == "" {
 			req.Directory = "."
 		}
-		s, err := spawnSession(ctx, req.Name, req.Directory, nil, nil, nil)
+		s, err := spawnSession(ctx, req.Name, req.Directory, nil, nil, nil, req.Model)
 		if err != nil {
 			http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
 			return
@@ -284,6 +285,7 @@ func handleSwarmSessionsAPI(w http.ResponseWriter, r *http.Request, ctx context.
 				Directory string  `json:"directory"`
 				ContextID *string `json:"context_id"`
 				Mission   *string `json:"mission"`
+				Model     string  `json:"model"`
 			}
 			json.NewDecoder(r.Body).Decode(&req)
 			if req.Name == "" {
@@ -293,7 +295,7 @@ func handleSwarmSessionsAPI(w http.ResponseWriter, r *http.Request, ctx context.
 			if req.Directory == "" {
 				req.Directory = "."
 			}
-			s, err := spawnSession(ctx, req.Name, req.Directory, req.ContextID, nil, req.Mission)
+			s, err := spawnSession(ctx, req.Name, req.Directory, req.ContextID, nil, req.Mission, req.Model)
 			if err != nil {
 				http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
 				return

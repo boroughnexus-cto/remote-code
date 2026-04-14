@@ -137,14 +137,14 @@ const (
 
 // Spawner abstracts session creation for testability.
 type Spawner interface {
-	Spawn(ctx context.Context, name, dir string, contextID, contextName, mission *string) (*Session, error)
+	Spawn(ctx context.Context, name, dir string, contextID, contextName, mission *string, model string) (*Session, error)
 }
 
 // defaultSpawner calls the real spawnSession function.
 type defaultSpawner struct{}
 
-func (defaultSpawner) Spawn(ctx context.Context, name, dir string, contextID, contextName, mission *string) (*Session, error) {
-	return spawnSession(ctx, name, dir, contextID, contextName, mission)
+func (defaultSpawner) Spawn(ctx context.Context, name, dir string, contextID, contextName, mission *string, model string) (*Session, error) {
+	return spawnSession(ctx, name, dir, contextID, contextName, mission, model)
 }
 
 type tuiModel struct {
@@ -1302,7 +1302,7 @@ func (m *tuiModel) doSpawn(contextID, contextName *string) {
 	if v := m.newMissionInput.Value(); v != "" {
 		mission = &v
 	}
-	s, err := m.spawner.Spawn(context.Background(), name, dir, contextID, contextName, mission)
+	s, err := m.spawner.Spawn(context.Background(), name, dir, contextID, contextName, mission, "")
 	if err != nil {
 		m.flash = "Spawn error: " + err.Error()
 	} else {
@@ -1323,7 +1323,7 @@ func (m *tuiModel) doDispatch(prompt string) {
 	} else {
 		// Spawn new session
 		name := sanitizeSessionName(m.actionTarget)
-		s, err := m.spawner.Spawn(context.Background(), name, os.Getenv("HOME"), nil, nil, nil)
+		s, err := m.spawner.Spawn(context.Background(), name, os.Getenv("HOME"), nil, nil, nil, "")
 		if err != nil {
 			m.flash = "Spawn error: " + err.Error()
 		} else {

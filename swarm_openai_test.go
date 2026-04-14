@@ -59,6 +59,13 @@ func TestHandleListModels_WithPool(t *testing.T) {
 	if resp.Data[0].OwnedBy != "anthropic" {
 		t.Errorf("owned_by = %q", resp.Data[0].OwnedBy)
 	}
+	// Verify context_length is populated from modelContextLengths
+	if resp.Data[0].ContextLength != 200000 {
+		t.Errorf("haiku context_length = %d, want 200000", resp.Data[0].ContextLength)
+	}
+	if resp.Data[1].ContextLength != 1000000 {
+		t.Errorf("sonnet context_length = %d, want 1000000", resp.Data[1].ContextLength)
+	}
 }
 
 func TestHandleListModels_MethodNotAllowed(t *testing.T) {
