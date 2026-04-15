@@ -449,6 +449,10 @@ func (pm *PoolManager) recycleSlot(slot *PoolSlot) {
 	newSlot, err := pm.spawnSlot(model, slotID)
 	if err != nil {
 		log.Printf("pool: recycle failed for %s: %v", slotID, err)
+		// Reset to slotDead so the health monitor retries on the next tick.
+		slot.mu.Lock()
+		slot.state = slotDead
+		slot.mu.Unlock()
 		return
 	}
 
@@ -509,6 +513,19 @@ func (pm *PoolManager) checkHealth() {
 				slot.mu.Unlock()
 				pm.drainSlotFromAvailable(model, slot)
 				go pm.recycleSlot(slot)
+			}
+
+			// Retry previously-failed recycles — slot stayed dead after spawn error.
+			if state == slotDead {
+				slot.mu.Lock()
+				if slot.state == slotDead { // re-check under lock to avoid double-spawn
+					slot.state = slotStarting
+					slot.mu.Unlock()
+					log.Printf("pool: %s dead slot detected, retrying recycle", slot.ID)
+					go pm.recycleSlot(slot)
+				} else {
+					slot.mu.Unlock()
+				}
 			}
 
 			// Clear expired rate limits
