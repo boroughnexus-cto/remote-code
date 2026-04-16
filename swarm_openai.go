@@ -477,10 +477,11 @@ func handleStreamingResponse(w http.ResponseWriter, r *http.Request, slot *PoolS
 	// First chunk: role
 	safeWriteChunk(oaiDelta{Role: "assistant"}, nil)
 
-	// Heartbeat goroutine — sends ": keepalive" SSE comment lines while the slot
-	// is processing a tool call and emitting no events. SSE comments are valid per
-	// RFC-EventSource §9.2 and are silently ignored by all OpenAI-compatible clients,
-	// but they flush actual bytes that reset the client's idle-timeout counter.
+	// Heartbeat goroutine — sends empty-delta OpenAI SSE chunks while the slot is
+	// executing a tool call and emitting no events. SSE comment lines (": keepalive")
+	// are silently discarded by the OpenAI Python SDK before the caller's iterator
+	// ever sees them, so they do NOT reset application-level stale-stream timers.
+	// Empty-delta chunks ARE yielded by the SDK and reset those timers correctly.
 	hbCtx, hbCancel := context.WithCancel(r.Context())
 	defer hbCancel()
 	go func() {
@@ -492,8 +493,7 @@ func handleStreamingResponse(w http.ResponseWriter, r *http.Request, slot *PoolS
 				return
 			case <-ticker.C:
 				writeMu.Lock()
-				fmt.Fprintf(w, ": keepalive\n\n")
-				flusher.Flush()
+				writeSSEChunk(w, flusher, reqID, model, oaiDelta{}, nil)
 				writeMu.Unlock()
 			}
 		}
