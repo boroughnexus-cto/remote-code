@@ -30,3 +30,12 @@ jobs:
         run: |
           go test -run "TestView_Empty|TestView_Sessions|TestView_PoolSlots" -count=1 ./...
           git diff --exit-code testdata/
+
+  deploy:
+    needs: ci
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: [self-hosted, nuc-ubuntu-dev]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and restart swarmops
+        run: make restart

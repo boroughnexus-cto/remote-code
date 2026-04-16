@@ -9,8 +9,13 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
+
+// heartbeatInterval is how often a keepalive SSE comment is sent when the pool
+// slot is quiet (e.g. executing a tool call). Overridable in tests.
+var heartbeatInterval = 15 * time.Second
 
 // ─── OpenAI-compatible types ─────────────────────────────────────────────────
 
@@ -309,17 +314,12 @@ func handlePoolChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	start := time.Now()
 
-	// Streaming bypasses the warm pool entirely — call Anthropic API directly
-	if req.Stream {
-		handleDirectStreamingResponse(w, r, req, reqID, model, prompt, start)
-		return
-	}
-
-	// Acquire a slot (non-streaming only)
 	if globalPool == nil {
 		writeOAIError(w, http.StatusServiceUnavailable, "pool_disabled", "Pool is not enabled")
 		return
 	}
+
+	// Acquire a pool slot (streaming and non-streaming both use the pool).
 	slot, err := globalPool.Acquire(r.Context(), model)
 	if err != nil {
 		globalPool.logRequest(reqID, model, "", truncateStr(prompt, 200), "error", 0, 0, 0, 0, 0, "pool_exhausted", err.Error())
@@ -335,6 +335,11 @@ func handlePoolChatCompletions(w http.ResponseWriter, r *http.Request) {
 		slot.mu.Unlock()
 		globalPool.logRequest(reqID, model, slot.ID, truncateStr(prompt, 200), "error", 0, 0, 0, 0, 0, "send_failed", err.Error())
 		writeOAIError(w, http.StatusInternalServerError, "send_failed", "Failed to send query to slot")
+		return
+	}
+
+	if req.Stream {
+		handleStreamingResponse(w, r, slot, reqID, model, prompt, start)
 		return
 	}
 
@@ -445,7 +450,9 @@ done:
 	json.NewEncoder(w).Encode(resp)
 }
 
-// handleStreamingResponse streams SSE chunks as events arrive.
+// handleStreamingResponse streams SSE chunks as events arrive from a pool slot.
+// A heartbeat goroutine sends SSE comment lines at heartbeatInterval while the
+// slot is quiet (e.g. executing a tool call), preventing client idle-timeouts.
 func handleStreamingResponse(w http.ResponseWriter, r *http.Request, slot *PoolSlot, reqID, model, prompt string, start time.Time) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -458,8 +465,39 @@ func handleStreamingResponse(w http.ResponseWriter, r *http.Request, slot *PoolS
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
 
+	// writeMu serialises all writes to w — http.ResponseWriter is not goroutine-safe.
+	var writeMu sync.Mutex
+
+	safeWriteChunk := func(delta oaiDelta, finish *string) {
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		writeSSEChunk(w, flusher, reqID, model, delta, finish)
+	}
+
 	// First chunk: role
-	writeSSEChunk(w, flusher, reqID, model, oaiDelta{Role: "assistant"}, nil)
+	safeWriteChunk(oaiDelta{Role: "assistant"}, nil)
+
+	// Heartbeat goroutine — sends ": keepalive" SSE comment lines while the slot
+	// is processing a tool call and emitting no events. SSE comments are valid per
+	// RFC-EventSource §9.2 and are silently ignored by all OpenAI-compatible clients,
+	// but they flush actual bytes that reset the client's idle-timeout counter.
+	hbCtx, hbCancel := context.WithCancel(r.Context())
+	defer hbCancel()
+	go func() {
+		ticker := time.NewTicker(heartbeatInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-hbCtx.Done():
+				return
+			case <-ticker.C:
+				writeMu.Lock()
+				fmt.Fprintf(w, ": keepalive\n\n")
+				flusher.Flush()
+				writeMu.Unlock()
+			}
+		}
+	}()
 
 	var ttft time.Duration
 	var resultEv poolEvent
@@ -482,7 +520,7 @@ func handleStreamingResponse(w http.ResponseWriter, r *http.Request, slot *PoolS
 			}
 			text := extractAssistantText(ev)
 			if text != "" {
-				writeSSEChunk(w, flusher, reqID, model, oaiDelta{Content: text}, nil)
+				safeWriteChunk(oaiDelta{Content: text}, nil)
 			}
 
 		case "stream_event":
@@ -491,7 +529,7 @@ func handleStreamingResponse(w http.ResponseWriter, r *http.Request, slot *PoolS
 			}
 			text := extractStreamText(ev)
 			if text != "" {
-				writeSSEChunk(w, flusher, reqID, model, oaiDelta{Content: text}, nil)
+				safeWriteChunk(oaiDelta{Content: text}, nil)
 			}
 
 		case "rate_limit_event":
@@ -507,6 +545,8 @@ func handleStreamingResponse(w http.ResponseWriter, r *http.Request, slot *PoolS
 	}
 
 done:
+	hbCancel() // stop heartbeat immediately; no more writes after this point
+
 	latency := time.Since(start)
 	slot.mu.Lock()
 	slot.errorCount = 0
@@ -537,9 +577,11 @@ done:
 
 	// Final chunk with finish_reason
 	stop := mapStopReason(resultEv.StopReason)
-	writeSSEChunk(w, flusher, reqID, model, oaiDelta{}, &stop)
+	safeWriteChunk(oaiDelta{}, &stop)
+	writeMu.Lock()
 	fmt.Fprintf(w, "data: [DONE]\n\n")
 	flusher.Flush()
+	writeMu.Unlock()
 }
 
 // ─── SSE helpers ─────────────────────────────────────────────────────────────

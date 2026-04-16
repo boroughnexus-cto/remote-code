@@ -610,6 +610,190 @@ func TestEndToEnd_NonStreaming(t *testing.T) {
 	}
 }
 
+// ─── End-to-end streaming via handlePoolChatCompletions ──────────────────────
+
+func TestEndToEnd_Streaming(t *testing.T) {
+	oldPool := globalPool
+	pm := &PoolManager{
+		config:    PoolConfig{},
+		available: map[string]chan *PoolSlot{},
+		slots:     map[string][]*PoolSlot{},
+		db:        database,
+	}
+	pm.totalCost = atomic.Int64{}
+
+	model := "claude-haiku-4-5"
+	pm.available[model] = make(chan *PoolSlot, 1)
+
+	stdinR, stdinW := io.Pipe()
+	stdoutR, stdoutW := io.Pipe()
+	slot := &PoolSlot{
+		ID:     "e2e-stream-slot",
+		Model:  model,
+		stdin:  stdinW,
+		stdout: bufio.NewReaderSize(stdoutR, 4096),
+		state:  slotIdle,
+	}
+	pm.available[model] <- slot
+	pm.slots[model] = []*PoolSlot{slot}
+	globalPool = pm
+	defer func() { globalPool = oldPool }()
+
+	go func() {
+		scanner := bufio.NewScanner(stdinR)
+		if scanner.Scan() {
+			fmt.Fprintln(stdoutW, `{"type":"system","subtype":"init"}`)
+			fmt.Fprintln(stdoutW, `{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"Hello"}}}`)
+			fmt.Fprintln(stdoutW, `{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":" world"}}}`)
+			fmt.Fprintln(stdoutW, `{"type":"result","subtype":"success","result":"Hello world","total_cost_usd":0.002,"is_error":false,"stop_reason":"end_turn","usage":{"input_tokens":5,"output_tokens":3}}`)
+		}
+	}()
+
+	body := `{"model":"haiku","messages":[{"role":"user","content":"hi"}],"stream":true}`
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	handlePoolChatCompletions(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+	if ct := w.Header().Get("Content-Type"); ct != "text/event-stream" {
+		t.Errorf("Content-Type = %q, want text/event-stream", ct)
+	}
+
+	body2 := w.Body.String()
+	if !strings.Contains(body2, "data: [DONE]") {
+		t.Fatalf("missing [DONE] in: %s", body2)
+	}
+
+	// Assemble content from chunks
+	var content strings.Builder
+	for _, c := range parseSSEChunks(body2) {
+		content.WriteString(c.Choices[0].Delta.Content)
+	}
+	if content.String() != "Hello world" {
+		t.Errorf("assembled content = %q, want 'Hello world'", content.String())
+	}
+}
+
+func TestEndToEnd_StreamingPoolDisabled(t *testing.T) {
+	// With pool disabled, stream=true should return 503 (not fall back to direct API).
+	oldPool := globalPool
+	globalPool = nil
+	defer func() { globalPool = oldPool }()
+
+	body := `{"model":"haiku","messages":[{"role":"user","content":"hi"}],"stream":true}`
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	handlePoolChatCompletions(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want 503 (pool required for streaming)", w.Code)
+	}
+}
+
+func TestEndToEnd_StreamingPoolExhausted(t *testing.T) {
+	// With pool having no available slots, stream=true returns 429.
+	oldPool := globalPool
+	globalPool = &PoolManager{
+		config:    PoolConfig{},
+		available: map[string]chan *PoolSlot{"claude-haiku-4-5": make(chan *PoolSlot, 1)},
+		db:        database,
+	}
+	defer func() { globalPool = oldPool }()
+
+	body := `{"model":"haiku","messages":[{"role":"user","content":"hi"}],"stream":true}`
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
+	ctx, cancel := context.WithTimeout(req.Context(), 100*time.Millisecond)
+	defer cancel()
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+	handlePoolChatCompletions(w, req)
+
+	if w.Code != http.StatusTooManyRequests {
+		t.Errorf("status = %d, want 429", w.Code)
+	}
+}
+
+// ─── Heartbeat tests ──────────────────────────────────────────────────────────
+
+func TestStreamingHeartbeatDuringToolCall(t *testing.T) {
+	// heartbeatInterval is set short so the test runs in milliseconds.
+	old := heartbeatInterval
+	heartbeatInterval = 80 * time.Millisecond
+	defer func() { heartbeatInterval = old }()
+
+	oldPool := globalPool
+	globalPool = &PoolManager{config: PoolConfig{}, db: database}
+	defer func() { globalPool = oldPool }()
+
+	// Slot that simulates a 250ms tool-call gap before responding.
+	_, stdoutW := io.Pipe()
+	stdoutR, realStdoutW := io.Pipe()
+	slot := &PoolSlot{
+		ID:     "hb-slot",
+		Model:  "claude-haiku-4-5",
+		stdin:  stdoutW, // unused but must be non-nil
+		stdout: bufio.NewReaderSize(stdoutR, 4096),
+		state:  slotBusy,
+	}
+
+	go func() {
+		// 250ms delay simulates tool execution (3× the 80ms heartbeat interval)
+		time.Sleep(250 * time.Millisecond)
+		fmt.Fprintln(realStdoutW, `{"type":"assistant","message":{"content":[{"type":"text","text":"done"}]}}`)
+		fmt.Fprintln(realStdoutW, `{"type":"result","subtype":"success","result":"done","is_error":false,"stop_reason":"end_turn"}`)
+	}()
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	handleStreamingResponse(w, req, slot, "hb-req", "claude-haiku-4-5", "test", time.Now())
+
+	body := w.Body.String()
+
+	// Count keepalive comments in the response body.
+	count := strings.Count(body, ": keepalive")
+	if count < 2 {
+		t.Errorf("expected ≥2 heartbeat comments in 250ms with 80ms interval, got %d\nbody: %q", count, body)
+	}
+
+	// Content must still arrive correctly.
+	if !strings.Contains(body, "data: [DONE]") {
+		t.Errorf("missing [DONE] in body: %q", body)
+	}
+}
+
+func TestStreamingHeartbeatStopsAfterDone(t *testing.T) {
+	// Verify the heartbeat goroutine exits promptly when result arrives.
+	old := heartbeatInterval
+	heartbeatInterval = 30 * time.Millisecond
+	defer func() { heartbeatInterval = old }()
+
+	oldPool := globalPool
+	globalPool = &PoolManager{config: PoolConfig{}, db: database}
+	defer func() { globalPool = oldPool }()
+
+	responses := []string{
+		`{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}`,
+		`{"type":"result","subtype":"success","result":"hi","is_error":false,"stop_reason":"end_turn"}`,
+	}
+	slot, _ := newFakePoolSlot(responses)
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	handleStreamingResponse(w, req, slot, "hb-stop", "claude-haiku-4-5", "test", time.Now())
+
+	bodyBefore := w.Body.String()
+
+	// Wait 2× the interval — no new writes should appear after result.
+	time.Sleep(80 * time.Millisecond)
+	bodyAfter := w.Body.String()
+
+	if bodyBefore != bodyAfter {
+		t.Errorf("body grew after result: heartbeat goroutine still writing after hbCancel\nbefore=%q\nafter=%q", bodyBefore, bodyAfter)
+	}
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 func parseSSEChunks(body string) []oaiChunk {
