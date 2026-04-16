@@ -751,10 +751,12 @@ func TestStreamingHeartbeatDuringToolCall(t *testing.T) {
 
 	body := w.Body.String()
 
-	// Count keepalive comments in the response body.
-	count := strings.Count(body, ": keepalive")
+	// Count empty-delta heartbeat chunks in the response body.
+	// Heartbeat chunks have an empty delta: "delta":{},"finish_reason":null
+	// The role chunk has "delta":{"role":"assistant"} so it won't match.
+	count := strings.Count(body, `"delta":{},"finish_reason":null`)
 	if count < 2 {
-		t.Errorf("expected ≥2 heartbeat comments in 250ms with 80ms interval, got %d\nbody: %q", count, body)
+		t.Errorf("expected ≥2 heartbeat chunks in 250ms with 80ms interval, got %d\nbody: %q", count, body)
 	}
 
 	// Content must still arrive correctly.
