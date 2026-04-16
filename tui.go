@@ -163,6 +163,9 @@ type tuiModel struct {
 	contexts        []contextItem
 	ctxCursor       int
 
+	// Pool section display
+	poolExpanded bool // expanded in sidebar; default false (collapsed, SWM-49)
+
 	// Per-session activity state for diff detection and 1-tick damper
 	activityStates    map[string]*activityState
 	activityInflight  bool // true while a captureActivityCmd is running
@@ -813,6 +816,9 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.mode = modeFeedbackType
 			m.feedbackType = 0
 			m.flash = "Feedback: ←/→ Bug or Feature, Enter to continue, Esc to cancel"
+			return m, nil
+		case "alt+o":
+			m.poolExpanded = !m.poolExpanded
 			return m, nil
 		case "alt+p":
 			m.mode = modePlaneIssues
@@ -1544,7 +1550,7 @@ func (m tuiModel) View() string {
 			statusLine = dimStyle.Render(m.flash)
 		} else {
 			statusLine = dimStyle.Render("Alt+A/Z nav │ Alt+N new │ Alt+S start/stop │ Alt+R rename │ Alt+M mission │ Alt+D delete") + "\n" +
-				dimStyle.Render("Alt+P plane │ Alt+I icinga │ Alt+F feedback │ Alt+Q quit")
+				dimStyle.Render("Alt+P plane │ Alt+I icinga │ Alt+O pool │ Alt+F feedback │ Alt+Q quit")
 		}
 	}
 
@@ -1642,47 +1648,61 @@ func (m tuiModel) renderSidebar() string {
 	lines = append(lines, dimStyle.Render("────────────────────"))
 	lines = append(lines, "")
 
-	// Track whether we've printed the pool separator
-	printedPoolSep := false
-
+	// Render session items
 	for i, item := range m.items {
-		if item.kind == itemPoolSlot && !printedPoolSep {
-			if i > 0 {
-				lines = append(lines, "")
-			}
-			lines = append(lines, dimStyle.Render("─── Pool ───"))
-			printedPoolSep = true
+		if item.kind == itemPoolSlot {
+			continue // pool rendered separately below
 		}
-
 		label := item.label
 		if len(label) > 20 {
 			label = label[:17] + "..."
 		}
-
-		ind := item.indicator
-		if item.kind == itemSession {
-			ind = animatedIndicator(item.activity, m.animFrame)
-		}
-
+		ind := animatedIndicator(item.activity, m.animFrame)
 		if i == m.cursor {
-			// Selected: cursor arrow + underlined label
-			if item.kind == itemPoolSlot {
-				line := fmt.Sprintf(" %s %s %s", ind, selectedLabelStyle.Render(label), dimStyle.Render(item.state))
-				lines = append(lines, selectedStyle.Render("▸") + line)
-				continue
-			}
 			line := fmt.Sprintf(" %s %s", ind, selectedLabelStyle.Render(label))
-			lines = append(lines, selectedStyle.Render("▸") + line)
-			continue
-		}
-
-		var line string
-		if item.kind == itemPoolSlot {
-			line = fmt.Sprintf("  %s %s %s", ind, label, dimStyle.Render(item.state))
+			lines = append(lines, selectedStyle.Render("▸")+line)
 		} else {
-			line = fmt.Sprintf("  %s %s", ind, label)
+			lines = append(lines, fmt.Sprintf("  %s %s", ind, label))
 		}
-		lines = append(lines, line)
+	}
+
+	// Pool section — collapsible (SWM-49)
+	if poolTotal > 0 {
+		lines = append(lines, "")
+		busyCount := 0
+		for _, item := range m.items {
+			if item.kind == itemPoolSlot && item.state == "busy" {
+				busyCount++
+			}
+		}
+		busyStr := ""
+		if busyCount > 0 {
+			busyStr = fmt.Sprintf(" (%d)", busyCount)
+		}
+		toggleChar := "▶"
+		if m.poolExpanded {
+			toggleChar = "▼"
+		}
+		poolHeader := fmt.Sprintf("%s Pool %d/%d%s", toggleChar, poolAlive, poolTotal, busyStr)
+		lines = append(lines, dimStyle.Render(poolHeader))
+
+		if m.poolExpanded {
+			for i, item := range m.items {
+				if item.kind != itemPoolSlot {
+					continue
+				}
+				label := item.label
+				if len(label) > 20 {
+					label = label[:17] + "..."
+				}
+				if i == m.cursor {
+					line := fmt.Sprintf(" %s %s %s", item.indicator, selectedLabelStyle.Render(label), dimStyle.Render(item.state))
+					lines = append(lines, selectedStyle.Render("▸")+line)
+				} else {
+					lines = append(lines, fmt.Sprintf("  %s %s %s", item.indicator, label, dimStyle.Render(item.state)))
+				}
+			}
+		}
 	}
 
 	if len(m.items) == 0 {
@@ -1780,27 +1800,49 @@ func (m tuiModel) renderPoolSlotDetail(item sidebarItem) string {
 }
 
 func (m tuiModel) renderContextPicker() string {
-	var parts []string
-	parts = append(parts, "Context: ")
-
-	label := "(none)"
-	if m.ctxCursor == 0 {
-		label = selectedStyle.Render("> " + label)
-	}
-	parts = append(parts, label)
-
+	// Build all options: 0=(none), i+1=contexts[i]
+	total := len(m.contexts) + 1
+	labels := make([]string, total)
+	labels[0] = "(none)"
 	for i, c := range m.contexts {
-		label := c.Name
-		if len(label) > 30 {
-			label = label[:27] + "..."
+		lbl := c.Name
+		if len(lbl) > 22 {
+			lbl = lbl[:19] + "..."
 		}
-		if i+1 == m.ctxCursor {
-			label = selectedStyle.Render("> " + label)
-		}
-		parts = append(parts, label)
+		labels[i+1] = lbl
 	}
 
-	return strings.Join(parts, " │ ")
+	// Sliding window of 4 around cursor — fixes SWM-50 overflow
+	const windowSize = 4
+	start := m.ctxCursor - windowSize/2
+	if start < 0 {
+		start = 0
+	}
+	end := start + windowSize
+	if end > total {
+		end = total
+		if start = end - windowSize; start < 0 {
+			start = 0
+		}
+	}
+
+	var parts []string
+	if start > 0 {
+		parts = append(parts, dimStyle.Render("←"))
+	}
+	for i := start; i < end; i++ {
+		lbl := labels[i]
+		if i == m.ctxCursor {
+			lbl = selectedStyle.Render("[" + lbl + "]")
+		}
+		parts = append(parts, lbl)
+	}
+	if end < total {
+		parts = append(parts, dimStyle.Render("→"))
+	}
+
+	prefix := fmt.Sprintf("Context: (%d/%d) ", m.ctxCursor, total-1)
+	return prefix + strings.Join(parts, " │ ")
 }
 
 // runTUI starts the Bubbletea TUI. Database, config, and pool must be initialised by main().
@@ -1872,10 +1914,11 @@ func classifyActivity(capture string, state *activityState) string {
 	// --- Hash meaningful content (not raw capture) for diff detection ---
 	// This avoids false "working" from ANSI/chrome noise changes.
 	// Skip hash update on empty meaningful content to prevent false diffs after capture glitches.
+	isFirstSeen := state.prevHash == 0 // true on the very first call (no prior content seen)
 	contentChanged := false
 	if len(meaningful) > 0 {
 		hash := fnvHash(strings.Join(meaningful, "\n"))
-		contentChanged = state.prevHash != 0 && hash != state.prevHash
+		contentChanged = !isFirstSeen && hash != state.prevHash
 		state.prevHash = hash
 	}
 
@@ -1887,63 +1930,84 @@ func classifyActivity(capture string, state *activityState) string {
 		}
 	}
 
-	// --- Priority 2: Prompt with user-typed text → awaiting_input ---
-	// User is typing at the prompt — hash changes from typing should NOT be "working"
-	if len(meaningful) > 0 && promptRe.MatchString(meaningful[0]) && !barePromptRe.MatchString(meaningful[0]) {
-		state.prevActivity = "awaiting_input"
-		return "awaiting_input"
-	}
-
-	// --- Priority 3: Question from Claude → awaiting_input ---
-	// Search for the most recent assistant-like line (skip prompts, spinners, tool markers).
-	// meaningful is newest-first, so we scan forward to find the first assistant output line.
-	if len(meaningful) > 0 {
-		for _, line := range meaningful {
-			// Skip prompt lines
-			if promptRe.MatchString(line) || shellPromptRe.MatchString(line) {
-				continue
-			}
-			// Skip spinner/tool lines (these are working signals, not assistant text)
-			if spinnerRe.MatchString(line) || toolRunningRe.MatchString(line) {
-				break // spinner found — this is a working session, skip question check
-			}
-			// First non-prompt, non-spinner line is the most recent assistant output
-			if strings.HasSuffix(strings.TrimSpace(line), "?") {
-				state.prevActivity = "awaiting_input"
-				return "awaiting_input"
-			}
-			break // only check the first assistant-like line
-		}
-	}
-
-	// --- Priority 4: Working signals ---
-	limit := 15
-	if len(meaningful) < limit {
-		limit = len(meaningful)
-	}
-
-	// Spinner or tool-running detection (near bottom)
-	for _, line := range meaningful[:limit] {
-		if spinnerRe.MatchString(line) || toolRunningRe.MatchString(line) {
-			state.prevActivity = "working"
-			return "working"
-		}
-	}
-
-	// Content changed (and not typing — that's caught above in Priority 2)
+	// --- Priority 2: Working — content changed ---
+	// Checked BEFORE question detection: animated spinner (contentChanged=true each tick)
+	// never triggers awaiting_input. Fixes SWM-52/51.
 	if contentChanged {
 		state.prevActivity = "working"
 		return "working"
 	}
 
-	// --- 1-tick hold: if previous was "working", hold for one more tick ---
-	// Prevents flicker when Claude pauses briefly between tool calls
+	// --- Priority 2b: First-seen spinner/tool → working ---
+	// On the very first call prevHash was 0, so contentChanged=false even if there is
+	// an active spinner in the buffer. Scan the top of the pane to detect it. Fixes
+	// the case where SwarmOps starts and a session is already mid-tool-call.
+	if isFirstSeen && len(meaningful) > 0 {
+		limit := 15
+		if len(meaningful) < limit {
+			limit = len(meaningful)
+		}
+		for _, line := range meaningful[:limit] {
+			if spinnerRe.MatchString(line) || toolRunningRe.MatchString(line) {
+				state.prevActivity = "working"
+				return "working"
+			}
+		}
+	}
+
+	// --- Priority 3: User-typed prompt (stable) → awaiting_input ---
+	// ❯ followed by text means the user is composing input and hasn't submitted yet.
+	// Only fires when content is stable (contentChanged=false) so transient streaming
+	// output that happens to contain ❯ doesn't trigger this. Fixes SWM-46.
+	for _, line := range meaningful {
+		if promptRe.MatchString(line) && !barePromptRe.MatchString(line) {
+			state.prevActivity = "awaiting_input"
+			return "awaiting_input"
+		}
+	}
+
+	// --- Priority 4 (was 3): Question from Claude → awaiting_input ---
+	// Only fires when content is STABLE (contentChanged=false) AND a bare prompt is
+	// visible — meaning Claude has stopped and is waiting. Prevents false positives
+	// from assistant lines that happen to end with "?". Fixes SWM-51.
+	hasBarePrompt := false
+	for _, line := range meaningful {
+		if barePromptRe.MatchString(line) {
+			hasBarePrompt = true
+			break
+		}
+	}
+	if hasBarePrompt {
+		for _, line := range meaningful {
+			if barePromptRe.MatchString(line) {
+				continue
+			}
+			if promptRe.MatchString(line) || shellPromptRe.MatchString(line) {
+				continue
+			}
+			// Spinner/tool alongside bare prompt → still working
+			if spinnerRe.MatchString(line) || toolRunningRe.MatchString(line) {
+				break
+			}
+			// First non-prompt, non-spinner assistant line: check for trailing question
+			if strings.HasSuffix(strings.TrimSpace(line), "?") {
+				state.prevActivity = "awaiting_input"
+				return "awaiting_input"
+			}
+			break
+		}
+	}
+
+	// --- Priority 5: 1-tick hold ---
+	// Prevents flicker when Claude pauses briefly between tool calls.
+	// Also handles static spinner in buffer (SWM-46): spinner present but
+	// contentChanged=false means nothing actually moved — fall through to hold/idle.
 	if state.prevActivity == "working" {
-		state.prevActivity = "idle" // next tick will be idle if still no signal
+		state.prevActivity = "idle"
 		return "working"
 	}
 
-	// --- Priority 5: Idle ---
+	// --- Priority 6: Idle ---
 	state.prevActivity = "idle"
 	return "idle"
 }

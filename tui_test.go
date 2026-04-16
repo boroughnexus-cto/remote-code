@@ -272,6 +272,7 @@ func TestView_PoolSlots(t *testing.T) {
 		fakePoolItem("claude-sonnet-4-6", "busy"),
 	}
 	m := newTestModel(items)
+	m.poolExpanded = true // pool is collapsed by default; expand for this test
 	view := viewStripped(m)
 
 	assertContains(t, view, "SwarmOps")
@@ -1099,8 +1100,8 @@ func TestClassifyActivity_UserTypingHashChange(t *testing.T) {
   [Opus 4.6] nuc | ctx 5% 50k
 `
 	result := classifyActivity(capture2, state)
-	if result != "awaiting_input" {
-		t.Errorf("typing at prompt with hash change should be awaiting_input, got %q", result)
+	if result != "working" {
+		t.Errorf("typing at prompt with hash change should be working (content changed → Priority 2), got %q", result)
 	}
 }
 
