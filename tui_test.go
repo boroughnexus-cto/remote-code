@@ -1401,3 +1401,423 @@ func TestLoadItemsCmd_PopulatesSessions(t *testing.T) {
 		t.Errorf("expected alpha first, got %q", result.items[0].label)
 	}
 }
+
+// ─── handleKey: cursor navigation ───────────────────────────────────────────
+
+func TestHandleKey_CursorNavigation(t *testing.T) {
+	sessions := []Session{
+		{ID: "a", Name: "alpha"},
+		{ID: "b", Name: "beta"},
+		{ID: "c", Name: "gamma"},
+	}
+	m := newFakeModel(nil, sessions)
+	m.cursor = 1
+
+	// alt+a moves up
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Alt: true, Runes: []rune("a")})
+	m = updated.(tuiModel)
+	if m.cursor != 0 {
+		t.Errorf("alt+a: expected cursor 0, got %d", m.cursor)
+	}
+
+	// alt+a at top doesn't go negative
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Alt: true, Runes: []rune("a")})
+	m = updated.(tuiModel)
+	if m.cursor != 0 {
+		t.Errorf("alt+a at top: cursor should stay 0, got %d", m.cursor)
+	}
+
+	// alt+z moves down
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Alt: true, Runes: []rune("z")})
+	m = updated.(tuiModel)
+	if m.cursor != 1 {
+		t.Errorf("alt+z: expected cursor 1, got %d", m.cursor)
+	}
+
+	// alt+z at bottom doesn't overflow
+	m.cursor = len(m.items) - 1
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Alt: true, Runes: []rune("z")})
+	m = updated.(tuiModel)
+	if m.cursor >= len(m.items) {
+		t.Errorf("alt+z at bottom: cursor overflowed to %d (len=%d)", m.cursor, len(m.items))
+	}
+}
+
+// ─── handleKey: rename flow ──────────────────────────────────────────────────
+
+func TestHandleKey_RenameFlow(t *testing.T) {
+	sess := Session{ID: "sess-1", Name: "old-name"}
+	client := &fakeSwarmClient{Sessions: []Session{sess}}
+	m := newFakeModel(client, []Session{sess})
+	m.cursor = 0
+
+	// alt+r enters rename mode
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Alt: true, Runes: []rune("r")})
+	m = updated.(tuiModel)
+	if m.mode != modeRename {
+		t.Fatalf("expected modeRename after alt+r, got %d", m.mode)
+	}
+
+	// Type new name character by character via the input field
+	m.renameInput.SetValue("new-name")
+
+	// Enter saves it
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(tuiModel)
+
+	if m.mode != modePassthrough {
+		t.Errorf("expected modePassthrough after rename enter, got %d", m.mode)
+	}
+	found := false
+	for _, c := range client.Calls {
+		if c == "renameSession:sess-1" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected renameSession:sess-1 call, got: %v", client.Calls)
+	}
+}
+
+func TestHandleKey_RenameEsc(t *testing.T) {
+	sess := Session{ID: "sess-1", Name: "old-name"}
+	m := newFakeModel(nil, []Session{sess})
+	m.cursor = 0
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Alt: true, Runes: []rune("r")})
+	m = updated.(tuiModel)
+	if m.mode != modeRename {
+		t.Fatalf("expected modeRename, got %d", m.mode)
+	}
+
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = updated.(tuiModel)
+	if m.mode != modePassthrough {
+		t.Errorf("esc should return to modePassthrough, got %d", m.mode)
+	}
+}
+
+// ─── handleKey: edit-mission flow ───────────────────────────────────────────
+
+func TestHandleKey_EditMissionFlow(t *testing.T) {
+	sess := Session{ID: "sess-1", Name: "my-session"}
+	client := &fakeSwarmClient{Sessions: []Session{sess}}
+	m := newFakeModel(client, []Session{sess})
+	m.cursor = 0
+
+	// alt+m enters edit-mission mode
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Alt: true, Runes: []rune("m")})
+	m = updated.(tuiModel)
+	if m.mode != modeEditMission {
+		t.Fatalf("expected modeEditMission after alt+m, got %d", m.mode)
+	}
+
+	m.newMissionInput.SetValue("Fix all the bugs")
+
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(tuiModel)
+
+	if m.mode != modePassthrough {
+		t.Errorf("expected modePassthrough after mission enter, got %d", m.mode)
+	}
+	found := false
+	for _, c := range client.Calls {
+		if c == "setMission:sess-1" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected setMission:sess-1 call, got: %v", client.Calls)
+	}
+}
+
+func TestHandleKey_EditMissionEsc(t *testing.T) {
+	sess := Session{ID: "sess-1", Name: "my-session"}
+	m := newFakeModel(nil, []Session{sess})
+	m.cursor = 0
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Alt: true, Runes: []rune("m")})
+	m = updated.(tuiModel)
+
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = updated.(tuiModel)
+	if m.mode != modePassthrough {
+		t.Errorf("esc should return to modePassthrough, got %d", m.mode)
+	}
+}
+
+// ─── handleKey: new-session multi-step wizard ────────────────────────────────
+
+func TestHandleKey_NewSessionWizard_EscAtName(t *testing.T) {
+	m := newFakeModel(nil, nil)
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Alt: true, Runes: []rune("n")})
+	m = updated.(tuiModel)
+	if m.mode != modeNewName {
+		t.Fatalf("expected modeNewName, got %d", m.mode)
+	}
+
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = updated.(tuiModel)
+	if m.mode != modePassthrough {
+		t.Errorf("esc from modeNewName should return to modePassthrough, got %d", m.mode)
+	}
+}
+
+func TestHandleKey_NewSessionWizard_EmptyNameNoAdvance(t *testing.T) {
+	m := newFakeModel(nil, nil)
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Alt: true, Runes: []rune("n")})
+	m = updated.(tuiModel)
+
+	// Enter with empty name — should stay in modeNewName
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(tuiModel)
+	if m.mode != modeNewName {
+		t.Errorf("enter with empty name should stay in modeNewName, got %d", m.mode)
+	}
+}
+
+func TestHandleKey_NewSessionWizard_NameToDir(t *testing.T) {
+	m := newFakeModel(nil, nil)
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Alt: true, Runes: []rune("n")})
+	m = updated.(tuiModel)
+	m.newNameInput.SetValue("my-session")
+
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(tuiModel)
+	if m.mode != modeNewDir {
+		t.Errorf("enter with name should advance to modeNewDir, got %d", m.mode)
+	}
+}
+
+func TestHandleKey_NewSessionWizard_DirToMission(t *testing.T) {
+	m := newFakeModel(nil, nil)
+
+	// Get to modeNewDir
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Alt: true, Runes: []rune("n")})
+	m = updated.(tuiModel)
+	m.newNameInput.SetValue("my-session")
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(tuiModel)
+	if m.mode != modeNewDir {
+		t.Fatalf("expected modeNewDir, got %d", m.mode)
+	}
+
+	// Enter in modeNewDir advances to modeNewMission
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(tuiModel)
+	if m.mode != modeNewMission {
+		t.Errorf("enter in modeNewDir should advance to modeNewMission, got %d", m.mode)
+	}
+}
+
+func TestHandleKey_NewSessionWizard_EscAtDir(t *testing.T) {
+	m := newFakeModel(nil, nil)
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Alt: true, Runes: []rune("n")})
+	m = updated.(tuiModel)
+	m.newNameInput.SetValue("my-session")
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(tuiModel)
+
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = updated.(tuiModel)
+	if m.mode != modePassthrough {
+		t.Errorf("esc from modeNewDir should return to modePassthrough, got %d", m.mode)
+	}
+}
+
+func TestHandleKey_NewSessionWizard_MissionEsc(t *testing.T) {
+	m := newFakeModel(nil, nil)
+
+	// Advance to modeNewMission
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Alt: true, Runes: []rune("n")})
+	m = updated.(tuiModel)
+	m.newNameInput.SetValue("my-session")
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(tuiModel)
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(tuiModel)
+	if m.mode != modeNewMission {
+		t.Fatalf("expected modeNewMission, got %d", m.mode)
+	}
+
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = updated.(tuiModel)
+	if m.mode != modePassthrough {
+		t.Errorf("esc from modeNewMission should return to modePassthrough, got %d", m.mode)
+	}
+}
+
+// ─── handleKey: context picker ───────────────────────────────────────────────
+
+func TestHandleKey_ContextPicker_Navigation(t *testing.T) {
+	m := newFakeModel(nil, nil)
+	m.mode = modeContextPick
+	m.contexts = []contextItem{
+		{ID: "ctx-1", Name: "alpha"},
+		{ID: "ctx-2", Name: "beta"},
+	}
+	m.ctxCursor = 0
+
+	// down moves cursor
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("z"), Alt: true})
+	m = updated.(tuiModel)
+	if m.ctxCursor != 1 {
+		t.Errorf("expected ctxCursor 1, got %d", m.ctxCursor)
+	}
+
+	// up moves back
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a"), Alt: true})
+	m = updated.(tuiModel)
+	if m.ctxCursor != 0 {
+		t.Errorf("expected ctxCursor 0, got %d", m.ctxCursor)
+	}
+
+	// up at 0 doesn't go negative
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a"), Alt: true})
+	m = updated.(tuiModel)
+	if m.ctxCursor < 0 {
+		t.Errorf("ctxCursor should not go negative, got %d", m.ctxCursor)
+	}
+}
+
+func TestHandleKey_ContextPicker_EscCancels(t *testing.T) {
+	m := newFakeModel(nil, nil)
+	m.mode = modeContextPick
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = updated.(tuiModel)
+	if m.mode != modePassthrough {
+		t.Errorf("esc from modeContextPick should return to modePassthrough, got %d", m.mode)
+	}
+}
+
+func TestHandleKey_ContextPicker_EnterNoContext(t *testing.T) {
+	client := &fakeSwarmClient{}
+	m := newFakeModel(client, nil)
+	m.mode = modeContextPick
+	m.contexts = []contextItem{{ID: "ctx-1", Name: "alpha"}}
+	m.ctxCursor = 0 // cursor=0 means "no context"
+	m.newNameInput.SetValue("test-session")
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(tuiModel)
+
+	if m.mode != modePassthrough {
+		t.Errorf("expected modePassthrough after context pick enter, got %d", m.mode)
+	}
+	found := false
+	for _, c := range client.Calls {
+		if c == "Spawn" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected Spawn call, got: %v", client.Calls)
+	}
+}
+
+func TestHandleKey_ContextPicker_EnterWithContext(t *testing.T) {
+	client := &fakeSwarmClient{}
+	m := newFakeModel(client, nil)
+	m.mode = modeContextPick
+	m.contexts = []contextItem{{ID: "ctx-1", Name: "alpha"}}
+	m.ctxCursor = 1 // cursor=1 means contexts[0]
+	m.newNameInput.SetValue("test-session")
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(tuiModel)
+
+	if m.mode != modePassthrough {
+		t.Errorf("expected modePassthrough, got %d", m.mode)
+	}
+	found := false
+	for _, c := range client.Calls {
+		if c == "Spawn" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected Spawn call with context, got: %v", client.Calls)
+	}
+}
+
+// ─── handleKey: feedback flow ────────────────────────────────────────────────
+
+func TestHandleKey_FeedbackFlow_ToggleAndCancel(t *testing.T) {
+	m := newFakeModel(nil, nil)
+
+	// alt+f enters feedback mode
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Alt: true, Runes: []rune("f")})
+	m = updated.(tuiModel)
+	if m.mode != modeFeedbackType {
+		t.Fatalf("expected modeFeedbackType after alt+f, got %d", m.mode)
+	}
+	initialType := m.feedbackType
+
+	// left/right toggles between bug/feature
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	m = updated.(tuiModel)
+	if m.feedbackType == initialType {
+		t.Errorf("right should toggle feedbackType")
+	}
+
+	// esc cancels
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = updated.(tuiModel)
+	if m.mode != modePassthrough {
+		t.Errorf("esc from modeFeedbackType should return to modePassthrough, got %d", m.mode)
+	}
+}
+
+func TestHandleKey_FeedbackFlow_TypeToText(t *testing.T) {
+	m := newFakeModel(nil, nil)
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Alt: true, Runes: []rune("f")})
+	m = updated.(tuiModel)
+
+	// enter advances to feedback text
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(tuiModel)
+	if m.mode != modeFeedbackText {
+		t.Errorf("enter should advance to modeFeedbackText, got %d", m.mode)
+	}
+}
+
+func TestHandleKey_FeedbackText_EscCancels(t *testing.T) {
+	m := newFakeModel(nil, nil)
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Alt: true, Runes: []rune("f")})
+	m = updated.(tuiModel)
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(tuiModel)
+	if m.mode != modeFeedbackText {
+		t.Fatalf("expected modeFeedbackText, got %d", m.mode)
+	}
+
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = updated.(tuiModel)
+	if m.mode != modePassthrough {
+		t.Errorf("esc from modeFeedbackText should return to modePassthrough, got %d", m.mode)
+	}
+}
+
+func TestHandleKey_FeedbackText_EmptyEnterCancels(t *testing.T) {
+	m := newFakeModel(nil, nil)
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Alt: true, Runes: []rune("f")})
+	m = updated.(tuiModel)
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(tuiModel)
+
+	// Empty feedback — enter returns to passthrough without submitting
+	m.feedbackInput.SetValue("")
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(tuiModel)
+	if m.mode != modePassthrough {
+		t.Errorf("empty feedback enter should return to modePassthrough, got %d", m.mode)
+	}
+}
