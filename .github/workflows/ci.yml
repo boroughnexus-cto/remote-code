@@ -37,5 +37,9 @@ jobs:
     runs-on: [self-hosted, nuc-ubuntu-dev]
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
       - name: Build and restart swarmops
         run: make restart
