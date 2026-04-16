@@ -1,11 +1,9 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -226,10 +224,10 @@ type tuiModel struct {
 	spawner Spawner
 
 	// HTTP client for backend API (client mode)
-	api *apiClient
+	api swarmClient
 }
 
-func initialModel(api *apiClient) tuiModel {
+func initialModel(api swarmClient) tuiModel {
 	ni := textinput.New()
 	ni.Placeholder = "Session name"
 	ni.CharLimit = 64
@@ -335,7 +333,7 @@ type sessionCapture struct {
 // loadItemsCmd returns a tea.Cmd that builds the unified sidebar list.
 // Captures raw tmux pane content but does NOT classify activity (that happens in Update
 // via applyActivityClassification to avoid sharing the activityStates map with goroutines).
-func loadItemsCmd(api *apiClient) tea.Cmd {
+func loadItemsCmd(api swarmClient) tea.Cmd {
 	return func() tea.Msg {
 		var sessions []Session
 		if api != nil {
@@ -980,10 +978,7 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if m.cursor < len(m.items) {
 				item := m.items[m.cursor]
 				if m.api != nil {
-					data, _ := json.Marshal(map[string]interface{}{"mission": mission})
-					req, _ := http.NewRequest("PATCH", m.api.baseURL+"/api/swarm/sessions/"+item.sessionID, bytes.NewReader(data))
-					req.Header.Set("Content-Type", "application/json")
-					m.api.http.Do(req)
+					m.api.setMission(item.sessionID, mission)
 				} else {
 					updateSessionMission(context.Background(), item.sessionID, mission)
 				}
@@ -2041,7 +2036,7 @@ func animatedIndicator(activity string, frame int) string {
 		return statusStopped
 	}
 }
-func runTUI(api *apiClient) error {
+func runTUI(api swarmClient) error {
 	p := tea.NewProgram(initialModel(api), tea.WithAltScreen(), tea.WithMouseCellMotion())
 	_, err := p.Run()
 	return err

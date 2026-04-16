@@ -10,6 +10,19 @@ import (
 	"time"
 )
 
+// swarmClient is the interface the TUI uses to talk to the SwarmOps backend.
+// The concrete implementation is apiClient (HTTP). Tests use fakeSwarmClient.
+type swarmClient interface {
+	Spawn(ctx context.Context, name, dir string, contextID, contextName, mission *string, model string) (*Session, error)
+	listSessions() ([]Session, error)
+	deleteSession(id string) error
+	renameSession(id, name string) error
+	poolStatus() (map[string]interface{}, error)
+	getConfig(key string) (string, error)
+	setMission(id, mission string) error
+	healthCheck() error
+}
+
 // apiClient is an HTTP client for the SwarmOps backend API.
 // Used by the TUI in client mode instead of direct in-process calls.
 type apiClient struct {
@@ -147,6 +160,24 @@ func (c *apiClient) getConfig(key string) (string, error) {
 		return "", err
 	}
 	return entry.Value, nil
+}
+
+func (c *apiClient) setMission(id, mission string) error {
+	data, _ := json.Marshal(map[string]interface{}{"mission": mission})
+	req, err := http.NewRequest("PATCH", c.baseURL+"/api/swarm/sessions/"+id, bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return fmt.Errorf("API %d", resp.StatusCode)
+	}
+	return nil
 }
 
 // healthCheck verifies the backend is reachable.

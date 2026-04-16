@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -1224,5 +1225,179 @@ func TestAnimatedIndicator_AllStates(t *testing.T) {
 		if stripped != tt.expect {
 			t.Errorf("activity %q: expected %q, got %q", tt.activity, tt.expect, stripped)
 		}
+	}
+}
+
+// ─── toInt64 tests ──────────────────────────────────────────────────────────
+
+func TestToInt64(t *testing.T) {
+	tests := []struct {
+		name  string
+		input interface{}
+		want  int64
+	}{
+		{"int64", int64(42), 42},
+		{"float64", float64(7.9), 7},
+		{"json.Number", json.Number("123"), 123},
+		{"json.Number invalid", json.Number("bad"), 0},
+		{"nil", nil, 0},
+		{"string", "42", 0},
+		{"zero float", float64(0), 0},
+		{"negative", int64(-5), -5},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := toInt64(tt.input)
+			if got != tt.want {
+				t.Errorf("toInt64(%v) = %d, want %d", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+// ─── fakeSwarmClient ────────────────────────────────────────────────────────
+
+// fakeSwarmClient is an in-memory swarmClient for unit tests.
+// Fields control return values; calls are recorded in the Calls slice.
+type fakeSwarmClient struct {
+	Sessions     []Session
+	SpawnedName  string
+	SpawnErr     error
+	DeleteErr    error
+	RenameErr    error
+	PoolResp     map[string]interface{}
+	ConfigValues map[string]string
+	HealthErr    error
+
+	Calls []string // e.g. "Spawn", "listSessions", "deleteSession:id"
+}
+
+func (f *fakeSwarmClient) Spawn(_ context.Context, name, dir string, contextID, contextName, mission *string, model string) (*Session, error) {
+	f.Calls = append(f.Calls, "Spawn")
+	if f.SpawnErr != nil {
+		return nil, f.SpawnErr
+	}
+	s := &Session{ID: "fake-id", Name: name, Directory: dir}
+	f.Sessions = append(f.Sessions, *s)
+	return s, nil
+}
+func (f *fakeSwarmClient) listSessions() ([]Session, error) {
+	f.Calls = append(f.Calls, "listSessions")
+	return f.Sessions, nil
+}
+func (f *fakeSwarmClient) deleteSession(id string) error {
+	f.Calls = append(f.Calls, "deleteSession:"+id)
+	return f.DeleteErr
+}
+func (f *fakeSwarmClient) renameSession(id, name string) error {
+	f.Calls = append(f.Calls, "renameSession:"+id)
+	return f.RenameErr
+}
+func (f *fakeSwarmClient) poolStatus() (map[string]interface{}, error) {
+	f.Calls = append(f.Calls, "poolStatus")
+	return f.PoolResp, nil
+}
+func (f *fakeSwarmClient) getConfig(key string) (string, error) {
+	f.Calls = append(f.Calls, "getConfig:"+key)
+	if f.ConfigValues != nil {
+		return f.ConfigValues[key], nil
+	}
+	return "", nil
+}
+func (f *fakeSwarmClient) setMission(id, mission string) error {
+	f.Calls = append(f.Calls, "setMission:"+id)
+	return nil
+}
+func (f *fakeSwarmClient) healthCheck() error {
+	f.Calls = append(f.Calls, "healthCheck")
+	return f.HealthErr
+}
+
+// newFakeModel returns a tuiModel wired to a fakeSwarmClient for key-handler testing.
+func newFakeModel(client *fakeSwarmClient, sessions []Session) tuiModel {
+	if client == nil {
+		client = &fakeSwarmClient{}
+	}
+	m := initialModel(client)
+	m.items = make([]sidebarItem, len(sessions))
+	for i, s := range sessions {
+		m.items[i] = sidebarItem{
+			kind:      itemSession,
+			label:     s.Name,
+			sessionID: s.ID,
+			status:    "running",
+		}
+	}
+	return m
+}
+
+// ─── Client-layer key-handler tests ─────────────────────────────────────────
+
+func TestHandleKey_DeleteSession(t *testing.T) {
+	sess := Session{ID: "sess-1", Name: "my-session"}
+	client := &fakeSwarmClient{Sessions: []Session{sess}}
+	m := newFakeModel(client, []Session{sess})
+	m.cursor = 0
+
+	// alt+d deletes the selected session immediately (no confirm modal)
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Alt: true, Runes: []rune("d")})
+	m = updated.(tuiModel)
+
+	found := false
+	for _, c := range client.Calls {
+		if c == "deleteSession:sess-1" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected deleteSession:sess-1 call, got calls: %v", client.Calls)
+	}
+}
+
+func TestHandleKey_NewSession(t *testing.T) {
+	client := &fakeSwarmClient{}
+	m := newFakeModel(client, nil)
+
+	// alt+n opens new-session name input
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Alt: true, Runes: []rune("n")})
+	m = updated.(tuiModel)
+
+	if m.mode != modeNewName {
+		t.Errorf("expected modeNewName after alt+n, got %d", m.mode)
+	}
+}
+
+func TestHandleKey_PoolToggle(t *testing.T) {
+	m := newFakeModel(nil, nil)
+	initial := m.poolExpanded
+
+	// alt+o toggles pool expansion
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Alt: true, Runes: []rune("o")})
+	m = updated.(tuiModel)
+
+	if m.poolExpanded == initial {
+		t.Errorf("Alt+O should toggle poolExpanded from %v", initial)
+	}
+}
+
+func TestLoadItemsCmd_PopulatesSessions(t *testing.T) {
+	client := &fakeSwarmClient{
+		Sessions: []Session{
+			{ID: "a", Name: "alpha"},
+			{ID: "b", Name: "beta"},
+		},
+	}
+	cmd := loadItemsCmd(client)
+	msg := cmd()
+
+	result, ok := msg.(itemsMsg)
+	if !ok {
+		t.Fatalf("expected itemsMsg, got %T", msg)
+	}
+	if len(result.items) != 2 {
+		t.Errorf("expected 2 items, got %d", len(result.items))
+	}
+	if result.items[0].label != "alpha" {
+		t.Errorf("expected alpha first, got %q", result.items[0].label)
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -1172,6 +1173,154 @@ func TestFilterIcinga_EdgeCases(t *testing.T) {
 			}
 		})
 	}
+}
+
+// ─── Utility function tests ─────────────────────────────────────────────────
+
+func TestStripHTMLTags(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"empty", "", ""},
+		{"no tags", "plain text", "plain text"},
+		{"simple tag", "<p>hello</p>", "hello"},
+		{"nested tags", "<p><b>bold</b> text</p>", "bold text"},
+		{"self-closing", "<br/>line", "line"},
+		{"attributes", `<a href="http://example.com">link</a>`, "link"},
+		{"multiple tags", "<h1>Title</h1><p>Body</p>", "TitleBody"},
+		{"collapses triple newlines", "a\n\n\nb", "a\n\nb"},
+		{"trims whitespace", "  text  ", "text"},
+		{"preserves inner newlines", "line1\nline2", "line1\nline2"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := stripHTMLTags(tt.input)
+			if got != tt.want {
+				t.Errorf("stripHTMLTags(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFormatDuration(t *testing.T) {
+	tests := []struct {
+		name string
+		d    time.Duration
+		want string
+	}{
+		{"zero", 0, "0s"},
+		{"seconds", 45 * time.Second, "45s"},
+		{"just under minute", 59 * time.Second, "59s"},
+		{"one minute", time.Minute, "1m"},
+		{"minutes", 90 * time.Second, "1m"},
+		{"one hour exact", time.Hour, "1h"},
+		{"hour and minutes", time.Hour + 30*time.Minute, "1h30m"},
+		{"hours exact", 3 * time.Hour, "3h"},
+		{"one day exact", 24 * time.Hour, "1d"},
+		{"days and hours", 25 * time.Hour, "1d1h"},
+		{"days no hours", 48 * time.Hour, "2d"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := formatDuration(tt.d)
+			if got != tt.want {
+				t.Errorf("formatDuration(%v) = %q, want %q", tt.d, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestWrapText(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		width int
+		want  []string
+	}{
+		{"zero width returns as-is", "hello world", 0, []string{"hello world"}},
+		{"fits in width", "hello", 10, []string{"hello"}},
+		{"wraps at space", "hello world", 7, []string{"hello", "world"}},
+		{"no space — hard cut", "helloworld", 5, []string{"hello", "world"}},
+		{"multi line input", "ab\ncd", 10, []string{"ab", "cd"}},
+		{"empty string", "", 10, []string{""}},
+		{"long word split", "abcdefgh", 3, []string{"abc", "def", "gh"}},
+		{"trailing space stripped after wrap", "hello world  ", 7, []string{"hello", "world"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := wrapText(tt.input, tt.width)
+			if len(got) != len(tt.want) {
+				t.Errorf("wrapText(%q, %d) = %v, want %v", tt.input, tt.width, got, tt.want)
+				return
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("wrapText(%q, %d)[%d] = %q, want %q", tt.input, tt.width, i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
+
+func TestGroupIcingaByHost(t *testing.T) {
+	t.Run("empty input", func(t *testing.T) {
+		groups := groupIcingaByHost(nil)
+		if len(groups) != 0 {
+			t.Errorf("expected empty, got %d groups", len(groups))
+		}
+	})
+
+	t.Run("preserves insertion order", func(t *testing.T) {
+		problems := []icingaProblem{
+			{Host: "bravo", Service: "svc1", State: 2},
+			{Host: "alpha", Service: "svc2", State: 1},
+			{Host: "bravo", Service: "svc3", State: 1},
+		}
+		groups := groupIcingaByHost(problems)
+		if len(groups) != 2 {
+			t.Fatalf("expected 2 groups, got %d", len(groups))
+		}
+		if groups[0].Host != "bravo" {
+			t.Errorf("expected first group bravo, got %q", groups[0].Host)
+		}
+		if groups[1].Host != "alpha" {
+			t.Errorf("expected second group alpha, got %q", groups[1].Host)
+		}
+	})
+
+	t.Run("counts crits and warnings", func(t *testing.T) {
+		problems := []icingaProblem{
+			{Host: "host1", Service: "a", State: 2},
+			{Host: "host1", Service: "b", State: 2},
+			{Host: "host1", Service: "c", State: 1},
+		}
+		groups := groupIcingaByHost(problems)
+		if len(groups) != 1 {
+			t.Fatalf("expected 1 group")
+		}
+		g := groups[0]
+		if g.CritCount != 2 {
+			t.Errorf("CritCount = %d, want 2", g.CritCount)
+		}
+		if g.WarnCount != 1 {
+			t.Errorf("WarnCount = %d, want 1", g.WarnCount)
+		}
+		if len(g.Problems) != 3 {
+			t.Errorf("Problems len = %d, want 3", len(g.Problems))
+		}
+	})
+
+	t.Run("unknown state not counted", func(t *testing.T) {
+		problems := []icingaProblem{
+			{Host: "h", Service: "x", State: 3},
+		}
+		g := groupIcingaByHost(problems)[0]
+		if g.CritCount != 0 || g.WarnCount != 0 {
+			t.Errorf("unknown state should not increment counts, got crit=%d warn=%d", g.CritCount, g.WarnCount)
+		}
+	})
 }
 
 // suppress unused import warning

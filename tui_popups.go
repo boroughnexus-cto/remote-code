@@ -77,7 +77,7 @@ type planeConfig struct {
 	apiURL, apiKey, workspace, projectID string
 }
 
-func getPlaneConfig(api *apiClient) (planeConfig, error) {
+func getPlaneConfig(api swarmClient) (planeConfig, error) {
 	var c planeConfig
 	if api != nil {
 		c.apiURL, _ = api.getConfig("plane.api_url")
@@ -107,7 +107,7 @@ type icingaConfig struct {
 	apiURL, apiUser, apiPass string
 }
 
-func getIcingaConfig(api *apiClient) (icingaConfig, error) {
+func getIcingaConfig(api swarmClient) (icingaConfig, error) {
 	var c icingaConfig
 	if api != nil {
 		c.apiURL, _ = api.getConfig("icinga.api_url")
@@ -137,7 +137,7 @@ func icingaHTTPClient() *http.Client {
 
 // ─── Data fetching ──────────────────────────────────────────────────────────
 
-func fetchPlaneIssues(reqID uint64, api *apiClient) tea.Cmd {
+func fetchPlaneIssues(reqID uint64, api swarmClient) tea.Cmd {
 	return func() tea.Msg {
 		cfg, err := getPlaneConfig(api)
 		if err != nil {
@@ -204,7 +204,7 @@ func fetchPlaneIssues(reqID uint64, api *apiClient) tea.Cmd {
 	}
 }
 
-func fetchIcingaProblems(reqID uint64, api *apiClient) tea.Cmd {
+func fetchIcingaProblems(reqID uint64, api swarmClient) tea.Cmd {
 	return func() tea.Msg {
 		cfg, err := getIcingaConfig(api)
 		if err != nil {
@@ -296,7 +296,7 @@ func fetchIcingaProblems(reqID uint64, api *apiClient) tea.Cmd {
 // ─── Write actions ──────────────────────────────────────────────────────────
 
 // planeUpdateIssue updates a Plane issue's state or assignees.
-func planeUpdateIssue(api *apiClient, issueID string, updates map[string]interface{}) tea.Cmd {
+func planeUpdateIssue(api swarmClient, issueID string, updates map[string]interface{}) tea.Cmd {
 	return func() tea.Msg {
 		cfg, err := getPlaneConfig(api)
 		if err != nil {
@@ -335,14 +335,14 @@ type planeStatesMsg struct {
 }
 
 // fetchPlaneStates returns a tea.Cmd that fetches state IDs asynchronously.
-func fetchPlaneStates(api *apiClient) tea.Cmd {
+func fetchPlaneStates(api swarmClient) tea.Cmd {
 	return func() tea.Msg {
 		return planeStatesMsg{states: planeGetStates(api)}
 	}
 }
 
 // planeGetStates fetches the state IDs for a project to enable state transitions.
-func planeGetStates(api *apiClient) map[string]string {
+func planeGetStates(api swarmClient) map[string]string {
 	cfg, err := getPlaneConfig(api)
 	if err != nil {
 		return nil
@@ -386,7 +386,7 @@ func planeGetStates(api *apiClient) map[string]string {
 }
 
 // icingaAcknowledge acknowledges an Icinga service problem.
-func icingaAcknowledge(api *apiClient, objectName, comment string) tea.Cmd {
+func icingaAcknowledge(api swarmClient, objectName, comment string) tea.Cmd {
 	return func() tea.Msg {
 		cfg, err := getIcingaConfig(api)
 		if err != nil {
@@ -427,7 +427,7 @@ func icingaAcknowledge(api *apiClient, objectName, comment string) tea.Cmd {
 }
 
 // icingaScheduleDowntime schedules a downtime for an Icinga service.
-func icingaScheduleDowntime(api *apiClient, objectName string, duration time.Duration, comment string) tea.Cmd {
+func icingaScheduleDowntime(api swarmClient, objectName string, duration time.Duration, comment string) tea.Cmd {
 	return func() tea.Msg {
 		cfg, err := getIcingaConfig(api)
 		if err != nil {
@@ -1064,7 +1064,7 @@ func renderDispatchContextPicker(m tuiModel) string {
 }
 
 // submitFeedback creates a Plane issue in the SwarmOps feedback project.
-func submitFeedback(kind, summary string, api *apiClient, tuiSnapshot string) {
+func submitFeedback(kind, summary string, api swarmClient, tuiSnapshot string) {
 	cfg, err := getPlaneConfig(api)
 	if err != nil {
 		log.Printf("feedback: %v", err)
