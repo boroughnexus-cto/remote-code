@@ -1853,17 +1853,13 @@ func (m tuiModel) renderPoolSlotDetail(item sidebarItem) string {
 func (m tuiModel) renderContextPicker() string {
 	// Build all options: 0=(none), i+1=contexts[i]
 	total := len(m.contexts) + 1
-	labels := make([]string, total)
-	labels[0] = "(none)"
+	rawLabels := make([]string, total)
+	rawLabels[0] = "(none)"
 	for i, c := range m.contexts {
-		lbl := c.Name
-		if len(lbl) > 22 {
-			lbl = lbl[:19] + "..."
-		}
-		labels[i+1] = lbl
+		rawLabels[i+1] = c.Name
 	}
 
-	// Sliding window of 4 around cursor — fixes SWM-50 overflow
+	// Sliding window of 4 around cursor
 	const windowSize = 4
 	start := m.ctxCursor - windowSize/2
 	if start < 0 {
@@ -1874,6 +1870,39 @@ func (m tuiModel) renderContextPicker() string {
 		end = total
 		if start = end - windowSize; start < 0 {
 			start = 0
+		}
+	}
+
+	// Calculate max label length that fits within terminal width.
+	// Budget: prefix + arrows (2) + separators (3 each between items) + 2 brackets on selected.
+	prefix := fmt.Sprintf("Context: (%d/%d) ", m.ctxCursor, total-1)
+	arrowBudget := 0
+	if start > 0 {
+		arrowBudget += 4 // "← │ "
+	}
+	if end < total {
+		arrowBudget += 4 // " │ →"
+	}
+	nItems := end - start
+	sepBudget := 3 * (nItems - 1) // " │ " between items
+	bracketBudget := 2             // "[" + "]" around selected item
+	available := m.w - len(prefix) - arrowBudget - sepBudget - bracketBudget
+	maxLabelLen := available / nItems
+	if maxLabelLen < 8 {
+		maxLabelLen = 8 // minimum readable length
+	}
+
+	// Truncate labels to fit
+	labels := make([]string, total)
+	for i, lbl := range rawLabels {
+		if len(lbl) > maxLabelLen {
+			cut := maxLabelLen - 3
+			if cut < 1 {
+				cut = 1
+			}
+			labels[i] = lbl[:cut] + "..."
+		} else {
+			labels[i] = lbl
 		}
 	}
 
@@ -1892,7 +1921,6 @@ func (m tuiModel) renderContextPicker() string {
 		parts = append(parts, dimStyle.Render("→"))
 	}
 
-	prefix := fmt.Sprintf("Context: (%d/%d) ", m.ctxCursor, total-1)
 	return prefix + strings.Join(parts, " │ ")
 }
 
