@@ -127,6 +127,79 @@ func registerReadTools(reg *ToolRegistry, svc *Services) {
 		},
 	)
 
+	// ─── rc_list_sessions ───────────────────────────────────────────────
+	reg.Register(
+		ToolDefinition{
+			Name:        "rc_list_sessions",
+			Description: "[READ] List all managed sessions with status, mission, and activity.",
+			InputSchema: jsonSchema(map[string]interface{}{}, nil),
+		},
+		func(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+			return svc.ListExecutions(ctx)
+		},
+	)
+
+	// ─── rc_get_session ─────────────────────────────────────────────────
+	reg.Register(
+		ToolDefinition{
+			Name:        "rc_get_session",
+			Description: "[READ] Get a single session by ID with full details.",
+			InputSchema: jsonSchema(map[string]interface{}{
+				"id": stringProp("Session ID"),
+			}, []string{"id"}),
+		},
+		func(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+			id := getStringArg(args, "id", "")
+			if id == "" {
+				return nil, fmt.Errorf("id is required")
+			}
+			return svc.GetExecution(ctx, id)
+		},
+	)
+
+	// ─── rc_get_terminal ────────────────────────────────────────────────
+	reg.Register(
+		ToolDefinition{
+			Name:        "rc_get_terminal",
+			Description: "[READ] Get the terminal scrollback for a session (last ~500 lines).",
+			InputSchema: jsonSchema(map[string]interface{}{
+				"id": stringProp("Session ID"),
+			}, []string{"id"}),
+		},
+		func(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+			id := getStringArg(args, "id", "")
+			if id == "" {
+				return nil, fmt.Errorf("id is required")
+			}
+			content, err := svc.GetTerminal(ctx, id)
+			if err != nil {
+				return nil, err
+			}
+			return map[string]string{"content": content}, nil
+		},
+	)
+
+	// ─── rc_list_audit_events ───────────────────────────────────────────
+	reg.Register(
+		ToolDefinition{
+			Name:        "rc_list_audit_events",
+			Description: "[READ] List session lifecycle events (create, stop, delete, rename). Returns most recent first.",
+			InputSchema: jsonSchema(map[string]interface{}{
+				"limit": map[string]interface{}{
+					"type":        "integer",
+					"description": "Maximum number of events to return (default 100)",
+				},
+			}, nil),
+		},
+		func(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+			limit := 100
+			if v, ok := args["limit"].(float64); ok && v > 0 {
+				limit = int(v)
+			}
+			return svc.ListAuditEvents(ctx, limit)
+		},
+	)
+
 	// ─── rc_git_status ──────────────────────────────────────────────────
 	reg.Register(
 		ToolDefinition{

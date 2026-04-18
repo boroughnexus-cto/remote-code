@@ -112,6 +112,73 @@ func (s *Services) DeleteExecution(ctx context.Context, id string) error {
 	return deleteSession(ctx, id)
 }
 
+func (s *Services) RenameSession(ctx context.Context, id, name string) error {
+	return renameSession(ctx, id, name)
+}
+
+// StopSession sends Ctrl+C to interrupt the running process in the session.
+func (s *Services) StopSession(ctx context.Context, id string) error {
+	sess, err := getSession(ctx, id)
+	if err != nil {
+		return fmt.Errorf("session not found: %s", id)
+	}
+	if sess.Status != "running" {
+		return fmt.Errorf("session %s is not running", id)
+	}
+	return exec.Command("tmux", "send-keys", "-t", sess.TmuxSession, "C-c").Run()
+}
+
+// StartSession resumes a stopped session by restarting claude in its tmux window.
+func (s *Services) StartSession(ctx context.Context, id string) error {
+	sess, err := getSession(ctx, id)
+	if err != nil {
+		return fmt.Errorf("session not found: %s", id)
+	}
+	if sess.Status == "running" {
+		return fmt.Errorf("session %s is already running", id)
+	}
+	if !isTmuxAlive(sess.TmuxSession) {
+		dir := "."
+		if sess.Directory != "" {
+			dir = sess.Directory
+		}
+		cArgs := resumeClaudeCmd(func() string {
+			if sess.ClaudeSessionID != nil {
+				return *sess.ClaudeSessionID
+			}
+			return ""
+		}())
+		args := append([]string{"new-session", "-d", "-s", sess.TmuxSession, "-c", dir, "-x", "200", "-y", "50", "--"}, cArgs...)
+		if out, err := exec.Command("tmux", args...).CombinedOutput(); err != nil {
+			return fmt.Errorf("failed to recreate tmux session: %s", strings.TrimSpace(string(out)))
+		}
+	} else {
+		cArgs := resumeClaudeCmd(func() string {
+			if sess.ClaudeSessionID != nil {
+				return *sess.ClaudeSessionID
+			}
+			return ""
+		}())
+		exec.Command("tmux", append([]string{"send-keys", "-t", sess.TmuxSession}, append(cArgs, "")...)...).Run()
+		exec.Command("tmux", "send-keys", "-t", sess.TmuxSession, strings.Join(cArgs, " "), "Enter").Run()
+	}
+	return nil
+}
+
+// GetTerminal returns the terminal scrollback for a session.
+func (s *Services) GetTerminal(ctx context.Context, id string) (string, error) {
+	sess, err := getSession(ctx, id)
+	if err != nil {
+		return "", fmt.Errorf("session not found: %s", id)
+	}
+	return captureTerminal(sess.TmuxSession)
+}
+
+// ListAuditEvents returns recent session lifecycle events.
+func (s *Services) ListAuditEvents(ctx context.Context, limit int) ([]ManagedSessionEvent, error) {
+	return listAuditEvents(ctx, limit)
+}
+
 // ─── Tmux Sessions ──────────────────────────────────────────────────────────
 
 func (s *Services) TmuxSessions() ([]TmuxSessionInfo, error) {

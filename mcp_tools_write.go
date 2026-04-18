@@ -58,6 +58,97 @@ func registerWriteTools(reg *ToolRegistry, svc *Services, enablePoolTools bool) 
 		},
 	)
 
+	// ─── rc_rename_session ──────────────────────────────────────────────
+	reg.Register(
+		ToolDefinition{
+			Name:        "rc_rename_session",
+			Description: "[WRITE] Rename a session.",
+			InputSchema: jsonSchema(map[string]interface{}{
+				"id":   stringProp("Session ID"),
+				"name": stringProp("New session name"),
+			}, []string{"id", "name"}),
+		},
+		func(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+			id := getStringArg(args, "id", "")
+			name := getStringArg(args, "name", "")
+			if id == "" {
+				return nil, fmt.Errorf("id is required")
+			}
+			if name == "" {
+				return nil, fmt.Errorf("name is required")
+			}
+			if err := svc.RenameSession(ctx, id, name); err != nil {
+				return nil, err
+			}
+			return map[string]string{"status": "ok", "name": name}, nil
+		},
+	)
+
+	// ─── rc_set_mission ─────────────────────────────────────────────────
+	reg.Register(
+		ToolDefinition{
+			Name:        "rc_set_mission",
+			Description: "[WRITE] Set or update the mission statement for a session (1-3 sentences).",
+			InputSchema: jsonSchema(map[string]interface{}{
+				"id":      stringProp("Session ID"),
+				"mission": stringProp("Mission statement (empty string to clear)"),
+			}, []string{"id", "mission"}),
+		},
+		func(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+			id := getStringArg(args, "id", "")
+			mission := getStringArg(args, "mission", "")
+			if id == "" {
+				return nil, fmt.Errorf("id is required")
+			}
+			if err := svc.UpdateSessionMission(ctx, id, mission); err != nil {
+				return nil, err
+			}
+			return map[string]string{"status": "ok"}, nil
+		},
+	)
+
+	// ─── rc_stop_session ────────────────────────────────────────────────
+	reg.Register(
+		ToolDefinition{
+			Name:        "rc_stop_session",
+			Description: "[WRITE] Send interrupt (Ctrl+C) to a running session to stop it.",
+			InputSchema: jsonSchema(map[string]interface{}{
+				"id": stringProp("Session ID"),
+			}, []string{"id"}),
+		},
+		func(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+			id := getStringArg(args, "id", "")
+			if id == "" {
+				return nil, fmt.Errorf("id is required")
+			}
+			if err := svc.StopSession(ctx, id); err != nil {
+				return nil, err
+			}
+			return map[string]string{"status": "ok"}, nil
+		},
+	)
+
+	// ─── rc_start_session ───────────────────────────────────────────────
+	reg.Register(
+		ToolDefinition{
+			Name:        "rc_start_session",
+			Description: "[WRITE] Start or resume a stopped session (re-launches claude in its tmux window).",
+			InputSchema: jsonSchema(map[string]interface{}{
+				"id": stringProp("Session ID"),
+			}, []string{"id"}),
+		},
+		func(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+			id := getStringArg(args, "id", "")
+			if id == "" {
+				return nil, fmt.Errorf("id is required")
+			}
+			if err := svc.StartSession(ctx, id); err != nil {
+				return nil, err
+			}
+			return map[string]string{"status": "ok"}, nil
+		},
+	)
+
 	// ─── rc_accept_execution ────────────────────────────────────────────
 	reg.Register(
 		ToolDefinition{
