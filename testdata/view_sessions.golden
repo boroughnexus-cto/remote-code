@@ -1,26 +1,26 @@
-                        │my-project  running                                            
- SwarmOps      00:00:00 │──────────────────────────────────────────────────────         
- 2 sess                 │                                                               
- ────────────────────   │                                                               
-                        │                                                               
- ▸ ○ my-project         │                                                               
-   ○ old-task           │                                                               
-                        │                                                               
-                        │                                                               
-                        │                                                               
-                        │                                                               
-                        │                                                               
-                        │                                                               
-                        │                                                               
-                        │                                                               
-                        │                                                               
-                        │                                                               
-                        │                                                               
-                        │                                                               
-                        │                                                               
-                        │                                                               
-                        │                                                               
-                        │                                                               
-                                                                                        
-Alt+A/Z nav │ Alt+N new │ Alt+S start/stop │ Alt+R rename │ Alt+M mission │ Alt+D delete
-Alt+P plane │ Alt+I icinga │ Alt+L audit │ Alt+O pool │ Alt+F feedback │ Alt+Q quit     
+                        │my-project  running                                                           
+ SwarmOps      00:00:00 │──────────────────────────────────────────────────────                        
+ 2 sess                 │                                                                              
+ ────────────────────   │                                                                              
+                        │                                                                              
+ ▸ ○ my-project         │                                                                              
+   ○ old-task           │                                                                              
+                        │                                                                              
+                        │                                                                              
+                        │                                                                              
+                        │                                                                              
+                        │                                                                              
+                        │                                                                              
+                        │                                                                              
+                        │                                                                              
+                        │                                                                              
+                        │                                                                              
+                        │                                                                              
+                        │                                                                              
+                        │                                                                              
+                        │                                                                              
+                        │                                                                              
+                        │                                                                              
+                                                                                                       
+Alt+A/Z nav │ Alt+N new │ Alt+S start/stop │ Alt+R rename │ Alt+M mission │ Alt+D delete               
+Alt+P plane │ Alt+I icinga │ Alt+L audit │ Alt+W close issue │ Alt+O pool │ Alt+F feedback │ Alt+Q quit

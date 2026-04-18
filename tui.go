@@ -426,7 +426,9 @@ func loadItemsCmd(api swarmClient) tea.Cmd {
 							alive, _ := slot["alive"].(bool)
 
 							ind := statusAPI
-							if !alive || state == "dead" {
+							if state == "starting" {
+								ind = lipgloss.NewStyle().Foreground(lipgloss.Color("#ffd700")).Render("↺")
+							} else if !alive || state == "dead" {
 								ind = statusStopped
 							}
 
@@ -868,6 +870,14 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.popupCursor = 0
 			m.popupErr = ""
 			return m, fetchAuditEvents(m.api)
+		case "alt+w":
+			// Close the Plane issue referenced in the current session's name (SWM-26)
+			if m.cursor < len(m.items) && m.items[m.cursor].kind == itemSession {
+				label := m.items[m.cursor].label
+				m.flash = "Closing Plane issue for session..."
+				return m, planeCloseSessionIssue(label, m.api)
+			}
+			return m, nil
 		case "alt+b":
 			// Snap viewport to bottom and resume auto-scroll
 			if m.vpReady {
@@ -1601,7 +1611,7 @@ func (m tuiModel) View() string {
 			statusLine = dimStyle.Render(m.flash)
 		} else {
 			statusLine = dimStyle.Render("Alt+A/Z nav │ Alt+N new │ Alt+S start/stop │ Alt+R rename │ Alt+M mission │ Alt+D delete") + "\n" +
-				dimStyle.Render("Alt+P plane │ Alt+I icinga │ Alt+L audit │ Alt+O pool │ Alt+F feedback │ Alt+Q quit")
+				dimStyle.Render("Alt+P plane │ Alt+I icinga │ Alt+L audit │ Alt+W close issue │ Alt+O pool │ Alt+F feedback │ Alt+Q quit")
 		}
 	}
 

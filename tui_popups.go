@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -1191,6 +1192,101 @@ func stripHTMLTags(s string) string {
 		result = strings.ReplaceAll(result, "\n\n\n", "\n\n")
 	}
 	return result
+}
+
+// ─── Plane: close session issue (SWM-26) ────────────────────────────────────
+
+// planeIssueRefRe matches identifiers like "SWM-42" anywhere in a string.
+var planeIssueRefRe = regexp.MustCompile(`\b([A-Z]+-\d+)\b`)
+
+// planeCloseSessionIssue finds the first "PROJECT-N" token in sessionName,
+// looks it up in Plane, transitions it to the "completed" group state, and
+// returns a popupActionDoneMsg flash.
+func planeCloseSessionIssue(sessionName string, api swarmClient) tea.Cmd {
+	return func() tea.Msg {
+		m := planeIssueRefRe.FindStringSubmatch(sessionName)
+		if m == nil {
+			return popupActionDoneMsg{flash: "No issue ref found in session name (e.g. SWM-42)"}
+		}
+		identifier := m[1]
+
+		cfg, err := getPlaneConfig(api)
+		if err != nil {
+			return popupActionDoneMsg{flash: "Plane not configured: " + err.Error()}
+		}
+
+		// Fetch states to find the "completed" state ID.
+		states := planeGetStates(api)
+		doneStateID, ok := states["completed"]
+		if !ok {
+			return popupActionDoneMsg{flash: "Could not find 'completed' state in Plane project"}
+		}
+
+		// Fetch issues to find the issue UUID matching identifier.
+		issueURL := fmt.Sprintf("%s/api/v1/workspaces/%s/projects/%s/issues/?per_page=250",
+			strings.TrimRight(cfg.apiURL, "/"), cfg.workspace, cfg.projectID)
+		req, err := http.NewRequest("GET", issueURL, nil)
+		if err != nil {
+			return popupActionDoneMsg{flash: "Error: " + err.Error()}
+		}
+		req.Header.Set("X-API-Key", cfg.apiKey)
+		req.Header.Set("Accept", "application/json")
+		client := &http.Client{Timeout: 10 * time.Second}
+		resp, err := client.Do(req)
+		if err != nil {
+			return popupActionDoneMsg{flash: "Error: " + err.Error()}
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+
+		var parsed struct {
+			Results []struct {
+				ID         string `json:"id"`
+				SequenceID int    `json:"sequence_id"`
+			} `json:"results"`
+		}
+		json.Unmarshal(body, &parsed)
+
+		// Match identifier suffix (e.g. "42" in "SWM-42").
+		parts := strings.SplitN(identifier, "-", 2)
+		if len(parts) != 2 {
+			return popupActionDoneMsg{flash: "Could not parse issue ref: " + identifier}
+		}
+		var seqID int
+		fmt.Sscanf(parts[1], "%d", &seqID)
+
+		var issueID string
+		for _, iss := range parsed.Results {
+			if iss.SequenceID == seqID {
+				issueID = iss.ID
+				break
+			}
+		}
+		if issueID == "" {
+			return popupActionDoneMsg{flash: "Issue " + identifier + " not found in Plane project"}
+		}
+
+		// PATCH the issue to set state = completed.
+		patchURL := fmt.Sprintf("%s/api/v1/workspaces/%s/projects/%s/issues/%s/",
+			strings.TrimRight(cfg.apiURL, "/"), cfg.workspace, cfg.projectID, issueID)
+		patchBody, _ := json.Marshal(map[string]string{"state": doneStateID})
+		patchReq, err := http.NewRequest("PATCH", patchURL, bytes.NewReader(patchBody))
+		if err != nil {
+			return popupActionDoneMsg{flash: "Error: " + err.Error()}
+		}
+		patchReq.Header.Set("X-API-Key", cfg.apiKey)
+		patchReq.Header.Set("Content-Type", "application/json")
+		patchResp, err := client.Do(patchReq)
+		if err != nil {
+			return popupActionDoneMsg{flash: "Error: " + err.Error()}
+		}
+		defer patchResp.Body.Close()
+		if patchResp.StatusCode >= 300 {
+			respBody, _ := io.ReadAll(patchResp.Body)
+			return popupActionDoneMsg{flash: fmt.Sprintf("Plane %d: %s", patchResp.StatusCode, string(respBody))}
+		}
+		return popupActionDoneMsg{flash: fmt.Sprintf("✓ %s marked done in Plane", identifier)}
+	}
 }
 
 // ─── Audit log commands ──────────────────────────────────────────────────────
