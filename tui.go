@@ -131,6 +131,7 @@ const (
 	modeActionContext // context picker within action/dispatch flow
 	modeFeedbackType
 	modeFeedbackText
+	modeAuditLog
 )
 
 // Spawner abstracts session creation for testability.
@@ -183,6 +184,8 @@ type tuiModel struct {
 	// Popup data
 	planeIssues    []planeIssue
 	icingaProblems []icingaProblem
+	auditEvents    []ManagedSessionEvent
+	auditScrollback string // scrollback for selected audit event's session
 	popupErr       string
 	popupCursor    int
 	planeReqID     uint64 // incremented on each fetch; stale responses ignored
@@ -630,6 +633,24 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case auditEventsMsg:
+		if m.mode == modeAuditLog {
+			m.auditEvents = msg.events
+			m.popupErr = ""
+			m.popupCursor = 0
+			// Fetch scrollback for the first event's session if any
+			if len(msg.events) > 0 {
+				return m, fetchAuditScrollback(msg.events[0].SessionID)
+			}
+		}
+		return m, nil
+
+	case auditScrollbackMsg:
+		if m.mode == modeAuditLog {
+			m.auditScrollback = msg.content
+		}
+		return m, nil
+
 	case popupErrMsg:
 		if (msg.source == "plane" && m.mode == modePlaneIssues && msg.reqID == m.planeReqID) ||
 			(msg.source == "icinga" && m.mode == modeIcingaAlerts && msg.reqID == m.icingaReqID) {
@@ -840,6 +861,13 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, fetchIcingaProblems(m.icingaReqID, m.api)
 		case "alt+q":
 			return m, tea.Quit
+		case "alt+l":
+			m.mode = modeAuditLog
+			m.auditEvents = nil
+			m.auditScrollback = ""
+			m.popupCursor = 0
+			m.popupErr = ""
+			return m, fetchAuditEvents(m.api)
 		case "alt+b":
 			// Snap viewport to bottom and resume auto-scroll
 			if m.vpReady {
@@ -1117,6 +1145,32 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "0":
 			m.popupTriageMode = 0
 			m.popupCursor = 0
+		}
+
+	case modeAuditLog:
+		switch key {
+		case "esc", "alt+l":
+			m.mode = modePassthrough
+		case "alt+a", "up", "k":
+			if m.popupCursor > 0 {
+				m.popupCursor--
+				if len(m.auditEvents) > 0 {
+					return m, fetchAuditScrollback(m.auditEvents[m.popupCursor].SessionID)
+				}
+			}
+		case "alt+z", "down", "j":
+			if m.popupCursor < len(m.auditEvents)-1 {
+				m.popupCursor++
+				if len(m.auditEvents) > 0 {
+					return m, fetchAuditScrollback(m.auditEvents[m.popupCursor].SessionID)
+				}
+			}
+		case "r":
+			m.auditEvents = nil
+			m.auditScrollback = ""
+			m.popupCursor = 0
+			m.popupErr = ""
+			return m, fetchAuditEvents(m.api)
 		}
 
 	case modeIcingaAlerts:
@@ -1502,6 +1556,8 @@ func (m tuiModel) View() string {
 		return renderPlanePopup(m)
 	case modeIcingaAlerts:
 		return renderIcingaPopup(m)
+	case modeAuditLog:
+		return renderAuditPopup(m)
 	case modePopupAction:
 		return renderActionPicker(m)
 	case modeActionContext:
@@ -1545,7 +1601,7 @@ func (m tuiModel) View() string {
 			statusLine = dimStyle.Render(m.flash)
 		} else {
 			statusLine = dimStyle.Render("Alt+A/Z nav │ Alt+N new │ Alt+S start/stop │ Alt+R rename │ Alt+M mission │ Alt+D delete") + "\n" +
-				dimStyle.Render("Alt+P plane │ Alt+I icinga │ Alt+O pool │ Alt+F feedback │ Alt+Q quit")
+				dimStyle.Render("Alt+P plane │ Alt+I icinga │ Alt+L audit │ Alt+O pool │ Alt+F feedback │ Alt+Q quit")
 		}
 	}
 

@@ -163,12 +163,64 @@ func sanitizeScrollback(s string) string {
 	return b.String()
 }
 
-// deleteSessionSnapshot removes the scrollback snapshot file for a session.
-func deleteSessionSnapshot(sessionID string) {
-	path := snapshotFile(sessionID)
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		log.Printf("persist: delete snapshot %s: %v", sessionID, err)
+// archiveDir returns the directory for archived (post-deletion) scrollback snapshots.
+func archiveDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		home = "/tmp"
 	}
+	dir := filepath.Join(home, ".swarmops", "archive")
+	os.MkdirAll(dir, 0755)
+	return dir
+}
+
+// archiveFile returns the path for an archived session scrollback.
+func archiveFile(sessionID string) string {
+	return filepath.Join(archiveDir(), sessionID+".txt")
+}
+
+// archiveSessionScrollback moves the live snapshot to the archive directory.
+// Called before deletion so the scrollback survives session removal.
+func archiveSessionScrollback(sessionID string) {
+	src := snapshotFile(sessionID)
+	dst := archiveFile(sessionID)
+	if err := os.Rename(src, dst); err != nil && !os.IsNotExist(err) {
+		log.Printf("persist: archive snapshot %s: %v", sessionID, err)
+	}
+}
+
+// loadArchivedScrollback reads a scrollback from the archive (post-deletion).
+// Falls back to live snapshot if archive doesn't exist.
+func loadArchivedScrollback(sessionID string) (string, error) {
+	// Try archive first (session may be deleted)
+	path := archiveFile(sessionID)
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		// Fall back to live snapshot
+		path = snapshotFile(sessionID)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", err
+	}
+	if len(data) > maxSnapshotSize {
+		data = data[len(data)-maxSnapshotSize:]
+	}
+	if !utf8.Valid(data) {
+		return "", nil
+	}
+	return sanitizeScrollback(string(data)), nil
+}
+
+// deleteSessionSnapshot archives then removes the scrollback snapshot for a session.
+// The archived copy persists for audit/replay purposes.
+func deleteSessionSnapshot(sessionID string) {
+	archiveSessionScrollback(sessionID)
+	// Also clean up any stale live snapshot (rename may have failed)
+	path := snapshotFile(sessionID)
+	os.Remove(path)
 }
 
 // pruneOrphanedSnapshots removes snapshot files that have no matching session in the database.

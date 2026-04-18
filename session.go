@@ -29,6 +29,54 @@ type Session struct {
 	UpdatedAt        int64   `json:"updated_at"`
 }
 
+// ManagedSessionEvent is a single audit trail entry for a managed session.
+type ManagedSessionEvent struct {
+	ID        int64  `json:"id"`
+	SessionID string `json:"session_id"`
+	Name      string `json:"name"`
+	EventType string `json:"event_type"` // created | stopped | deleted | renamed | mission_set
+	Details   string `json:"details,omitempty"`
+	Timestamp int64  `json:"ts"`
+}
+
+// recordSessionEvent writes an audit event. Safe to call with nil database.
+func recordSessionEvent(sessionID, name, eventType, details string) {
+	if database == nil {
+		return
+	}
+	_, err := database.Exec(
+		`INSERT INTO managed_session_events (session_id, name, event_type, details, ts) VALUES (?, ?, ?, ?, ?)`,
+		sessionID, name, eventType, details, time.Now().Unix(),
+	)
+	if err != nil {
+		log.Printf("audit: record event %s/%s: %v", sessionID, eventType, err)
+	}
+}
+
+// listAuditEvents returns recent session audit events, newest first.
+func listAuditEvents(ctx context.Context, limit int) ([]ManagedSessionEvent, error) {
+	if database == nil {
+		return nil, nil
+	}
+	rows, err := database.QueryContext(ctx,
+		`SELECT id, session_id, name, event_type, COALESCE(details,''), ts
+		 FROM managed_session_events ORDER BY ts DESC, id DESC LIMIT ?`, limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var events []ManagedSessionEvent
+	for rows.Next() {
+		var e ManagedSessionEvent
+		if err := rows.Scan(&e.ID, &e.SessionID, &e.Name, &e.EventType, &e.Details, &e.Timestamp); err != nil {
+			return nil, err
+		}
+		events = append(events, e)
+	}
+	return events, rows.Err()
+}
+
 func generateID() string {
 	b := make([]byte, 6)
 	rand.Read(b)
@@ -49,6 +97,7 @@ func createSession(ctx context.Context, name, directory string, contextID, conte
 		return nil, fmt.Errorf("insert session: %w", err)
 	}
 
+	recordSessionEvent(id, name, "created", fmt.Sprintf(`{"directory":%q}`, directory))
 	fireWebhook("session_created", map[string]interface{}{
 		"id": id, "name": name, "directory": directory,
 	})
@@ -139,8 +188,9 @@ func deleteSession(ctx context.Context, id string) error {
 	}
 	// Kill the tmux session if it exists
 	exec.Command("tmux", "kill-session", "-t", s.TmuxSession).Run()
-	// Delete the scrollback snapshot
+	// Archive and delete the scrollback snapshot
 	deleteSessionSnapshot(s.ID)
+	recordSessionEvent(id, s.Name, "deleted", "")
 	fireWebhook("session_deleted", map[string]interface{}{"id": id, "name": s.Name})
 	_, err = database.ExecContext(ctx, "DELETE FROM managed_sessions WHERE id = ?", id)
 	return err
@@ -153,6 +203,11 @@ func updateSessionStatus(ctx context.Context, id, status string) error {
 	)
 	if err == nil {
 		fireWebhook("session_status_changed", map[string]interface{}{"id": id, "status": status})
+		if status == "stopped" {
+			if s, e := getSession(ctx, id); e == nil {
+				recordSessionEvent(id, s.Name, "stopped", "")
+			}
+		}
 	}
 	return err
 }
@@ -187,6 +242,9 @@ func renameSession(ctx context.Context, id, name string) error {
 		"UPDATE managed_sessions SET name = ?, updated_at = ? WHERE id = ?",
 		name, time.Now().Unix(), id,
 	)
+	if err == nil {
+		recordSessionEvent(id, name, "renamed", "")
+	}
 	return err
 }
 

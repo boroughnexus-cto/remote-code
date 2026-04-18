@@ -261,9 +261,28 @@ func handleSwarmSubAPI(w http.ResponseWriter, r *http.Request, ctx context.Conte
 		handleSwarmDashboardAPI(w, r, ctx)
 	case "tasks":
 		handleGlobalTasksAPI(w, r, ctx)
+	case "audit":
+		handleSwarmAuditAPI(w, r, ctx)
 	default:
 		http.Error(w, `{"error":"unknown swarm endpoint"}`, http.StatusNotFound)
 	}
+}
+
+func handleSwarmAuditAPI(w http.ResponseWriter, r *http.Request, ctx context.Context) {
+	if r.Method != http.MethodGet {
+		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+	limit := 100
+	events, err := listAuditEvents(ctx, limit)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
+		return
+	}
+	if events == nil {
+		events = []ManagedSessionEvent{}
+	}
+	json.NewEncoder(w).Encode(events)
 }
 
 func handleSwarmSessionsAPI(w http.ResponseWriter, r *http.Request, ctx context.Context, pathParts []string) {

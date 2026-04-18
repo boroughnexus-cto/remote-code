@@ -1308,6 +1308,10 @@ func (f *fakeSwarmClient) setMission(id, mission string) error {
 	f.Calls = append(f.Calls, "setMission:"+id)
 	return nil
 }
+func (f *fakeSwarmClient) listAuditEvents(limit int) ([]ManagedSessionEvent, error) {
+	f.Calls = append(f.Calls, "listAuditEvents")
+	return nil, nil
+}
 func (f *fakeSwarmClient) healthCheck() error {
 	f.Calls = append(f.Calls, "healthCheck")
 	return f.HealthErr

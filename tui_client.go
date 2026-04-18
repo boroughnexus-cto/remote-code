@@ -20,6 +20,7 @@ type swarmClient interface {
 	poolStatus() (map[string]interface{}, error)
 	getConfig(key string) (string, error)
 	setMission(id, mission string) error
+	listAuditEvents(limit int) ([]ManagedSessionEvent, error)
 	healthCheck() error
 }
 
@@ -178,6 +179,19 @@ func (c *apiClient) setMission(id, mission string) error {
 		return fmt.Errorf("API %d", resp.StatusCode)
 	}
 	return nil
+}
+
+func (c *apiClient) listAuditEvents(limit int) ([]ManagedSessionEvent, error) {
+	resp, err := c.http.Get(fmt.Sprintf("%s/api/swarm/audit?limit=%d", c.baseURL, limit))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	var events []ManagedSessionEvent
+	if err := json.NewDecoder(resp.Body).Decode(&events); err != nil {
+		return nil, err
+	}
+	return events, nil
 }
 
 // healthCheck verifies the backend is reachable.

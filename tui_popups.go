@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
@@ -59,6 +60,15 @@ type planeIssuesMsg struct {
 type icingaProblemsMsg struct {
 	reqID    uint64
 	problems []icingaProblem
+}
+
+type auditEventsMsg struct {
+	events []ManagedSessionEvent
+}
+
+type auditScrollbackMsg struct {
+	sessionID string
+	content   string
 }
 
 type popupErrMsg struct {
@@ -1181,4 +1191,118 @@ func stripHTMLTags(s string) string {
 		result = strings.ReplaceAll(result, "\n\n\n", "\n\n")
 	}
 	return result
+}
+
+// ─── Audit log commands ──────────────────────────────────────────────────────
+
+func fetchAuditEvents(api swarmClient) tea.Cmd {
+	return func() tea.Msg {
+		var events []ManagedSessionEvent
+		var err error
+		if api != nil {
+			events, err = api.listAuditEvents(200)
+		} else {
+			events, err = listAuditEvents(context.Background(), 200)
+		}
+		if err != nil {
+			return popupErrMsg{source: "audit", text: err.Error()}
+		}
+		return auditEventsMsg{events: events}
+	}
+}
+
+func fetchAuditScrollback(sessionID string) tea.Cmd {
+	return func() tea.Msg {
+		content, _ := loadArchivedScrollback(sessionID)
+		return auditScrollbackMsg{sessionID: sessionID, content: content}
+	}
+}
+
+// ─── Audit popup renderer ────────────────────────────────────────────────────
+
+func renderAuditPopup(m tuiModel) string {
+	listWidth := m.w / 2
+	if listWidth < 40 {
+		listWidth = 40
+	}
+	detailWidth := m.w - listWidth - 3
+	if detailWidth < 20 {
+		detailWidth = 20
+	}
+
+	// ── Left: event list ──
+	var left strings.Builder
+	left.WriteString(dimStyle.Render("Session Audit Trail") + "\n")
+	left.WriteString(strings.Repeat("─", listWidth) + "\n")
+
+	if m.auditEvents == nil {
+		left.WriteString(dimStyle.Render("Loading..."))
+	} else if len(m.auditEvents) == 0 {
+		left.WriteString(dimStyle.Render("No events recorded yet"))
+	} else {
+		for i, ev := range m.auditEvents {
+			t := time.Unix(ev.Timestamp, 0).Format("01-02 15:04")
+			icon := auditEventIcon(ev.EventType)
+			label := fmt.Sprintf("%s %s  %s  %s", icon, t, ev.EventType, ev.Name)
+			if len(label) > listWidth-2 {
+				label = label[:listWidth-2]
+			}
+			if i == m.popupCursor {
+				left.WriteString(selectedStyle.Render(label) + "\n")
+			} else {
+				left.WriteString(label + "\n")
+			}
+		}
+	}
+
+	// ── Right: scrollback ──
+	var right strings.Builder
+	right.WriteString(dimStyle.Render("Session Scrollback") + "\n")
+	right.WriteString(strings.Repeat("─", detailWidth) + "\n")
+
+	if m.auditScrollback == "" {
+		if m.auditEvents != nil && len(m.auditEvents) > 0 {
+			right.WriteString(dimStyle.Render("No scrollback saved for this session"))
+		}
+	} else {
+		lines := strings.Split(m.auditScrollback, "\n")
+		// Show last detailWidth-4 lines to fit the pane
+		maxLines := m.h - 6
+		if maxLines < 1 {
+			maxLines = 10
+		}
+		if len(lines) > maxLines {
+			lines = lines[len(lines)-maxLines:]
+		}
+		for _, line := range lines {
+			if len(line) > detailWidth {
+				line = line[:detailWidth]
+			}
+			right.WriteString(line + "\n")
+		}
+	}
+
+	sep := strings.Repeat("│\n", m.h-2)
+	return lipgloss.JoinHorizontal(lipgloss.Top,
+		left.String(),
+		dimStyle.Render(sep),
+		right.String(),
+	) + "\n" + dimStyle.Render("↑↓ navigate · Esc close")
+}
+
+func auditEventIcon(eventType string) string {
+	switch eventType {
+	case "created":
+		return "✦"
+	case "stopped":
+		return "■"
+	case "deleted":
+		return "✕"
+	case "renamed":
+		return "✎"
+	case "mission_set":
+		return "◎"
+	default:
+		return "·"
+	}
 }
