@@ -155,60 +155,101 @@ func fetchPlaneIssues(reqID uint64, api swarmClient) tea.Cmd {
 			return popupErrMsg{reqID, "plane", err.Error()}
 		}
 
-		client := &http.Client{Timeout: 10 * time.Second}
-		var allIssues []planeIssue
+		client := &http.Client{Timeout: 15 * time.Second}
+		baseURL := strings.TrimRight(cfg.apiURL, "/")
 
-		// Fetch project identifier prefix (e.g. "SWM")
-		var projectPrefix string
-		projURL := fmt.Sprintf("%s/api/v1/workspaces/%s/projects/%s/",
-			strings.TrimRight(cfg.apiURL, "/"), cfg.workspace, cfg.projectID)
-		if req, err := http.NewRequest("GET", projURL, nil); err == nil {
-			req.Header.Set("X-API-Key", cfg.apiKey)
-			if resp, err := client.Do(req); err == nil {
-				defer resp.Body.Close()
-				var proj struct {
-					Identifier string `json:"identifier"`
-				}
-				json.NewDecoder(resp.Body).Decode(&proj)
-				projectPrefix = proj.Identifier
-			}
+		// Fetch project prefix and all state groups in parallel.
+		type groupResult struct {
+			group  string
+			issues []planeIssue
+			err    error
 		}
 
-		for _, group := range []string{"backlog", "unstarted", "started"} {
-			url := fmt.Sprintf("%s/api/v1/workspaces/%s/projects/%s/issues/?state_group=%s&per_page=50&expand=assignees,labels",
-				strings.TrimRight(cfg.apiURL, "/"), cfg.workspace, cfg.projectID, group)
-
-			req, err := http.NewRequest("GET", url, nil)
+		prefixCh := make(chan string, 1)
+		go func() {
+			projURL := fmt.Sprintf("%s/api/v1/workspaces/%s/projects/%s/", baseURL, cfg.workspace, cfg.projectID)
+			req, err := http.NewRequest("GET", projURL, nil)
 			if err != nil {
-				continue
+				prefixCh <- ""
+				return
 			}
 			req.Header.Set("X-API-Key", cfg.apiKey)
-			req.Header.Set("Accept", "application/json")
-
 			resp, err := client.Do(req)
 			if err != nil {
-				return popupErrMsg{reqID, "plane", fmt.Sprintf("HTTP error: %v", err)}
+				prefixCh <- ""
+				return
 			}
-			body, _ := io.ReadAll(resp.Body)
-			resp.Body.Close()
+			defer resp.Body.Close()
+			var proj struct {
+				Identifier string `json:"identifier"`
+			}
+			json.NewDecoder(resp.Body).Decode(&proj)
+			prefixCh <- proj.Identifier
+		}()
 
-			if resp.StatusCode != 200 {
-				continue
-			}
-
-			var parsed struct {
-				Results []planeIssue `json:"results"`
-			}
-			if json.Unmarshal(body, &parsed) != nil {
-				continue
-			}
-			for i := range parsed.Results {
-				parsed.Results[i].StateGroup = group
-				if projectPrefix != "" {
-					parsed.Results[i].Identifier = fmt.Sprintf("%s-%d", projectPrefix, parsed.Results[i].SequenceID)
+		groups := []string{"backlog", "unstarted", "started"}
+		resultCh := make(chan groupResult, len(groups))
+		for _, group := range groups {
+			g := group
+			go func() {
+				url := fmt.Sprintf("%s/api/v1/workspaces/%s/projects/%s/issues/?state_group=%s&per_page=50&expand=assignees,labels",
+					baseURL, cfg.workspace, cfg.projectID, g)
+				req, err := http.NewRequest("GET", url, nil)
+				if err != nil {
+					resultCh <- groupResult{g, nil, err}
+					return
 				}
+				req.Header.Set("X-API-Key", cfg.apiKey)
+				req.Header.Set("Accept", "application/json")
+				resp, err := client.Do(req)
+				if err != nil {
+					resultCh <- groupResult{g, nil, err}
+					return
+				}
+				body, _ := io.ReadAll(resp.Body)
+				resp.Body.Close()
+				if resp.StatusCode != 200 {
+					resultCh <- groupResult{g, nil, nil}
+					return
+				}
+				var parsed struct {
+					Results []planeIssue `json:"results"`
+				}
+				if json.Unmarshal(body, &parsed) != nil {
+					resultCh <- groupResult{g, nil, nil}
+					return
+				}
+				for i := range parsed.Results {
+					parsed.Results[i].StateGroup = g
+				}
+				resultCh <- groupResult{g, parsed.Results, nil}
+			}()
+		}
+
+		projectPrefix := <-prefixCh
+
+		// Collect group results in stable order.
+		byGroup := make(map[string][]planeIssue, len(groups))
+		var firstErr error
+		for range groups {
+			r := <-resultCh
+			if r.err != nil && firstErr == nil {
+				firstErr = r.err
 			}
-			allIssues = append(allIssues, parsed.Results...)
+			byGroup[r.group] = r.issues
+		}
+		if firstErr != nil && len(byGroup) == 0 {
+			return popupErrMsg{reqID, "plane", fmt.Sprintf("HTTP error: %v", firstErr)}
+		}
+
+		var allIssues []planeIssue
+		for _, g := range groups {
+			for _, iss := range byGroup[g] {
+				if projectPrefix != "" {
+					iss.Identifier = fmt.Sprintf("%s-%d", projectPrefix, iss.SequenceID)
+				}
+				allIssues = append(allIssues, iss)
+			}
 		}
 
 		return planeIssuesMsg{reqID, allIssues}
@@ -911,7 +952,20 @@ func renderIcingaPopup(m tuiModel) string {
 				idx++
 			}
 		} else {
-			for i, p := range filtered {
+			maxLines := m.h - 6
+			if maxLines < 5 {
+				maxLines = 5
+			}
+			start := 0
+			if m.popupCursor >= maxLines {
+				start = m.popupCursor - maxLines + 1
+			}
+			end := start + maxLines
+			if end > len(filtered) {
+				end = len(filtered)
+			}
+			for i := start; i < end; i++ {
+				p := filtered[i]
 				stateStyle := stateColors[p.State]
 				if stateStyle.GetForeground() == (lipgloss.NoColor{}) {
 					stateStyle = dimStyle
@@ -935,6 +989,9 @@ func renderIcingaPopup(m tuiModel) string {
 					line = stateStyle.Render(line)
 				}
 				left.WriteString(line + "\n")
+			}
+			if len(filtered) > maxLines {
+				left.WriteString(dimStyle.Render(fmt.Sprintf("  … %d more (↑↓ to scroll)", len(filtered)-maxLines)) + "\n")
 			}
 		}
 	}

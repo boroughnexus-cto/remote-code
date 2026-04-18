@@ -1966,8 +1966,11 @@ var (
 	// Tool running: "⎿  Running…" or "⎿  Running..."
 	toolRunningRe = regexp.MustCompile(`^\s*⎿\s+Running[…\.]{1,3}`)
 
-	// Permission/approval/menu prompts (blocking — highest priority)
-	permissionRe = regexp.MustCompile(`(?i)(do you want to proceed|esc to cancel|allow|deny|yes/no|approve|pick a number|\(y/n\)|proceed\?)`)
+	// Permission/approval/menu prompts (blocking — highest priority).
+	// Matches Claude Code's actual tool-approval UI patterns. Deliberately avoids
+	// bare "allow"/"deny"/"approve" which are too broad and fire on normal output
+	// like "Permission denied" or code comments (caused SWM-54 false positives).
+	permissionRe = regexp.MustCompile(`(?i)(do you want to proceed|esc to cancel|yes/no|\(y/n\)|proceed\?|pick a number|[●○]\s*(allow|deny|approve)|allow this action|do you want to allow)`)
 
 	// Prompt line: ❯ at start (with or without trailing user text)
 	promptRe = regexp.MustCompile(`^❯`)
