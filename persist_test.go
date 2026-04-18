@@ -163,7 +163,7 @@ func TestPruneOrphanedSnapshots(t *testing.T) {
 	ctx := context.Background()
 
 	// Create a session in the database
-	_, err := createSession(ctx, "keeper", "/tmp", nil, nil, nil, false)
+	_, err := createSession(ctx, "keeper", "/tmp", nil, nil, nil, false, "")
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}

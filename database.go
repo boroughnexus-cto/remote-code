@@ -164,6 +164,7 @@ func applyMigrations(database *sql.DB) error {
 		"db/migrations/053_session_persistence.sql",
 		"db/migrations/054_task_bus.sql",
 		"db/migrations/055_session_audit.sql",
+		"db/migrations/056_session_model.sql",
 	}
 
 	for _, migrationPath := range migrations {

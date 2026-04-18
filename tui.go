@@ -75,16 +75,16 @@ type sidebarItem struct {
 	label     string
 	indicator string
 	// Session fields
-	sessionID   string
-	tmuxSession string
-	status      string
-	activity    string // "stopped", "working", "awaiting_input", "idle"
-	mission     string // optional mission statement
-	directory        string // working directory for session restart
+	sessionID       string
+	tmuxSession     string
+	status          string
+	activity        string // "stopped", "working", "awaiting_input", "idle"
+	mission         string // optional mission statement
+	directory       string // working directory for session restart
 	claudeSessionID string // Claude session ID for resume
 	// Pool slot fields
 	slotID   string
-	model    string
+	model    string // claude model override (session) or pool model name (pool slot)
 	state    string // idle, busy, starting, dead
 	requests int64
 	costUSD  float64
@@ -122,6 +122,7 @@ const (
 	modeNewName
 	modeNewDir
 	modeNewMission
+	modeNewModel
 	modeContextPick
 	modePlaneIssues
 	modeIcingaAlerts
@@ -159,6 +160,7 @@ type tuiModel struct {
 	newNameInput    textinput.Model
 	newDirInput     textinput.Model
 	newMissionInput textinput.Model
+	newModel        int    // 0=default, 1=haiku, 2=sonnet, 3=opus
 	contexts        []contextItem
 	ctxCursor       int
 
@@ -369,15 +371,16 @@ func loadItemsCmd(api swarmClient) tea.Cmd {
 				mission = *s.Mission
 			}
 			items = append(items, sidebarItem{
-				kind:        itemSession,
-				label:       s.Name,
-				indicator:   indicator,
-				sessionID:   s.ID,
-				tmuxSession: s.TmuxSession,
-				status:      s.Status,
-				activity:    activity,
-				mission:     mission,
-				directory:        s.Directory,
+				kind:            itemSession,
+				label:           s.Name,
+				indicator:       indicator,
+				sessionID:       s.ID,
+				tmuxSession:     s.TmuxSession,
+				status:          s.Status,
+				activity:        activity,
+				mission:         mission,
+				model:           s.Model,
+				directory:       s.Directory,
 				claudeSessionID: func() string { if s.ClaudeSessionID != nil { return *s.ClaudeSessionID }; return "" }(),
 			})
 		}
@@ -878,6 +881,20 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, planeCloseSessionIssue(label, m.api)
 			}
 			return m, nil
+		case "alt+e":
+			// Jump to next awaiting_input session (SWM-11)
+			n := len(m.items)
+			for offset := 1; offset <= n; offset++ {
+				idx := (m.cursor + offset) % n
+				item := m.items[idx]
+				if item.kind == itemSession && item.activity == "awaiting_input" {
+					m.cursor = idx
+					m.userScrolled = false
+					m.updateContentCache()
+					break
+				}
+			}
+			return m, nil
 		case "alt+b":
 			// Snap viewport to bottom and resume auto-scroll
 			if m.vpReady {
@@ -974,8 +991,10 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case modeNewMission:
 		switch key {
 		case "enter":
-			m.flash = "Fetching contexts..."
-			return m, fetchContexts()
+			m.newModel = 0
+			m.mode = modeNewModel
+			m.flash = modelPickerFlash(m.newModel)
+			return m, nil
 		case "esc":
 			m.mode = modePassthrough
 			m.flash = ""
@@ -984,6 +1003,29 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.newMissionInput, cmd = m.newMissionInput.Update(msg)
 			return m, cmd
 		}
+
+	case modeNewModel:
+		switch key {
+		case "left", "alt+a", "h":
+			if m.newModel > 0 {
+				m.newModel--
+				m.flash = modelPickerFlash(m.newModel)
+			}
+			return m, nil
+		case "right", "alt+z", "l":
+			if m.newModel < 3 {
+				m.newModel++
+				m.flash = modelPickerFlash(m.newModel)
+			}
+			return m, nil
+		case "enter":
+			m.flash = "Fetching contexts..."
+			return m, fetchContexts()
+		case "esc":
+			m.mode = modePassthrough
+			m.flash = ""
+		}
+		return m, nil
 
 	case modeRename:
 		switch key {
@@ -1367,7 +1409,8 @@ func (m *tuiModel) doSpawn(contextID, contextName *string) {
 	if v := m.newMissionInput.Value(); v != "" {
 		mission = &v
 	}
-	s, err := m.spawner.Spawn(context.Background(), name, dir, contextID, contextName, mission, "")
+	model := modelIDFromIndex(m.newModel)
+	s, err := m.spawner.Spawn(context.Background(), name, dir, contextID, contextName, mission, model)
 	if err != nil {
 		m.flash = "Spawn error: " + err.Error()
 	} else {
@@ -1587,6 +1630,8 @@ func (m tuiModel) View() string {
 		statusLine = "Dir: " + m.newDirInput.View()
 	case modeNewMission:
 		statusLine = "Mission: " + m.newMissionInput.View()
+	case modeNewModel:
+		statusLine = modelPickerFlash(m.newModel)
 	case modeEditMission:
 		statusLine = "Mission: " + m.newMissionInput.View()
 	case modeRename:
@@ -1611,7 +1656,7 @@ func (m tuiModel) View() string {
 			statusLine = dimStyle.Render(m.flash)
 		} else {
 			statusLine = dimStyle.Render("Alt+A/Z nav │ Alt+N new │ Alt+S start/stop │ Alt+R rename │ Alt+M mission │ Alt+D delete") + "\n" +
-				dimStyle.Render("Alt+P plane │ Alt+I icinga │ Alt+L audit │ Alt+W close issue │ Alt+O pool │ Alt+F feedback │ Alt+Q quit")
+				dimStyle.Render("Alt+P plane │ Alt+I icinga │ Alt+L audit │ Alt+W close issue │ Alt+E escalations │ Alt+O pool │ Alt+F feedback │ Alt+Q quit")
 		}
 	}
 
@@ -1710,6 +1755,7 @@ func (m tuiModel) renderSidebar() string {
 	lines = append(lines, "")
 
 	// Render session items
+	now := time.Now().Unix()
 	for i, item := range m.items {
 		if item.kind == itemPoolSlot {
 			continue // pool rendered separately below
@@ -1719,6 +1765,12 @@ func (m tuiModel) renderSidebar() string {
 			label = label[:17] + "..."
 		}
 		ind := animatedIndicator(item.activity, m.animFrame)
+		// SWM-11: escalated indicator after 30s of awaiting_input
+		if item.activity == "awaiting_input" {
+			if st, ok := m.activityStates[item.tmuxSession]; ok && st.awaitingInputSince > 0 && now-st.awaitingInputSince >= 30 {
+				ind = lipgloss.NewStyle().Foreground(lipgloss.Color("#ff4444")).Render("!")
+			}
+		}
 		if i == m.cursor {
 			line := fmt.Sprintf(" %s %s", ind, selectedLabelStyle.Render(label))
 			lines = append(lines, selectedStyle.Render("▸")+line)
@@ -1953,8 +2005,9 @@ var ansiRe = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
 
 // activityState tracks per-session state for the activity detector.
 type activityState struct {
-	prevHash     uint64 // hash of previous capture for diff detection
-	prevActivity string // previous classification for 1-tick hold
+	prevHash           uint64 // hash of previous capture for diff detection
+	prevActivity       string // previous classification for 1-tick hold
+	awaitingInputSince int64  // Unix timestamp when activity became awaiting_input; 0 otherwise
 }
 
 // Patterns for activity detection — compiled once.
@@ -2017,6 +2070,9 @@ func classifyActivity(capture string, state *activityState) string {
 	// --- Priority 1: Permission/menu prompts → awaiting_input ---
 	for _, line := range meaningful {
 		if permissionRe.MatchString(line) {
+			if state.prevActivity != "awaiting_input" {
+				state.awaitingInputSince = time.Now().Unix()
+			}
 			state.prevActivity = "awaiting_input"
 			return "awaiting_input"
 		}
@@ -2026,6 +2082,7 @@ func classifyActivity(capture string, state *activityState) string {
 	// Checked BEFORE question detection: animated spinner (contentChanged=true each tick)
 	// never triggers awaiting_input. Fixes SWM-52/51.
 	if contentChanged {
+		state.awaitingInputSince = 0
 		state.prevActivity = "working"
 		return "working"
 	}
@@ -2053,6 +2110,9 @@ func classifyActivity(capture string, state *activityState) string {
 	// output that happens to contain ❯ doesn't trigger this. Fixes SWM-46.
 	for _, line := range meaningful {
 		if promptRe.MatchString(line) && !barePromptRe.MatchString(line) {
+			if state.prevActivity != "awaiting_input" {
+				state.awaitingInputSince = time.Now().Unix()
+			}
 			state.prevActivity = "awaiting_input"
 			return "awaiting_input"
 		}
@@ -2083,6 +2143,9 @@ func classifyActivity(capture string, state *activityState) string {
 			}
 			// First non-prompt, non-spinner assistant line: check for trailing question
 			if strings.HasSuffix(strings.TrimSpace(line), "?") {
+				if state.prevActivity != "awaiting_input" {
+					state.awaitingInputSince = time.Now().Unix()
+				}
 				state.prevActivity = "awaiting_input"
 				return "awaiting_input"
 			}
@@ -2133,6 +2196,35 @@ func animatedIndicator(activity string, frame int) string {
 		return statusStopped
 	}
 }
+// modelIDFromIndex maps the model picker index to a Claude model string.
+// 0 = default (empty string), 1 = haiku, 2 = sonnet, 3 = opus.
+func modelIDFromIndex(idx int) string {
+	switch idx {
+	case 1:
+		return "claude-haiku-4-5-20251001"
+	case 2:
+		return "claude-sonnet-4-6"
+	case 3:
+		return "claude-opus-4-6"
+	default:
+		return ""
+	}
+}
+
+// modelPickerFlash returns the status bar message for the model picker step.
+func modelPickerFlash(idx int) string {
+	names := []string{"default", "haiku", "sonnet", "opus"}
+	var parts []string
+	for i, name := range names {
+		if i == idx {
+			parts = append(parts, "["+name+"]")
+		} else {
+			parts = append(parts, name)
+		}
+	}
+	return "Model: " + strings.Join(parts, " │ ") + "  (←/→ to pick, Enter to continue)"
+}
+
 func runTUI(api swarmClient) error {
 	p := tea.NewProgram(initialModel(api), tea.WithAltScreen(), tea.WithMouseCellMotion())
 	_, err := p.Run()

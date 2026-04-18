@@ -33,7 +33,7 @@ func isValidUUID(s string) bool {
 // with a controlled --session-id so it can be resumed after restarts.
 // An optional model string selects a specific Claude model (e.g. "claude-sonnet-4-6").
 func spawnSession(ctx context.Context, name, directory string, contextID, contextName, mission *string, model string) (*Session, error) {
-	s, err := createSession(ctx, name, directory, contextID, contextName, mission, false)
+	s, err := createSession(ctx, name, directory, contextID, contextName, mission, false, model)
 	if err != nil {
 		return nil, fmt.Errorf("create session: %w", err)
 	}
