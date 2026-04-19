@@ -75,7 +75,7 @@ func handleDashboardAPI(w http.ResponseWriter, r *http.Request, ctx context.Cont
 		return
 	}
 	stats, _ := globalServices.Dashboard(ctx)
-	json.NewEncoder(w).Encode(stats)
+	_ = json.NewEncoder(w).Encode(stats)
 }
 
 // ─── Sessions as Agents (MCP compat) ────────────────────────────────────────
@@ -86,7 +86,7 @@ func handleSessionsAsAgentsAPI(w http.ResponseWriter, r *http.Request, ctx conte
 		return
 	}
 	agents, _ := globalServices.ListAgents(ctx)
-	json.NewEncoder(w).Encode(agents)
+	_ = json.NewEncoder(w).Encode(agents)
 }
 
 // ─── Task Executions (MCP compat) ───────────────────────────────────────────
@@ -96,7 +96,7 @@ func handleTaskExecutionsAPI(w http.ResponseWriter, r *http.Request, ctx context
 	case http.MethodGet:
 		// rc_list_executions → return sessions as executions
 		sessions, _ := listSessions(ctx)
-		json.NewEncoder(w).Encode(sessions)
+		_ = json.NewEncoder(w).Encode(sessions)
 
 	case http.MethodPost:
 		// rc_run_task → create a new session
