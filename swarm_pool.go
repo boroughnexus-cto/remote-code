@@ -102,6 +102,7 @@ type PoolSlot struct {
 
 	mu             sync.Mutex
 	state          slotState
+	startedAt      time.Time // when state last transitioned to slotStarting
 	generation     int64
 	lastUsed       time.Time
 	errorCount     int
@@ -333,6 +334,7 @@ func (pm *PoolManager) spawnSlot(model, slotID string) (*PoolSlot, error) {
 		stdout:     bufio.NewReaderSize(stdout, 256*1024),
 		stderrDone: stderrDone,
 		state:      slotStarting,
+		startedAt:  time.Now(),
 		lastUsed:   time.Now(),
 	}
 
@@ -520,10 +522,28 @@ func (pm *PoolManager) checkHealth() {
 				slot.mu.Lock()
 				if slot.state == slotDead { // re-check under lock to avoid double-spawn
 					slot.state = slotStarting
+					slot.startedAt = time.Now()
 					slot.mu.Unlock()
 					log.Printf("pool: %s dead slot detected, retrying recycle", slot.ID)
 					go pm.recycleSlot(slot)
 				} else {
+					slot.mu.Unlock()
+				}
+			}
+
+			// Unstick slots that are in slotStarting but the process is dead (SWM-57).
+			// This happens when a recycle goroutine hangs or the spawned process dies
+			// before self-test completes. After 2× the self-test deadline, reset to dead.
+			if state == slotStarting && !alive {
+				slot.mu.Lock()
+				startedAt := slot.startedAt
+				slot.mu.Unlock()
+				if !startedAt.IsZero() && time.Since(startedAt) > 2*time.Minute {
+					slot.mu.Lock()
+					if slot.state == slotStarting {
+						slot.state = slotDead
+						log.Printf("pool: %s stuck in starting for >2m with dead process, resetting to dead", slot.ID)
+					}
 					slot.mu.Unlock()
 				}
 			}
