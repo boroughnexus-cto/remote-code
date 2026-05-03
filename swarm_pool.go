@@ -178,14 +178,26 @@ func (s *PoolSlot) kill() {
 
 // PoolConfig holds pool configuration resolved from ConfigService.
 type PoolConfig struct {
-	Models         []string
-	SlotsPerModel  int
-	RequestTimeout time.Duration
-	APIKey         string
-	MaxConsecErrs  int
-	IdleRecycleAge time.Duration
-	BackoffBase    time.Duration
-	BackoffMax     time.Duration
+	Models              []string
+	SlotsPerModel       int
+	SlotsPerModelOvr    map[string]int // model short name → slot count override
+	RequestTimeout      time.Duration
+	APIKey              string
+	MaxConsecErrs       int
+	IdleRecycleAge      time.Duration
+	BackoffBase         time.Duration
+	BackoffMax          time.Duration
+}
+
+// slotsForModel returns the slot count for a given model, respecting per-model overrides.
+func (c PoolConfig) slotsForModel(model string) int {
+	if c.SlotsPerModelOvr != nil {
+		short := modelShortName(model)
+		if n, ok := c.SlotsPerModelOvr[short]; ok {
+			return n
+		}
+	}
+	return c.SlotsPerModel
 }
 
 // DefaultPoolConfig returns sensible defaults.
@@ -230,10 +242,11 @@ func NewPoolManager(ctx context.Context, db *sql.DB, config PoolConfig) *PoolMan
 	}
 
 	for _, model := range config.Models {
-		pm.available[model] = make(chan *PoolSlot, config.SlotsPerModel)
-		pm.slots[model] = make([]*PoolSlot, 0, config.SlotsPerModel)
+		n := config.slotsForModel(model)
+		pm.available[model] = make(chan *PoolSlot, n)
+		pm.slots[model] = make([]*PoolSlot, 0, n)
 
-		for i := 0; i < config.SlotsPerModel; i++ {
+		for i := 0; i < n; i++ {
 			slotID := fmt.Sprintf("pool-%s-%d", modelShortName(model), i)
 			slot, err := pm.spawnSlot(model, slotID)
 			if err != nil {
@@ -248,7 +261,7 @@ func NewPoolManager(ctx context.Context, db *sql.DB, config PoolConfig) *PoolMan
 	pm.wg.Add(1)
 	go pm.healthMonitor()
 
-	log.Printf("pool: started with %d models, %d slots/model", len(config.Models), config.SlotsPerModel)
+	log.Printf("pool: started with %d models, slots/model: default=%d overrides=%v", len(config.Models), config.SlotsPerModel, config.SlotsPerModelOvr)
 	return pm
 }
 
@@ -716,6 +729,18 @@ func initPool(ctx context.Context) {
 	if v := globalConfigService.Get("pool.slots_per_model").Value; v != "" {
 		if n, err := parseInt(v); err == nil {
 			config.SlotsPerModel = n
+		}
+	}
+
+	// Per-model overrides: pool.slots_per_model.haiku, pool.slots_per_model.sonnet, pool.slots_per_model.opus
+	for _, short := range []string{"haiku", "sonnet", "opus"} {
+		if v := globalConfigService.Get("pool.slots_per_model." + short).Value; v != "" {
+			if n, err := parseInt(v); err == nil {
+				if config.SlotsPerModelOvr == nil {
+					config.SlotsPerModelOvr = make(map[string]int)
+				}
+				config.SlotsPerModelOvr[short] = n
+			}
 		}
 	}
 
