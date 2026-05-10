@@ -142,23 +142,21 @@ func (s *Services) StartSession(ctx context.Context, id string) error {
 		if sess.Directory != "" {
 			dir = sess.Directory
 		}
-		cArgs := resumeClaudeCmd(func() string {
-			if sess.ClaudeSessionID != nil {
-				return *sess.ClaudeSessionID
-			}
-			return ""
-		}())
+		claudeID := ""
+		if sess.ClaudeSessionID != nil {
+			claudeID = *sess.ClaudeSessionID
+		}
+		cArgs := resumeClaudeCmd(claudeID, sess.Name)
 		args := append([]string{"new-session", "-d", "-s", sess.TmuxSession, "-c", dir, "-x", "200", "-y", "50", "--"}, cArgs...)
 		if out, err := exec.Command("tmux", args...).CombinedOutput(); err != nil {
 			return fmt.Errorf("failed to recreate tmux session: %s", strings.TrimSpace(string(out)))
 		}
 	} else {
-		cArgs := resumeClaudeCmd(func() string {
-			if sess.ClaudeSessionID != nil {
-				return *sess.ClaudeSessionID
-			}
-			return ""
-		}())
+		claudeID := ""
+		if sess.ClaudeSessionID != nil {
+			claudeID = *sess.ClaudeSessionID
+		}
+		cArgs := resumeClaudeCmd(claudeID, sess.Name)
 		exec.Command("tmux", append([]string{"send-keys", "-t", sess.TmuxSession}, append(cArgs, "")...)...).Run()
 		exec.Command("tmux", "send-keys", "-t", sess.TmuxSession, strings.Join(cArgs, " "), "Enter").Run()
 	}

@@ -43,7 +43,7 @@ func spawnSession(ctx context.Context, name, directory string, contextID, contex
 
 	// Create tmux session with claude as the session command (no send-keys needed).
 	// Using "--" ensures claude flags aren't interpreted as tmux flags.
-	claudeArgs := []string{"claude", "--session-id", claudeUUID, "--dangerously-skip-permissions"}
+	claudeArgs := []string{"claude", "--session-id", claudeUUID, "--dangerously-skip-permissions", "--remote-control", name}
 	if model != "" {
 		claudeArgs = append(claudeArgs, "--model", model)
 	}

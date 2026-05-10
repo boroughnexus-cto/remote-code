@@ -785,7 +785,7 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 									dir = h
 								}
 							}
-							cArgs := resumeClaudeCmd(item.claudeSessionID)
+							cArgs := resumeClaudeCmd(item.claudeSessionID, item.label)
 							args := append([]string{"new-session", "-d", "-s", item.tmuxSession, "-c", dir, "-x", "200", "-y", "50", "--"}, cArgs...)
 							if out, err := exec.Command("tmux", args...).CombinedOutput(); err != nil {
 								m.flash = fmt.Sprintf("Failed to recreate tmux session: %s", strings.TrimSpace(string(out)))
@@ -809,7 +809,11 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					time.Sleep(200 * time.Millisecond)
 					exec.Command("tmux", "send-keys", "-t", item.tmuxSession, "exit", "Enter").Run()
 					time.Sleep(500 * time.Millisecond)
-					exec.Command("tmux", "send-keys", "-t", item.tmuxSession, "claude --dangerously-skip-permissions", "Enter").Run() // Alt+Shift+S: fresh start
+					rcCmd := "claude --dangerously-skip-permissions"
+					if item.label != "" {
+						rcCmd += " --remote-control " + item.label
+					}
+					exec.Command("tmux", "send-keys", "-t", item.tmuxSession, rcCmd, "Enter").Run() // Alt+Shift+S: fresh start
 					m.flash = fmt.Sprintf("Restarted Claude in %s", item.label)
 				}
 				return m, nil
@@ -2233,9 +2237,16 @@ func runTUI(api swarmClient) error {
 
 // resumeClaudeCmd returns the claude command args for restarting a session.
 // If a claude session ID is available, uses --resume; otherwise starts fresh.
-func resumeClaudeCmd(claudeID string) []string {
-	if claudeID == "" || !isValidUUID(claudeID) {
-		return []string{"claude", "--dangerously-skip-permissions"}
+// If name is non-empty, --remote-control <name> is added so the session is
+// addressable by name via Claude Code's remote control feature.
+func resumeClaudeCmd(claudeID, name string) []string {
+	args := []string{"claude"}
+	if claudeID != "" && isValidUUID(claudeID) {
+		args = append(args, "--resume", claudeID)
 	}
-	return []string{"claude", "--resume", claudeID, "--dangerously-skip-permissions"}
+	args = append(args, "--dangerously-skip-permissions")
+	if name != "" {
+		args = append(args, "--remote-control", name)
+	}
+	return args
 }
