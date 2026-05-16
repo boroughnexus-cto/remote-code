@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"os/exec"
+	"strings"
 	"time"
 
 	xansi "github.com/charmbracelet/x/ansi"
@@ -299,6 +300,44 @@ func injectToSession(tmuxName, text string) error {
 		return fmt.Errorf("tmux enter: %v: %s", err, out)
 	}
 	return nil
+}
+
+// compactWatcher polls a tmux pane for Claude Code's compact-conversation prompt
+// and automatically declines it for the given duration. Used after --resume to
+// prevent history loss when restarting for MCP reconnection or after a reboot.
+func compactWatcher(tmuxSession string, duration time.Duration) {
+	deadline := time.Now().Add(duration)
+	for time.Now().Before(deadline) {
+		time.Sleep(2 * time.Second)
+		if !isTmuxAlive(tmuxSession) {
+			return
+		}
+		out, err := captureTerminal(tmuxSession)
+		if err != nil {
+			continue
+		}
+		lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+		start := len(lines) - 6
+		if start < 0 {
+			start = 0
+		}
+		for _, line := range lines[start:] {
+			lower := strings.ToLower(strings.TrimSpace(line))
+			// Match Claude Code's compact prompt: contains "compact" + looks like a Y/n question
+			if strings.Contains(lower, "compact") && (
+				strings.Contains(lower, "y/n") ||
+				strings.Contains(lower, "yes/no") ||
+				strings.Contains(lower, "would you like") ||
+				strings.Contains(lower, "continue without") ||
+				strings.HasSuffix(lower, "? ") ||
+				strings.HasSuffix(lower, "?")) &&
+				!strings.Contains(lower, "/compact") {
+				exec.Command("tmux", "send-keys", "-t", tmuxSession, "n", "Enter").Run()
+				log.Printf("compact-watcher: auto-declined compact prompt for %s", tmuxSession)
+				return
+			}
+		}
+	}
 }
 
 func boolToInt(b bool) int {

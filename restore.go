@@ -48,6 +48,7 @@ func restoreSessions(ctx context.Context) {
 			// Stagger by session index so restores don't all fire at the same instant.
 			delay := 12*time.Second + time.Duration(i)*3*time.Second
 			go injectRestorePrompt(s, delay)
+			go compactWatcher(s.TmuxSession, delay+90*time.Second)
 		} else {
 			updateSessionStatus(ctx, s.ID, "stopped")
 		}

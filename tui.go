@@ -798,7 +798,25 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, flashClearCmd()
 			}
 			return m, nil
-		case "alt+S": // Shift variant — kill and restart claude in the session
+		case "alt+R": // Resume-reconnect — kill and resume with full history (reconnects MCPs, declines compact)
+			if m.cursor < len(m.items) && m.items[m.cursor].kind == itemSession {
+				item := m.items[m.cursor]
+				if item.tmuxSession != "" {
+					exec.Command("tmux", "send-keys", "-t", item.tmuxSession, "C-c").Run()
+					time.Sleep(200 * time.Millisecond)
+					exec.Command("tmux", "send-keys", "-t", item.tmuxSession, "C-c").Run()
+					time.Sleep(200 * time.Millisecond)
+					exec.Command("tmux", "send-keys", "-t", item.tmuxSession, "exit", "Enter").Run()
+					time.Sleep(500 * time.Millisecond)
+					cArgs := resumeClaudeCmd(item.claudeSessionID, item.label)
+					exec.Command("tmux", "send-keys", "-t", item.tmuxSession, strings.Join(cArgs, " "), "Enter").Run()
+					go compactWatcher(item.tmuxSession, 90*time.Second)
+					m.flash = fmt.Sprintf("Reconnecting %s (MCPs reloading, history restored)", item.label)
+				}
+				return m, nil
+			}
+			return m, nil
+		case "alt+S": // Shift variant — kill and restart claude in the session (fresh, no history)
 			if m.cursor < len(m.items) && m.items[m.cursor].kind == itemSession {
 				item := m.items[m.cursor]
 				if item.tmuxSession != "" {
