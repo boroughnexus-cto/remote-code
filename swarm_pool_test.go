@@ -663,7 +663,7 @@ func TestPoolLogRequest(t *testing.T) {
 
 	reqID := "test-req-" + fmt.Sprintf("%d", time.Now().UnixNano())
 	pm.logRequest(reqID, "claude-haiku-4-5", "pool-haiku-0", "test prompt", "complete",
-		10, 20, 1500, 900, 0.01, "", "")
+		10, 20, 1500, 900, 0.01, "", "", 0, 0)
 
 	var count int
 	err := database.QueryRow("SELECT COUNT(*) FROM pool_requests WHERE request_id = ?", reqID).Scan(&count)
@@ -702,5 +702,5 @@ func TestPoolLogRequest(t *testing.T) {
 func TestPoolLogRequest_NilDB(t *testing.T) {
 	pm := &PoolManager{db: nil}
 	// Should not panic
-	pm.logRequest("x", "m", "s", "p", "complete", 0, 0, 0, 0, 0, "", "")
+	pm.logRequest("x", "m", "s", "p", "complete", 0, 0, 0, 0, 0, "", "", 0, 0)
 }

@@ -288,6 +288,7 @@ done:
 // logRequestIfPool calls globalPool.logRequest only when pool is non-nil.
 func logRequestIfPool(reqID, model, slotID, prompt, status string, tokensIn, tokensOut, latencyMS, ttftMS int, costUSD float64, errType, errDetail string) {
 	if globalPool != nil {
-		globalPool.logRequest(reqID, model, slotID, prompt, status, tokensIn, tokensOut, latencyMS, ttftMS, costUSD, errType, errDetail)
+		// Direct-API path doesn't observe Anthropic cache fields; pass zeros.
+		globalPool.logRequest(reqID, model, slotID, prompt, status, tokensIn, tokensOut, latencyMS, ttftMS, costUSD, errType, errDetail, 0, 0)
 	}
 }

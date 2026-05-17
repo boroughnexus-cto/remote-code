@@ -64,8 +64,10 @@ type poolEvent struct {
 }
 
 type poolUsage struct {
-	InputTokens  int `json:"input_tokens"`
-	OutputTokens int `json:"output_tokens"`
+	InputTokens              int `json:"input_tokens"`
+	OutputTokens             int `json:"output_tokens"`
+	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+	CacheReadInputTokens     int `json:"cache_read_input_tokens"`
 }
 
 // poolAssistantMessage is the structure inside a poolEvent.Message for assistant events.
@@ -686,7 +688,7 @@ func classifyResultError(ev poolEvent) string {
 }
 
 // logRequest records a pool request in the database.
-func (pm *PoolManager) logRequest(reqID, model, slotID, promptPreview, status string, tokensIn, tokensOut, latencyMS, ttftMS int, costUSD float64, errType, errDetail string) {
+func (pm *PoolManager) logRequest(reqID, model, slotID, promptPreview, status string, tokensIn, tokensOut, latencyMS, ttftMS int, costUSD float64, errType, errDetail string, cacheCreate, cacheRead int) {
 	if pm.db == nil {
 		return
 	}
@@ -696,9 +698,9 @@ func (pm *PoolManager) logRequest(reqID, model, slotID, promptPreview, status st
 		completedAt = &now
 	}
 	_, err := pm.db.Exec(`INSERT INTO pool_requests
-		(request_id, model, slot_id, prompt_preview, tokens_in, tokens_out, cost_usd, latency_ms, ttft_ms, status, error_type, error_detail, completed_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		reqID, model, slotID, truncateStr(promptPreview, 200), tokensIn, tokensOut, costUSD, latencyMS, ttftMS, status, nilIfEmpty(errType), nilIfEmpty(errDetail), completedAt)
+		(request_id, model, slot_id, prompt_preview, tokens_in, tokens_out, cost_usd, latency_ms, ttft_ms, status, error_type, error_detail, completed_at, cache_creation_input_tokens, cache_read_input_tokens)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		reqID, model, slotID, truncateStr(promptPreview, 200), tokensIn, tokensOut, costUSD, latencyMS, ttftMS, status, nilIfEmpty(errType), nilIfEmpty(errDetail), completedAt, cacheCreate, cacheRead)
 	if err != nil {
 		log.Printf("pool: log request error: %v", err)
 	}

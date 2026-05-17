@@ -184,6 +184,122 @@ func rawContentForQuery(messages []oaiMessage) interface{} {
 	return messagesToPrompt(messages)
 }
 
+// cacheableMinChars is the approx character threshold for adding a cache_control
+// breakpoint on a user-content block. Anthropic's minimum cacheable size is
+// ~1024 tokens for Sonnet/Opus and ~2048 for Haiku. We use a conservative
+// ~6000 chars (~1500 tokens) to stay above both.
+const cacheableMinChars = 6000
+
+// buildCachedContent restructures OpenAI messages as Anthropic content blocks
+// with prompt-cache breakpoints on the system prompt and large conversation
+// history. Returns:
+//   - content: either a plain string (no caching applied) or []map[string]interface{}
+//     of text blocks with cache_control markers (ttl=1h to match Claude Code's
+//     existing breakpoints on tools/system)
+//   - prompt: plain-text version of the full prompt (for logging)
+//
+// Caching layout (max 3 of the 4 allowed breakpoints; Claude Code uses 1-2):
+//
+//	block 0: system text + cache_control:1h   (if system message present)
+//	block 1: conversation history + cache_control:1h  (if history >= cacheableMinChars)
+//	block 2: current user message (no cache_control — it's the fresh part)
+func buildCachedContent(messages []oaiMessage) (interface{}, string) {
+	var systemText string
+	var historyParts []string // turn-by-turn before the final user msg
+	var currentUser string
+
+	// Walk messages and split into system, history, and current.
+	lastUserIdx := -1
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == "user" {
+			lastUserIdx = i
+			break
+		}
+	}
+	for i, m := range messages {
+		text := extractTextContent(m.Content)
+		switch m.Role {
+		case "system":
+			if text != "" {
+				if systemText != "" {
+					systemText += "\n\n"
+				}
+				systemText += text
+			}
+		case "user":
+			if i == lastUserIdx {
+				currentUser = text
+			} else {
+				historyParts = append(historyParts, text)
+			}
+		case "assistant":
+			historyParts = append(historyParts, "[Previous assistant response]\n"+text)
+		}
+	}
+
+	historyText := strings.Join(historyParts, "\n\n")
+
+	// Compose plain-text prompt for logging (mirrors messagesToPrompt structure).
+	plainPrompt := messagesToPrompt(messages)
+
+	// Decide whether to add cache breakpoints.
+	wantSystemCache := len(systemText) >= cacheableMinChars
+	wantHistoryCache := len(historyText) >= cacheableMinChars
+
+	// If nothing is cacheable, fall back to a plain string for the user message —
+	// keeps the wire format identical to the pre-caching behaviour.
+	if !wantSystemCache && !wantHistoryCache {
+		if systemText == "" && historyText == "" {
+			return currentUser, plainPrompt
+		}
+		// System or history exists but is too small to cache — just inline them.
+		var sb strings.Builder
+		if systemText != "" {
+			sb.WriteString("[System]\n")
+			sb.WriteString(systemText)
+			sb.WriteString("\n\n")
+		}
+		if historyText != "" {
+			sb.WriteString(historyText)
+			sb.WriteString("\n\n")
+		}
+		sb.WriteString(currentUser)
+		return sb.String(), plainPrompt
+	}
+
+	// Build array content with cache_control breakpoints.
+	cc := map[string]string{"type": "ephemeral", "ttl": "1h"}
+	blocks := make([]map[string]interface{}, 0, 3)
+
+	if systemText != "" {
+		block := map[string]interface{}{
+			"type": "text",
+			"text": "[System]\n" + systemText,
+		}
+		if wantSystemCache {
+			block["cache_control"] = cc
+		}
+		blocks = append(blocks, block)
+	}
+	if historyText != "" {
+		block := map[string]interface{}{
+			"type": "text",
+			"text": historyText,
+		}
+		if wantHistoryCache {
+			block["cache_control"] = cc
+		}
+		blocks = append(blocks, block)
+	}
+	if currentUser != "" {
+		blocks = append(blocks, map[string]interface{}{
+			"type": "text",
+			"text": currentUser,
+		})
+	}
+	return blocks, plainPrompt
+}
+
 // convertToAnthropicContent converts OpenAI-style content blocks to Anthropic format.
 // OpenAI: {"type":"image_url","image_url":{"url":"data:image/jpeg;base64,..."}}
 // Anthropic: {"type":"image","source":{"type":"base64","media_type":"image/jpeg","data":"..."}}
@@ -308,8 +424,7 @@ func handlePoolChatCompletions(w http.ResponseWriter, r *http.Request) {
 		queryContent = rawContentForQuery(req.Messages)
 		prompt = "[vision request]"
 	} else {
-		prompt = messagesToPrompt(req.Messages)
-		queryContent = prompt
+		queryContent, prompt = buildCachedContent(req.Messages)
 	}
 
 	start := time.Now()
@@ -322,7 +437,7 @@ func handlePoolChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// Acquire a pool slot (streaming and non-streaming both use the pool).
 	slot, err := globalPool.Acquire(r.Context(), model)
 	if err != nil {
-		globalPool.logRequest(reqID, model, "", truncateStr(prompt, 200), "error", 0, 0, 0, 0, 0, "pool_exhausted", err.Error())
+		globalPool.logRequest(reqID, model, "", truncateStr(prompt, 200), "error", 0, 0, 0, 0, 0, "pool_exhausted", err.Error(), 0, 0)
 		writeOAIError(w, http.StatusTooManyRequests, "pool_exhausted", "All slots busy for model: "+model)
 		return
 	}
@@ -333,7 +448,7 @@ func handlePoolChatCompletions(w http.ResponseWriter, r *http.Request) {
 		slot.mu.Lock()
 		slot.state = slotDead
 		slot.mu.Unlock()
-		globalPool.logRequest(reqID, model, slot.ID, truncateStr(prompt, 200), "error", 0, 0, 0, 0, 0, "send_failed", err.Error())
+		globalPool.logRequest(reqID, model, slot.ID, truncateStr(prompt, 200), "error", 0, 0, 0, 0, 0, "send_failed", err.Error(), 0, 0)
 		writeOAIError(w, http.StatusInternalServerError, "send_failed", "Failed to send query to slot")
 		return
 	}
@@ -358,7 +473,7 @@ func handleNonStreamingResponse(w http.ResponseWriter, r *http.Request, slot *Po
 			slot.mu.Lock()
 			slot.state = slotDead
 			slot.mu.Unlock()
-			globalPool.logRequest(reqID, model, slot.ID, truncateStr(prompt, 200), "error", 0, 0, int(time.Since(start).Milliseconds()), 0, 0, "read_failed", err.Error())
+			globalPool.logRequest(reqID, model, slot.ID, truncateStr(prompt, 200), "error", 0, 0, int(time.Since(start).Milliseconds()), 0, 0, "read_failed", err.Error(), 0, 0)
 			writeOAIError(w, http.StatusInternalServerError, "read_failed", "Failed reading response")
 			return
 		}
@@ -401,10 +516,12 @@ done:
 	slot.mu.Unlock()
 	globalPool.totalCost.Add(int64(resultEv.CostUSD * 1e6))
 
-	tokensIn, tokensOut := 0, 0
+	tokensIn, tokensOut, cacheCreate, cacheRead := 0, 0, 0, 0
 	if resultEv.Usage != nil {
 		tokensIn = resultEv.Usage.InputTokens
 		tokensOut = resultEv.Usage.OutputTokens
+		cacheCreate = resultEv.Usage.CacheCreationInputTokens
+		cacheRead = resultEv.Usage.CacheReadInputTokens
 	}
 
 	// Handle error result
@@ -416,7 +533,7 @@ done:
 			slot.mu.Unlock()
 		}
 		globalPool.logRequest(reqID, model, slot.ID, truncateStr(prompt, 200), "error", tokensIn, tokensOut,
-			int(latency.Milliseconds()), int(ttft.Milliseconds()), resultEv.CostUSD, "result_error", resultEv.Result)
+			int(latency.Milliseconds()), int(ttft.Milliseconds()), resultEv.CostUSD, "result_error", resultEv.Result, cacheCreate, cacheRead)
 		writeOAIError(w, http.StatusInternalServerError, "model_error", resultEv.Result)
 		return
 	}
@@ -427,7 +544,7 @@ done:
 	}
 
 	globalPool.logRequest(reqID, model, slot.ID, truncateStr(prompt, 200), "complete", tokensIn, tokensOut,
-		int(latency.Milliseconds()), int(ttft.Milliseconds()), resultEv.CostUSD, "", "")
+		int(latency.Milliseconds()), int(ttft.Milliseconds()), resultEv.CostUSD, "", "", cacheCreate, cacheRead)
 
 	resp := oaiChatResponse{
 		ID:      reqID,
@@ -509,7 +626,7 @@ func handleStreamingResponse(w http.ResponseWriter, r *http.Request, slot *PoolS
 			slot.state = slotDead
 			slot.mu.Unlock()
 			globalPool.logRequest(reqID, model, slot.ID, truncateStr(prompt, 200), "error", 0, 0,
-				int(time.Since(start).Milliseconds()), 0, 0, "read_failed", err.Error())
+				int(time.Since(start).Milliseconds()), 0, 0, "read_failed", err.Error(), 0, 0)
 			return
 		}
 
@@ -555,10 +672,12 @@ done:
 	slot.mu.Unlock()
 	globalPool.totalCost.Add(int64(resultEv.CostUSD * 1e6))
 
-	tokensIn, tokensOut := 0, 0
+	tokensIn, tokensOut, cacheCreate, cacheRead := 0, 0, 0, 0
 	if resultEv.Usage != nil {
 		tokensIn = resultEv.Usage.InputTokens
 		tokensOut = resultEv.Usage.OutputTokens
+		cacheCreate = resultEv.Usage.CacheCreationInputTokens
+		cacheRead = resultEv.Usage.CacheReadInputTokens
 	}
 
 	if resultEv.IsError {
@@ -569,10 +688,10 @@ done:
 			slot.mu.Unlock()
 		}
 		globalPool.logRequest(reqID, model, slot.ID, truncateStr(prompt, 200), "error", tokensIn, tokensOut,
-			int(latency.Milliseconds()), int(ttft.Milliseconds()), resultEv.CostUSD, "result_error", resultEv.Result)
+			int(latency.Milliseconds()), int(ttft.Milliseconds()), resultEv.CostUSD, "result_error", resultEv.Result, cacheCreate, cacheRead)
 	} else {
 		globalPool.logRequest(reqID, model, slot.ID, truncateStr(prompt, 200), "complete", tokensIn, tokensOut,
-			int(latency.Milliseconds()), int(ttft.Milliseconds()), resultEv.CostUSD, "", "")
+			int(latency.Milliseconds()), int(ttft.Milliseconds()), resultEv.CostUSD, "", "", cacheCreate, cacheRead)
 	}
 
 	// Final chunk with finish_reason
