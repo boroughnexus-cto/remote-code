@@ -15,20 +15,35 @@ func registerWriteTools(reg *ToolRegistry, svc *Services, enablePoolTools bool) 
 			Name:        "rc_run_task",
 			Description: "[WRITE] Create and start a new Claude Code session in a tmux window.",
 			InputSchema: jsonSchema(map[string]interface{}{
-				"name":      stringProp("Session name (auto-generated if empty)"),
-				"directory": stringProp("Working directory for the session (default: current directory)"),
-				"mission":   stringProp("Optional mission statement (1-3 sentences describing session purpose)"),
+				"name":         stringProp("Session name (auto-generated if empty)"),
+				"directory":    stringProp("Working directory for the session (default: current directory)"),
+				"mission":      stringProp("Optional mission statement (1-3 sentences describing session purpose)"),
+				"context_id":   stringProp("Optional tkn-context ID to attach to the session"),
+				"context_name": stringProp("Optional human-readable context label (display only — paired with context_id)"),
+				"model":        stringProp("Optional model name or alias (e.g. 'sonnet', 'opus', 'claude-sonnet-4-6'). Defaults to system setting."),
 			}, nil),
 		},
 		func(ctx context.Context, args map[string]interface{}) (interface{}, error) {
 			name := getStringArg(args, "name", "")
 			directory := getStringArg(args, "directory", "")
+			model := getStringArg(args, "model", "")
+
 			missionStr := getStringArg(args, "mission", "")
 			var mission *string
 			if missionStr != "" {
 				mission = &missionStr
 			}
-			return svc.RunTask(ctx, name, directory, mission)
+			ctxIDStr := getStringArg(args, "context_id", "")
+			var contextID *string
+			if ctxIDStr != "" {
+				contextID = &ctxIDStr
+			}
+			ctxNameStr := getStringArg(args, "context_name", "")
+			var contextName *string
+			if ctxNameStr != "" {
+				contextName = &ctxNameStr
+			}
+			return svc.RunTask(ctx, name, directory, contextID, contextName, mission, model)
 		},
 	)
 

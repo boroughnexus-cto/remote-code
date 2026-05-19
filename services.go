@@ -86,14 +86,17 @@ func (s *Services) GetExecution(ctx context.Context, id string) (*Session, error
 	return getSession(ctx, id)
 }
 
-func (s *Services) RunTask(ctx context.Context, name, directory string, mission *string) (*Session, error) {
+// RunTask creates and starts a new session.
+// contextID, contextName, and mission are optional (pass nil/empty to skip).
+// model is optional (empty string falls back to the default in spawnSession).
+func (s *Services) RunTask(ctx context.Context, name, directory string, contextID, contextName, mission *string, model string) (*Session, error) {
 	if name == "" {
 		name = "session-" + generateID()
 	}
 	if directory == "" {
 		directory = "."
 	}
-	return spawnSession(ctx, name, directory, nil, nil, mission, "")
+	return spawnSession(ctx, name, directory, contextID, contextName, mission, model)
 }
 
 func (s *Services) UpdateSessionMission(ctx context.Context, id, mission string) error {
