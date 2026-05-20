@@ -42,7 +42,7 @@ func TestHandleListModels_WithPool(t *testing.T) {
 	oldPool := globalPool
 	globalPool = &PoolManager{
 		config: PoolConfig{
-			Models: []string{"claude-haiku-4-5", "claude-sonnet-4-6"},
+			Models: []string{"claude-haiku-4-5", "claude-opus-4-6[1m]"},
 		},
 	}
 	defer func() { globalPool = oldPool }()
@@ -59,12 +59,15 @@ func TestHandleListModels_WithPool(t *testing.T) {
 	if resp.Data[0].OwnedBy != "anthropic" {
 		t.Errorf("owned_by = %q", resp.Data[0].OwnedBy)
 	}
-	// Verify context_length is populated from modelContextLengths
+	// Verify context_length is populated from modelContextLengths.
+	// Note: pre-2026-05-20 this test asserted sonnet=1M, which was wrong —
+	// Claude Code's modelUsage.contextWindow shows sonnet-4-6 serves 200K
+	// (verified by opus_1m_probe_test). Only claude-opus-4-6[1m] is truly 1M.
 	if resp.Data[0].ContextLength != 200000 {
 		t.Errorf("haiku context_length = %d, want 200000", resp.Data[0].ContextLength)
 	}
 	if resp.Data[1].ContextLength != 1000000 {
-		t.Errorf("sonnet context_length = %d, want 1000000", resp.Data[1].ContextLength)
+		t.Errorf("opus[1m] context_length = %d, want 1000000", resp.Data[1].ContextLength)
 	}
 }
 

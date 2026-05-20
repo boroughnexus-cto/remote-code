@@ -228,8 +228,19 @@ func TestParseInt(t *testing.T) {
 
 func TestDefaultPoolConfig(t *testing.T) {
 	c := DefaultPoolConfig()
-	if len(c.Models) != 3 {
-		t.Errorf("expected 3 default models, got %d", len(c.Models))
+	// Default Models: haiku, sonnet, opus, opus[1m] (added 2026-05-20)
+	if len(c.Models) != 4 {
+		t.Errorf("expected 4 default models, got %d", len(c.Models))
+	}
+	// Sanity-check that the 1M opus variant is present
+	found1M := false
+	for _, m := range c.Models {
+		if m == "claude-opus-4-6[1m]" {
+			found1M = true
+		}
+	}
+	if !found1M {
+		t.Errorf("expected claude-opus-4-6[1m] in default Models, got %v", c.Models)
 	}
 	if c.SlotsPerModel != 2 {
 		t.Errorf("expected 2 slots per model, got %d", c.SlotsPerModel)
