@@ -97,17 +97,24 @@ type oaiErrorDetail struct {
 
 // ─── Model resolution ────────────────────────────────────────────────────────
 
+// modelContextLengths advertises the input context window for each model via
+// GET /v1/models. Values reflect what Claude Code actually serves (verified by
+// inspecting modelUsage.contextWindow in result events) — not what Anthropic's
+// raw API may theoretically support.
 var modelContextLengths = map[string]int{
-	"claude-haiku-4-5":  200000,
-	"claude-sonnet-4-6": 1000000,
-	"claude-opus-4-6":   1000000,
+	"claude-haiku-4-5":     200000,
+	"claude-sonnet-4-6":    200000,
+	"claude-opus-4-6":      200000,
+	"claude-opus-4-6[1m]":  1000000,
 }
 
 var modelAliases = map[string]string{
 	// Short names
-	"haiku":  "claude-haiku-4-5",
-	"sonnet": "claude-sonnet-4-6",
-	"opus":   "claude-opus-4-6",
+	"haiku":   "claude-haiku-4-5",
+	"sonnet":  "claude-sonnet-4-6",
+	"opus":    "claude-opus-4-6",
+	"opus1m":  "claude-opus-4-6[1m]",
+	"opus-1m": "claude-opus-4-6[1m]",
 
 	// OpenAI compatibility
 	"gpt-4o-mini": "claude-haiku-4-5",
@@ -115,9 +122,10 @@ var modelAliases = map[string]string{
 	"gpt-4":       "claude-opus-4-6",
 
 	// Full names pass through
-	"claude-haiku-4-5":  "claude-haiku-4-5",
-	"claude-sonnet-4-6": "claude-sonnet-4-6",
-	"claude-opus-4-6":   "claude-opus-4-6",
+	"claude-haiku-4-5":    "claude-haiku-4-5",
+	"claude-sonnet-4-6":   "claude-sonnet-4-6",
+	"claude-opus-4-6":     "claude-opus-4-6",
+	"claude-opus-4-6[1m]": "claude-opus-4-6[1m]",
 }
 
 func resolveModel(name string) (string, bool) {

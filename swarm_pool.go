@@ -205,7 +205,7 @@ func (c PoolConfig) slotsForModel(model string) int {
 // DefaultPoolConfig returns sensible defaults.
 func DefaultPoolConfig() PoolConfig {
 	return PoolConfig{
-		Models:         []string{"claude-haiku-4-5", "claude-sonnet-4-6", "claude-opus-4-6"},
+		Models:         []string{"claude-haiku-4-5", "claude-sonnet-4-6", "claude-opus-4-6", "claude-opus-4-6[1m]"},
 		SlotsPerModel:  2,
 		RequestTimeout: 5 * time.Minute,
 		MaxConsecErrs:  3,
@@ -783,12 +783,22 @@ func parseInt(s string) (int, error) {
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 func modelShortName(model string) string {
+	is1M := strings.Contains(model, "[1m]") || strings.HasSuffix(model, "-1m")
 	switch {
 	case strings.Contains(model, "haiku"):
+		if is1M {
+			return "haiku1m"
+		}
 		return "haiku"
 	case strings.Contains(model, "sonnet"):
+		if is1M {
+			return "sonnet1m"
+		}
 		return "sonnet"
 	case strings.Contains(model, "opus"):
+		if is1M {
+			return "opus1m"
+		}
 		return "opus"
 	}
 	return model
